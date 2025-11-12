@@ -1,6 +1,7 @@
 import logging
 from collections import Counter
 from dataclasses import dataclass, fields, field
+from typing import Self
 
 import numpy as np
 import pandas as pd
@@ -12,12 +13,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FeatProcParams:
+    use_cyclical_dates: bool = True
+
+    use_categorical_dates: bool = True
+
+    use_continuous_amount: bool = True
+
+    use_categorical_amount: bool = True
     k_top: int = 500
     n_bins: int = 100
-    use_cyclical_dates: bool = True
-    use_categorical_dates: bool = True
-    use_continuous_amount: bool = True
-    use_categorical_amount: bool = True
+
 
     def is_nop(self) -> bool:
         return all(
@@ -25,6 +30,15 @@ class FeatProcParams:
             for f in fields(self)
             if f.name.startswith("use_") and f.type == bool
         )
+
+    @classmethod
+    def NOP(cls) -> Self:
+        kwargs = {
+            f.name: False
+            for f in fields(cls)
+            if f.name.startswith("use_") and f.type == bool
+        }
+        return cls(**kwargs)
 
 
 @dataclass(frozen=True)
