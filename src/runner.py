@@ -3,7 +3,7 @@ from typing import Self, Generator
 
 import pandas as pd
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.neural_network import MLPClassifier
 from torch import nn
 from torch.utils.data import DataLoader
@@ -439,7 +439,7 @@ class ExpRunner:
 
         results = {}
         for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
-            train_feature_set, test_feature_set, processor = self.build_data_for_pytorch(df_train, df_test)
+            train_feature_set, test_feature_set, processor = self.build_data_for_pytorch(sub_train_df, df_test)
             res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor)
             d = {
                 **res,
