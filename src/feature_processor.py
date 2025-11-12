@@ -11,6 +11,30 @@ from data import FeatureSet
 
 logger = logging.getLogger(__name__)
 
+# In src/feature_processor.py
+from dataclasses import dataclass, field
+
+
+# ... (FeatProcParams is already here) ...
+
+@dataclass(frozen=True)
+class CategoricalFeatureConfig:
+    """Holds the config for a single categorical feature."""
+    vocab_size: int
+    embedding_dim: int
+
+@dataclass
+class FeatureMetadata:
+    """
+    A single object to hold all metadata about the generated features.
+    """
+    cyclical_cols: list[str] = field(default_factory=list)
+    continuous_scalable_cols: list[str] = field(default_factory=list)
+
+    # This is the change:
+    # It maps a feature name (e.g., 'cents_id') to its config
+    categorical_features: dict[str, CategoricalFeatureConfig] = field(default_factory=dict)
+
 @dataclass
 class FeatProcParams:
     use_cyclical_dates: bool = True
