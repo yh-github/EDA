@@ -1,11 +1,12 @@
 import logging
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 
 import numpy as np
 import pandas as pd
 
 from config import TWO_PI, FieldConfig
+from data import FeatureSet
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,16 @@ class FeatProcParams:
             if f.name.startswith("use_") and f.type == bool
         )
 
+
+@dataclass(frozen=True)
+class HybridModelConfig:
+    """
+    Holds all feature-related parameters for initializing the HybridModel.
+    """
+    text_embed_dim: int = 0
+    continuous_feat_dim: int = 0
+    categorical_vocab_sizes: dict[str, int] = field(default_factory=dict)
+    embedding_dims: dict[str, int] = field(default_factory=dict)
 
 class HybridFeatureProcessor:
     """
@@ -236,6 +247,41 @@ class HybridFeatureProcessor:
             return self.vocab_map[bin_name]
         else:
             return self.unknown_token_id
+
+    def build_model_config(
+        self,
+        train_features: FeatureSet
+    ) -> HybridModelConfig:
+        """
+        Dynamically builds the HybridModelConfig dataclass
+        based on the features that were actually generated.
+        """
+
+        # 1. Get dimensions for text and continuous features
+        text_embed_dim = train_features.X_text.shape[1]
+        continuous_feat_dim = train_features.X_continuous.shape[1]
+
+        # 2. DYNAMICALLY build categorical config
+        categorical_vocab_sizes = {}
+        embedding_dims = {}
+
+        if self.use_categorical_dates:
+            categorical_vocab_sizes['day_of_week_id'] = 7  # 0-6
+            categorical_vocab_sizes['day_of_month_id'] = 31  # 0-30
+            embedding_dims['day_of_week_id'] = 16
+            embedding_dims['day_of_month_id'] = 32
+
+        if self.use_categorical_amount:
+            categorical_vocab_sizes['amount_token_id'] = self.vocab_size
+            embedding_dims['amount_token_id'] = 64
+
+        # 3. Return a single config dataclass
+        return HybridModelConfig(
+            text_embed_dim=text_embed_dim,
+            continuous_feat_dim=continuous_feat_dim,
+            categorical_vocab_sizes=categorical_vocab_sizes,
+            embedding_dims=embedding_dims
+        )
 
 
 # ---

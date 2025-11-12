@@ -8,13 +8,14 @@ from sklearn.neural_network import MLPClassifier
 from torch import nn
 from torch.utils.data import DataLoader
 
-from classifier import train_model, evaluate_model, HybridModel
+from classifier import HybridModel
 from data import TransactionDataset, FeatureSet, TrainingSample
 from feature_processor import HybridFeatureProcessor, check_unknown_rate, FeatProcParams
 from config import *
 from embedder import EmbeddingService
 import logging
 from config import EmbModel
+from trainer import train_model, evaluate_model
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +358,6 @@ class ExpRunner:
         LEARNING_RATE = 1e-3
 
         # --- Create DataLoaders ---
-        # The __init__ is now simpler
         train_dataset = TransactionDataset(train_features)
         test_dataset = TransactionDataset(test_features)
 
@@ -372,27 +372,10 @@ class ExpRunner:
         # --- Instantiate the Model ---
 
         # Get dimensions from the FeatureSet attributes
-        text_embed_dim = train_features.X_text.shape[1]
-        continuous_feat_dim = train_features.X_continuous.shape[1]
-
-        # Get vocab sizes from the processor (unchanged)
-        categorical_vocab_sizes = {
-            'day_of_week': 7,  # 0-6
-            'day_of_month': 31,  # 0-30
-            'amount_token': processor.vocab_size
-        }
-
-        embedding_dims = {
-            'day_of_week': 16,
-            'day_of_month': 32,
-            'amount_token': 64
-        }
+        model_config = processor.build_model_config(train_features)
 
         model = HybridModel(
-            text_embed_dim=text_embed_dim,
-            continuous_feat_dim=continuous_feat_dim,
-            categorical_vocab_sizes=categorical_vocab_sizes,
-            embedding_dims=embedding_dims,
+            config=model_config,
             mlp_hidden_layers=[256, 128],
             dropout_rate=0.4
         ).to(DEVICE)
