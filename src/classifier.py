@@ -2,100 +2,112 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 
 class HybridModel(nn.Module):
     """
-    A PyTorch classifier that combines pre-computed text embeddings,
-    continuous numerical features, and categorical features (via nn.Embedding).
+    A PyTorch classifier that is "ablation-aware."
+    It can dynamically handle any combination of text, continuous,
+    and categorical features.
     """
 
     def __init__(self,
-                 # 1. Text Embedding Config
+                 # Dims for active features
                  text_embed_dim: int,
-
-                 # 2. Continuous Features Config
                  continuous_feat_dim: int,
 
-                 # 3. Categorical Features Config (Vocab sizes and embedding dims)
+                 # Config for categorical (can be empty)
                  categorical_vocab_sizes: dict[str, int],
                  embedding_dims: dict[str, int],
 
-                 # 4. MLP (Classifier Head) Config
+                 # MLP (Classifier Head) Config
                  mlp_hidden_layers: list[int] = [128, 64],
                  dropout_rate: float = 0.3):
 
         super().__init__()
 
+        # --- Store which features are active ---
+        # We check if the provided dimensions are greater than 0
+        self.use_text = text_embed_dim > 0
+        self.use_continuous = continuous_feat_dim > 0
+        self.use_categorical = len(categorical_vocab_sizes) > 0
+
         self.categorical_feature_names = list(categorical_vocab_sizes.keys())
 
-        # --- 1. Embedding Layers for Categorical Features ---
-        self.embedding_layers = nn.ModuleDict()
-        total_categorical_embed_dim = 0
+        total_input_dim = 0
 
-        for name, vocab_size in categorical_vocab_sizes.items():
-            embed_dim = embedding_dims.get(name, 16)  # Default to 16 if not specified
-            self.embedding_layers[name] = nn.Embedding(vocab_size, embed_dim)
-            total_categorical_embed_dim += embed_dim
+        # --- 1. Text Features ---
+        if self.use_text:
+            total_input_dim += text_embed_dim
+
+        # --- 2. Continuous Features ---
+        if self.use_continuous:
+            total_input_dim += continuous_feat_dim
+
+        # --- 3. Categorical Features ---
+        total_categorical_embed_dim = 0
+        if self.use_categorical:
+            self.embedding_layers = nn.ModuleDict()
+            for name, vocab_size in categorical_vocab_sizes.items():
+                embed_dim = embedding_dims.get(name, 16)  # Default dim
+                self.embedding_layers[name] = nn.Embedding(vocab_size, embed_dim)
+                total_categorical_embed_dim += embed_dim
+            total_input_dim += total_categorical_embed_dim
 
         print(
-            f"Created {len(self.embedding_layers)} embedding layers. Total categorical embed dim: {total_categorical_embed_dim}")
-
-        # --- 2. Calculate Total Input Dimension for the MLP ---
-        total_input_dim = text_embed_dim + continuous_feat_dim + total_categorical_embed_dim
+            f"Model Init: use_text={self.use_text}, use_continuous={self.use_continuous}, use_categorical={self.use_categorical}")
         print(f"Total input dim to MLP: {total_input_dim}")
 
-        # --- 3. Classifier Head (MLP) ---
+        if total_input_dim == 0:
+            raise ValueError("No features are enabled. Model cannot be built.")
+
+        # --- 4. Classifier Head (MLP) ---
         layer_dims = [total_input_dim] + mlp_hidden_layers
 
         mlp_layers = []
         for i in range(len(layer_dims) - 1):
             mlp_layers.append(nn.Linear(layer_dims[i], layer_dims[i + 1]))
             mlp_layers.append(nn.ReLU())
-            mlp_layers.append(nn.BatchNorm1d(layer_dims[i + 1]))  # BatchNorm is very helpful
+            mlp_layers.append(nn.BatchNorm1d(layer_dims[i + 1]))
             mlp_layers.append(nn.Dropout(dropout_rate))
 
-        # Add the final output layer (1 logit for binary classification)
         mlp_layers.append(nn.Linear(layer_dims[-1], 1))
-
         self.mlp = nn.Sequential(*mlp_layers)
 
     def forward(self,
                 x_text: torch.Tensor,
                 x_continuous: torch.Tensor,
                 x_categorical: torch.Tensor) -> torch.Tensor:
-        """
-        Defines the forward pass.
 
-        :param x_text: (batch_size, text_embed_dim) - From EmbeddingService
-        :param x_continuous: (batch_size, continuous_feat_dim) - Cyclical dates, log_amount, etc.
-        :param x_categorical: (batch_size, num_categorical_features) - Integer IDs
-        :return: (batch_size,) - Raw logits
-        """
+        # Create a list to hold all active feature tensors
+        active_features = []
 
-        # --- 1. Process Categorical Features ---
-        # Look up embeddings for each categorical feature
-        embedded_cats = []
-        for i, name in enumerate(self.categorical_feature_names):
-            # Get the i-th column of categorical IDs
-            cat_ids = x_categorical[:, i]
-            embedded_cats.append(self.embedding_layers[name](cat_ids))
+        # --- 1. Add Text Features (if active) ---
+        if self.use_text:
+            active_features.append(x_text)
 
-        # Concatenate all looked-up embeddings
-        all_embedded_cats = torch.cat(embedded_cats, dim=1)  # (batch_size, total_categorical_embed_dim)
+        # --- 2. Add Continuous Features (if active) ---
+        if self.use_continuous:
+            active_features.append(x_continuous)
 
-        # --- 2. Combine All Feature Types ---
-        combined_features = torch.cat([
-            x_text,
-            x_continuous,
-            all_embedded_cats
-        ], dim=1)  # (batch_size, total_input_dim)
+        # --- 3. Process and Add Categorical Features (if active) ---
+        # This check prevents the IndexError
+        if self.use_categorical:
+            embedded_cats = []
+            for i, name in enumerate(self.categorical_feature_names):
+                cat_ids = x_categorical[:, i]
+                embedded_cats.append(self.embedding_layers[name](cat_ids))
 
-        # --- 3. Pass through Classifier Head ---
+            all_embedded_cats = torch.cat(embedded_cats, dim=1)
+            active_features.append(all_embedded_cats)
+
+        # --- 4. Combine All Active Features ---
+        combined_features = torch.cat(active_features, dim=1)
+
+        # --- 5. Pass through Classifier Head ---
         logits = self.mlp(combined_features)
 
-        # Squeeze to remove the last dimension (from [batch_size, 1] to [batch_size])
         return logits.squeeze(-1)
 
 
@@ -152,7 +164,6 @@ def evaluate_model(model: HybridModel,
     with torch.no_grad():
         # 'batch' is also a TrainingSample object here
         for batch in test_loader:
-            # --- THIS IS THE ONLY CHANGE ---
             x_text = batch.x_text.to(device)
             x_continuous = batch.x_continuous.to(device)
             x_categorical = batch.x_categorical.to(device)
