@@ -9,7 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from classifier import train_model, evaluate_model, HybridModel
-from data import TransactionDataset, FeatureSet
+from data import TransactionDataset, FeatureSet, TrainingSample
 from feature_processor import HybridFeatureProcessor, check_unknown_rate, FeatProcParams
 from config import *
 from embedder import EmbeddingService
@@ -350,21 +350,26 @@ class ExpRunner:
        test_features: FeatureSet,
        processor: HybridFeatureProcessor
     ):
-        # --- 1. Hyperparameters (tune) ---
+        # --- Hyperparameters (tune) ---
         DEVICE = get_device()
         NUM_EPOCHS = 10
         BATCH_SIZE = 256
         LEARNING_RATE = 1e-3
 
-        # --- 2. Create DataLoaders ---
+        # --- Create DataLoaders ---
         # The __init__ is now simpler
         train_dataset = TransactionDataset(train_features)
         test_dataset = TransactionDataset(test_features)
 
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        def dataloader(dataset, shuffle:bool):
+            return DataLoader(
+                dataset, batch_size=BATCH_SIZE, shuffle=shuffle, collate_fn=TrainingSample.collate_fn
+            )
 
-        # --- 3. Instantiate the Model ---
+        train_loader = dataloader(train_dataset, shuffle=True)
+        test_loader = dataloader(test_dataset, shuffle=False)
+
+        # --- Instantiate the Model ---
 
         # Get dimensions from the FeatureSet attributes
         text_embed_dim = train_features.X_text.shape[1]
@@ -392,7 +397,7 @@ class ExpRunner:
             dropout_rate=0.4
         ).to(DEVICE)
 
-        # --- 4. Setup Optimizer and Loss ---
+        # --- Setup Optimizer and Loss ---
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -428,3 +433,22 @@ class ExpRunner:
             **final_metrics_rounded,
             "embedder.model_name": str(self.emb_params.model_name)
         }
+
+    def run_torch(self, fractions: list[float]) -> dict[int, dict]:
+        df_train, df_test = self.split_data_by_group()
+
+        results = {}
+        for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
+            train_feature_set, test_feature_set, processor = self.build_data_for_pytorch(df_train, df_test)
+            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor)
+            d = {
+                **res,
+                "train_frac": r(frac),
+                "train_size": len(sub_train_df),
+                "test_size": len(df_test),
+                "train_accounts": sub_train_df[self.field_config.accountId].nunique(),
+                "test_accounts": df_test[self.field_config.accountId].nunique()
+            }
+            logger.info(d)
+            results[len(sub_train_df)] = d
+        return results

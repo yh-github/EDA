@@ -1,4 +1,6 @@
 import logging
+from typing import Self
+
 import numpy as np
 import pandas as pd
 import torch
@@ -34,6 +36,28 @@ class TrainingSample:
     x_categorical: torch.Tensor
     y: torch.Tensor
 
+    @classmethod
+    def collate_fn(cls, batch: list[Self]) -> Self:
+        """
+        Custom collate function to batch a list of TrainingSample dataclasses.
+        This tells the DataLoader how to combine the individual samples.
+        """
+
+        # Use torch.stack to combine the tensors from each sample.
+        # dim=0 creates the batch dimension.
+        batched_x_text = torch.stack([s.x_text for s in batch], dim=0)
+        batched_x_continuous = torch.stack([s.x_continuous for s in batch], dim=0)
+        batched_x_categorical = torch.stack([s.x_categorical for s in batch], dim=0)
+        batched_y = torch.stack([s.y for s in batch], dim=0)
+
+        # Return a single TrainingSample containing the batched data
+        return TrainingSample(
+            x_text=batched_x_text,
+            x_continuous=batched_x_continuous,
+            x_categorical=batched_x_categorical,
+            y=batched_y
+        )
+
 
 @dataclass(frozen=True)
 class FeatureSet:
@@ -44,7 +68,6 @@ class FeatureSet:
     X_continuous: np.ndarray
     X_categorical: np.ndarray
     y: np.ndarray
-
 
 class TransactionDataset(Dataset):
     """
