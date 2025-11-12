@@ -1,0 +1,302 @@
+import logging
+from collections import Counter
+from dataclasses import dataclass, fields
+
+import numpy as np
+import pandas as pd
+
+from config import TWO_PI, FieldConfig
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class FeatProcParams:
+    k_top: int = 500
+    n_bins: int = 100
+    use_cyclical_dates: bool = True
+    use_categorical_dates: bool = True
+    use_continuous_amount: bool = True
+    use_categorical_amount: bool = True
+
+    def is_nop(self) -> bool:
+        return all(
+            not getattr(self, f.name)
+            for f in fields(self)
+            if f.name.startswith("use_") and f.type == bool
+        )
+
+
+class HybridFeatureProcessor:
+    """
+    This class takes a raw DataFrame with 'date' and 'amount' columns
+    and engineers all the "smart" features we designed.
+
+    It is built to be "fit" on a training set and then "transform"
+    any new data, ensuring all rules are consistent.
+    """
+
+    @staticmethod
+    def create(params: FeatProcParams, fields_config: FieldConfig = FieldConfig()):
+        return HybridFeatureProcessor(fields_config=fields_config, is_nop=params.is_nop(), **params.__dict__)
+
+    def is_nop(self) -> bool:
+        return self._is_nop
+
+    def __init__(self,
+                 is_nop: bool,
+                 k_top: int,
+                 n_bins: int,
+                 use_cyclical_dates: bool,
+                 use_categorical_dates: bool,
+                 use_continuous_amount: bool,
+                 use_categorical_amount: bool,
+                 fields_config: FieldConfig):
+        """
+        Initialize the processor.
+
+        :param k_top: How many "magic number" amounts to find (e.g., Top 500).
+        :param n_bins: How many "fallback" bins to create for all other amounts.
+        :param use_cyclical_dates: (bool) Create sin/cos features for dates.
+        :param use_categorical_dates: (bool) Create _id features for date embeddings.
+        :param use_continuous_amount: (bool) Create is_positive & log_abs_amount.
+        :param use_categorical_amount: (bool) Create amount_token_id (magic/bins).
+        """
+        self._is_nop = is_nop
+        self.fields_config = fields_config
+
+        # Store parameters
+        self.k_top = k_top
+        self.n_bins = n_bins
+
+        # Store ablation flags
+        self.use_cyclical_dates = use_cyclical_dates
+        self.use_categorical_dates = use_categorical_dates
+        self.use_continuous_amount = use_continuous_amount
+        self.use_categorical_amount = use_categorical_amount
+
+        # These will be "learned" during .fit()
+        self.top_k_amounts: set[float] = set()
+        self.bin_edges: np.ndarray | None = None
+        self.vocab_map: dict[str | float, int] = {}
+        self.vocab_size: int = 0
+        self.magic_number_cents_distribution: Counter = Counter()
+
+        # Store vocab IDs for health checks
+        self.unknown_token_id: int | None = None
+        self.top_k_token_ids: set[int] = set()
+        self.bin_token_ids: set[int] = set()
+
+    def fit(self, df: pd.DataFrame):
+        """
+        Learns all the "rules" from the training data based on enabled features.
+        """
+        amount_col = self.fields_config.amount
+        logger.info(f"Fitting processor on {len(df)} rows...")
+
+        # --- 1. Learn from 'amount' (if enabled) ---
+        if self.use_categorical_amount:
+            logger.info("Fitting categorical amount features...")
+            top_k_series = df[amount_col].value_counts().head(self.k_top).index
+            self.top_k_amounts = set(top_k_series)
+
+            # --- Cents Distribution Analysis ---
+            self.magic_number_cents_distribution = Counter()
+            for amount in self.top_k_amounts:
+                cents = int(round(abs(amount) * 100)) % 100
+                self.magic_number_cents_distribution[cents] += 1
+
+            logger.info("--- Magic Number Cents Analysis (Top 10) ---")
+            for cents, count in self.magic_number_cents_distribution.most_common(10):
+                 logger.info(f"  {cents}: {count}")
+
+
+            # Create the fallback data (all amounts NOT in the Top-K)
+            fallback_amounts = df[~df[amount_col].isin(self.top_k_amounts)][amount_col]
+
+            if not fallback_amounts.empty:
+                log_abs_fallback = np.log(np.abs(fallback_amounts) + 1)
+                quantiles = np.linspace(0, 1, self.n_bins + 1)
+                all_bins = log_abs_fallback.quantile(quantiles).values
+                self.bin_edges = np.unique(all_bins)
+
+                if len(self.bin_edges) < 2:
+                    self.bin_edges = np.array([-np.inf, np.inf])
+            else:
+                self.bin_edges = np.array([-np.inf, np.inf])
+
+            # --- 2. Build the Amount "Vocabulary" ---
+            self.vocab_map = {}
+            vocab_id_counter = 0
+
+            self.vocab_map['[PAD]'] = vocab_id_counter
+            vocab_id_counter += 1
+
+            self.vocab_map['[UNKNOWN]'] = vocab_id_counter
+            self.unknown_token_id = vocab_id_counter
+            vocab_id_counter += 1
+
+            self.top_k_token_ids.clear()
+            for amount in self.top_k_amounts:
+                self.vocab_map[amount] = vocab_id_counter
+                self.top_k_token_ids.add(vocab_id_counter)
+                vocab_id_counter += 1
+
+            self.bin_token_ids.clear()
+            # Check for valid bin_edges
+            if self.bin_edges is not None:
+                for i in range(len(self.bin_edges) - 1):
+                    bin_name = f"log_bin_{i}"
+                    self.vocab_map[bin_name] = vocab_id_counter
+                    self.bin_token_ids.add(vocab_id_counter)
+                    vocab_id_counter += 1
+
+            self.vocab_size = len(self.vocab_map)
+
+            logger.info(f"Fit complete. Found {len(self.top_k_amounts)} magic numbers.")
+            bin_count = len(self.bin_edges) - 1 if self.bin_edges is not None else 0
+            logger.info(f"Created {bin_count} fallback bins.")
+            logger.info(f"Total Amount Vocabulary size: {self.vocab_size}")
+
+        else:
+            logger.info("Categorical amount feature is disabled. Skipping vocab fit.")
+
+    def transform(self, df: pd.DataFrame, date_col='date', amount_col='amount') -> pd.DataFrame:
+        """
+        Applies the learned rules to transform a DataFrame based on enabled features.
+        """
+        logger.info(f"Transforming {len(df)} rows...")
+
+        features = pd.DataFrame(index=df.index)
+
+        # --- 1. Date Features ---
+        if self.use_cyclical_dates or self.use_categorical_dates:
+            try:
+                dates = pd.to_datetime(df[date_col], format='%m/%d/%Y %H:%M:%S')
+            except ValueError:
+                dates = pd.to_datetime(df[date_col], errors='coerce')
+
+            if dates.isnull().any():
+                dates = dates.fillna(pd.Timestamp.now())
+
+            day_of_week_raw = dates.dt.dayofweek  # 0=Monday, 6=Sunday
+            day_of_month_raw = dates.dt.day  # 1-31
+
+            if self.use_cyclical_dates:
+                # Use "smart" N for day_of_month
+                days_in_month = dates.dt.days_in_month
+                features['day_of_week_sin'] = np.sin(day_of_week_raw * (TWO_PI / 7))
+                features['day_of_week_cos'] = np.cos(day_of_week_raw * (TWO_PI / 7))
+                features['day_of_month_sin'] = np.sin(day_of_month_raw * (TWO_PI / days_in_month))
+                features['day_of_month_cos'] = np.cos(day_of_month_raw * (TWO_PI / days_in_month))
+
+                # 14-day cycle
+                epoch_days = (dates - pd.Timestamp("2000-01-01")).dt.days
+                raw_cycle_day_14 = epoch_days % 14
+                features['day_of_14_cycle_sin'] = np.sin(raw_cycle_day_14 * (TWO_PI / 14))
+                features['day_of_14_cycle_cos'] = np.cos(raw_cycle_day_14 * (TWO_PI / 14))
+
+            if self.use_categorical_dates:
+                features['day_of_week_id'] = day_of_week_raw
+                features['day_of_month_id'] = day_of_month_raw - 1  # 1-31 -> 0-30
+
+        # --- 2. Amount Features ---
+        if self.use_continuous_amount:
+            features['is_positive'] = (df[amount_col] > 0).astype(int)
+            features['log_abs_amount'] = np.log(np.abs(df[amount_col]) + 1)
+
+        if self.use_categorical_amount:
+            if not self.vocab_map:
+                raise RuntimeError(
+                    "Processor has not been fitted, but 'use_categorical_amount' is True. Call .fit() first.")
+            features['amount_token_id'] = df[amount_col].apply(self._tokenize_amount)
+
+        logger.info("Transform complete.")
+        return features
+
+    def _tokenize_amount(self, amount: float) -> int:
+        """Helper function to find the correct token ID for an amount."""
+
+        if self.unknown_token_id is None or self.bin_edges is None:
+            raise RuntimeError("Processor has not been fitted. Call .fit() first.")
+
+        if amount in self.top_k_amounts:
+            return self.vocab_map[amount]
+
+        log_val = np.log(np.abs(amount) + 1)
+        bin_index = np.digitize(log_val, self.bin_edges) - 1
+
+        if bin_index < 0:
+            bin_index = 0
+        elif bin_index >= len(self.bin_edges) - 1:
+            bin_index = len(self.bin_edges) - 2
+
+        bin_name = f"log_bin_{bin_index}"
+
+        if bin_name in self.vocab_map:
+            return self.vocab_map[bin_name]
+        else:
+            return self.unknown_token_id
+
+
+# ---
+# Health Check Utilities
+# ---
+
+def check_unknown_rate(
+        processor: HybridFeatureProcessor,
+        features: pd.DataFrame,
+        name: str
+) -> dict[str, int | float]:
+    """Calculates and prints the [UNKNOWN] token rate."""
+    if 'amount_token_id' not in features.columns:
+        logger.info(f"\n{name}: Categorical amount feature not enabled. Skipping.")
+        return {}
+
+    unknown_id = processor.unknown_token_id
+    total_rows = len(features)
+    unknown_count = (features['amount_token_id'] == unknown_id).sum()
+    unknown_pct = (unknown_count / total_rows) * 100 if total_rows > 0 else 0
+
+    logger.info(f"\n{name} [UNKNOWN] Token Rate:")
+    logger.info(f"  {unknown_count} of {total_rows} rows mapped to [UNKNOWN] ({unknown_pct:.2f}%)")
+
+    if unknown_pct > 10:
+        logger.warning(f"  **WARNING:** High [UNKNOWN] rate.")
+    else:
+        logger.info(f"  **INFO:** Low [UNKNOWN] rate. This is good!")
+
+    return {'count': unknown_count, 'total': total_rows, 'percent': unknown_pct}
+
+
+def check_token_distribution(
+        processor: HybridFeatureProcessor,
+        features: pd.DataFrame,
+        name: str
+) -> dict[str, dict[str, int | float]]:
+    """Shows how the data was categorized."""
+    if 'amount_token_id' not in features.columns:
+        logger.info(f"\n{name}: Categorical amount feature not enabled. Skipping.")
+        return {}
+
+    logger.info(f"\n{name} Token Distribution:")
+    counts = Counter(features['amount_token_id'])
+    total_rows = len(features)
+
+    magic_count = sum(counts[i] for i in processor.top_k_token_ids if i in counts)
+    bin_count = sum(counts[i] for i in processor.bin_token_ids if i in counts)
+    unknown_count = counts.get(processor.unknown_token_id, 0)
+
+    magic_pct = (magic_count / total_rows) * 100 if total_rows > 0 else 0
+    bin_pct = (bin_count / total_rows) * 100 if total_rows > 0 else 0
+    unknown_pct = (unknown_count / total_rows) * 100 if total_rows > 0 else 0
+
+    logger.info(f"  - Mapped to 'Magic Numbers': {magic_count} rows ({magic_pct:.2f}%)")
+    logger.info(f"  - Mapped to 'Fallback Bins': {bin_count} rows ({bin_pct:.2f}%)")
+    logger.info(f"  - Mapped to '[UNKNOWN]':    {unknown_count} rows ({unknown_pct:.2f}%)")
+
+    stats = {
+        'magic': {'count': magic_count, 'percent': magic_pct},
+        'bin': {'count': bin_count, 'percent': bin_pct},
+        'unknown': {'count': unknown_count, 'percent': unknown_pct}
+    }
+    return stats
