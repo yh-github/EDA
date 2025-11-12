@@ -1,9 +1,9 @@
 import time
-from typing import Self
+from typing import Self, Generator
 
 import pandas as pd
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.neural_network import MLPClassifier
 
 from feature_processor import HybridFeatureProcessor, check_unknown_rate, FeatProcParams
@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 from config import BaseModel
+
+
+def r(x: float):
+    return round(x, 3)
+
 
 @dataclass(frozen=True)
 class ExpData:
@@ -69,33 +74,124 @@ class ExpRunner:
             self.embedder_map[model_name] = EmbeddingService.create(model_params)
         return self.embedder_map[model_name]
 
-    def build_data(self, emb_params : EmbeddingService.Params|None=None) -> ExpData:
-        embedder = self.get_embedder(emb_params or self.emb_params)
+    def split_data_by_group(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Splits a DataFrame into train and test sets, ensuring that all rows
+        for a given accountId stay in the *same* set to prevent data leakage.
 
-        logger.info("\n" + "=" * 50)
-        logger.info(f"RUNNING EXPERIMENT WITH BASE MODEL: {embedder.model_name}")
-        logger.info("=" * 50)
+        This split is 100% deterministic and consistent if the
+        input_df and random_state are the same.
+        """
 
-        # --- Split Data ---
-        train_df, test_df = train_test_split(
-            self.full_df,
-            test_size=self.exp_params.test_size,
-            random_state=self.exp_params.random_state,
-            stratify=self.full_df[self.field_config.label]
-        )
-        y_train = train_df[self.field_config.label]
-        y_test = test_df[self.field_config.label]
+        full_df: pd.DataFrame = self.full_df.copy()
+        field_config: FieldConfig = self.field_config
+        test_size: float = self.exp_params.test_size
+        random_state: int = self.exp_params.random_state
 
-        logger.info(f"Total data: {len(self.full_df)}, Train: {len(train_df)}, Test: {len(test_df)}")
-        logger.info(f"Train set positive class %: {y_train.mean() * 100:.2f}%")
+        logger.info(f"Splitting {len(full_df)} rows by group '{field_config.accountId}'...")
+
+        # Define our grouper
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+
+        # Get the indices for the split
+        try:
+            train_idx, test_idx = next(gss.split(
+                full_df,
+                y=full_df[field_config.label], # stratified
+                groups=full_df[field_config.accountId]  # crucial
+            ))
+        except ValueError as e:
+            logger.error(f"ERROR: Cannot split data. This often happens if 'n_splits' "
+                         f"is greater than the number of unique groups. Error: {e}")
+            raise
+
+        train_df = full_df.iloc[train_idx]
+        test_df = full_df.iloc[test_idx]
+
+        # --- Critical Sanity Check for Data Leakage ---
+        train_accounts = set(train_df[field_config.accountId].unique())
+        test_accounts = set(test_df[field_config.accountId].unique())
+        overlap = train_accounts.intersection(test_accounts)
+
+        logger.info(f"Train accounts: {len(train_accounts)}, Test accounts: {len(test_accounts)}")
+        if not overlap:
+            logger.info("SUCCESS: No account overlap between train and test sets.")
+        else:
+            # This should theoretically never happen with GroupShuffleSplit
+            logger.error(f"FATAL LEAKAGE: {len(overlap)} accounts are in BOTH sets.")
+            raise AssertionError("Data leakage detected! Account overlap in train/test.")
+
+        def df_stats(df:pd.DataFrame) -> str:
+            return f"len={len(df)} accounts={df[self.field_config.accountId].nunique()}"
+
+        logger.info(f"Split complete. Train: {df_stats(train_df)}, Test: {df_stats(test_df)}.")
+
+        return train_df, test_df
+
+    def create_learning_curve_splits(
+        self,
+        full_train_df: pd.DataFrame,
+        fractions: list[float],
+    ) -> Generator[tuple[float, pd.DataFrame], None, None]:
+        """
+        Takes the *full* training set and yields smaller, fractional subsets
+        for creating a learning curve.
+
+        This split is also done by 'accountId' to ensure a valid experiment,
+        comparing (e.g.) 25% of *accounts* vs. 50% of *accounts*.
+        """
+
+        logger.info(f"Preparing to create {len(fractions)} training set fractions...")
+
+        unique_accounts = full_train_df[self.field_config.accountId].unique()
+        total_accounts = len(unique_accounts)
+
+        # Shuffle the accounts once to ensure random, *nested* sampling
+        # (i.e., the 50% set will contain the 25% set)
+        rng = np.random.RandomState(self.exp_params.random_state)
+        shuffled_accounts = rng.permutation(unique_accounts)
+
+        for frac in sorted(fractions):
+            if frac <= 0.0:
+                continue
+            if frac >= 1.0:
+                logger.info(f"Yielding {frac * 100:.0f}% split: {total_accounts} accounts, {len(full_train_df)} rows")
+                yield (1.0, full_train_df)
+                continue
+
+            n_accounts_to_take = int(total_accounts * frac)
+            if n_accounts_to_take == 0:
+                logger.warning(f"Fraction {frac} resulted in 0 accounts. Skipping.")
+                continue
+
+            # Take the *first n* accounts from the shuffled list
+            accounts_sample = shuffled_accounts[:n_accounts_to_take]
+
+            # Use .isin() to select all rows belonging to these accounts
+            sub_df = full_train_df[
+                full_train_df[self.field_config.accountId].isin(accounts_sample)
+            ].copy()
+
+            logger.info(f"Yielding {frac * 100:.0f}% split: {n_accounts_to_take} accounts, {len(sub_df)} rows")
+            yield frac, sub_df
+
+    def build_data(self, df_train:pd.DataFrame, df_test:pd.DataFrame) -> ExpData:
+        embedder = self.get_embedder(self.emb_params)
+        logger.info(f"{embedder.model_name = }")
+
+        y_train = df_train[self.field_config.label]
+        y_test = df_test[self.field_config.label]
+
+        logger.info(f"Total data: {len(self.full_df)}, Train: {len(df_train)}, Test: {len(df_test)}")
+        logger.info(f"positive class %: train={y_train.mean() * 100:.2f}%  test={y_test.mean() * 100:.2f}%")
 
         # --- Create Text Features (Cached) ---
         logger.info("\nProcessing text features (using EmbeddingService)...")
-        logger.info(f"Embedding {len(train_df)} train texts...")
-        train_text_features_np = embedder.embed(train_df[self.field_config.text].tolist())
+        logger.info(f"Embedding {len(df_train)} train texts...")
+        train_text_features_np = embedder.embed(df_train[self.field_config.text].tolist())
 
-        logger.info(f"Embedding {len(test_df)} test texts...")
-        test_text_features_np = embedder.embed(test_df[self.field_config.text].tolist())
+        logger.info(f"Embedding {len(df_test)} test texts...")
+        test_text_features_np = embedder.embed(df_test[self.field_config.text].tolist())
 
         # --- Create Numerical Features ---
         if self.feat_proc_params.is_nop():
@@ -105,10 +201,10 @@ class ExpRunner:
             logger.info("\nProcessing numerical/date features...")
             processor = HybridFeatureProcessor.create(self.feat_proc_params)
 
-            processor.fit(train_df)
+            processor.fit(df_train)
 
-            train_num_features_df = processor.transform(train_df)
-            test_num_features_df = processor.transform(test_df)
+            train_num_features_df = processor.transform(df_train)
+            test_num_features_df = processor.transform(df_test)
 
             # --- Health Check (Go/No-Go) ---
             logger.info("\n--- Health Check on Processor ---")
@@ -116,8 +212,7 @@ class ExpRunner:
             test_unknown_pct = report.get('percent', 100.0)
 
             if test_unknown_pct > self.exp_params.go_no_go_threshold_pct:
-                logger.info(f"**NO-GO!** Test [UNKNOWN] rate is {test_unknown_pct:.2f}%. Halting experiment.")
-                return {}
+                raise Exception(f"**NO-GO!** Test [UNKNOWN] rate is {test_unknown_pct:.2f}%. Halting experiment.")
             else:
                 logger.info(f"**GO!** Test [UNKNOWN] rate is {test_unknown_pct:.2f}%, which is acceptable.")
 
@@ -133,6 +228,24 @@ class ExpRunner:
             y_train=y_train,
             y_test=y_test
         )
+
+    def run(self, fractions: list[float]) -> dict[int, dict]:
+        df_train, df_test = self.split_data_by_group()
+        results = {}
+        for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
+            exp_data = self.build_data(sub_train_df, df_test)
+            res = self.run_experiment(exp_data)
+            d = {
+                **res,
+                "train_frac": r(frac),
+                "train_size": len(sub_train_df),
+                "test_size": len(df_test),
+                "train_accounts": sub_train_df[self.field_config.accountId].nunique(),
+                "test_accounts": df_test[self.field_config.accountId].nunique()
+            }
+            logger.info(d)
+            results[len(sub_train_df)] = d
+        return results
 
     def run_experiment(self, data:ExpData):
         """
@@ -164,17 +277,11 @@ class ExpRunner:
         f1 = f1_score(y_test, y_pred, zero_division=0)
         roc_auc = roc_auc_score(y_test, y_pred_proba)
 
-        def r(x: float):
-            return round(x, 3)
-
         res = {
             "f1": r(f1),
             "roc_auc": r(roc_auc),
             "accuracy": r(accuracy),
             "embedder.model_name": str(self.emb_params.model_name),
         }
-
-        logger.info(res)
-
         return res
 

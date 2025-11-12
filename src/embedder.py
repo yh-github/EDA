@@ -58,6 +58,8 @@ class EmbeddingService:
         unique_texts = set(text_list)
         texts_to_embed = [text for text in unique_texts if text not in self.embedding_cache]
 
+        logger.info(f'{len(text_list)=} {len(unique_texts)=} {len(texts_to_embed)=}')
+
         # 2. Embed *only* the new texts (if any)
         if texts_to_embed:
             total_samples = len(texts_to_embed)
@@ -106,14 +108,12 @@ class EmbeddingService:
 
             if all_new_embeddings:
                 all_new_embeddings_np = torch.cat(all_new_embeddings).numpy()
-
-                # 3. Add new embeddings to the persistent disk cache
                 for text, embedding in zip(texts_to_embed, all_new_embeddings_np):
-                    self.embedding_cache[text] = embedding  # diskcache __setitem__
+                    self.embedding_cache[text] = embedding
             else:
                 logger.warning("  texts_to_embed was not empty, but no embeddings were generated.")
 
-        # 4. Map all texts (new and cached) back to the original list order
+        # Map all texts (new and cached) back to the original list order
         # This now pulls from the disk cache
         final_embeddings = [self.embedding_cache[text] for text in text_list]
 
