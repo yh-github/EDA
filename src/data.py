@@ -34,27 +34,37 @@ class TrainingSample:
     x_categorical: torch.Tensor
     y: torch.Tensor
 
+
+@dataclass(frozen=True)
+class FeatureSet:
+    """
+    Holds the **complete** set of feature arrays for a dataset (e.g., train or test).
+    """
+    X_text: np.ndarray
+    X_continuous: np.ndarray
+    X_categorical: np.ndarray
+    y: np.ndarray
+
+
 class TransactionDataset(Dataset):
     """
-    Custom PyTorch Dataset, now returning a TrainingSample dataclass.
+    Custom PyTorch Dataset, now initialized from a FeatureSet dataclass.
     """
 
-    def __init__(self,
-                 X_text: np.ndarray,
-                 X_continuous: np.ndarray,
-                 X_categorical: np.ndarray,
-                 y: np.ndarray):
-        # Convert to tensors once during initialization
-        self.X_text = torch.tensor(X_text, dtype=torch.float32)
-        self.X_continuous = torch.tensor(X_continuous, dtype=torch.float32)
-        self.X_categorical = torch.tensor(X_categorical, dtype=torch.int64)  # IDs must be Long
-        self.y = torch.tensor(y, dtype=torch.float32)  # For BCEWithLogitsLoss
+    def __init__(self, features: FeatureSet):
+
+        # Convert to tensors from the FeatureSet
+        self.X_text = torch.tensor(features.X_text, dtype=torch.float32)
+        self.X_continuous = torch.tensor(features.X_continuous, dtype=torch.float32)
+        self.X_categorical = torch.tensor(features.X_categorical, dtype=torch.int64)
+        self.y = torch.tensor(features.y, dtype=torch.float32)
 
     def __len__(self) -> int:
         return len(self.y)
 
     def __getitem__(self, idx) -> TrainingSample:
         """
+        (Unchanged from last time)
         Fetches one sample and returns it as a TrainingSample dataclass instance.
         """
         return TrainingSample(
@@ -63,6 +73,7 @@ class TransactionDataset(Dataset):
             x_categorical=self.X_categorical[idx],
             y=self.y[idx]
         )
+
 def create_mock_data(random_state:int, field_config: FieldConfig = FieldConfig(), n_samples: int = 2000) -> pd.DataFrame:
     """Creates a realistic, *balanced* dummy DataFrame for testing."""
     logger.info(f"Creating mock data ({n_samples} samples)...")

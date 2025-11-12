@@ -24,7 +24,7 @@ class FieldConfig:
     accountId: str = 'accountId'
     trId: str = 'id' # transactionId
 
-class BaseModel(StrEnum):
+class EmbModel(StrEnum):
     """Using StrEnum for our model name constants."""
     ALBERT = "albert-base-v2"
     DISTILBERT = "distilbert-base-uncased"

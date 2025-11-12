@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModel
 import diskcache
-from config import BaseModel
+from config import EmbModel
 from data import TextDataset
 
 CACHE_DIR_BASE = "cache/"
@@ -19,7 +19,7 @@ class EmbeddingService:
 
     @dataclass
     class Params:
-        model_name: BaseModel
+        model_name: EmbModel
         max_length: int = 64
         batch_size: int = 256 # Define a batch size for text embedding
 
@@ -32,7 +32,7 @@ class EmbeddingService:
     def create(params:Params):
         return EmbeddingService(**params.__dict__)
 
-    def __init__(self, model_name: str|BaseModel, max_length: int, batch_size: int):
+    def __init__(self, model_name: str | EmbModel, max_length: int, batch_size: int):
         logger.info(f"Loading embedding model: {model_name}...")
         model_name = str(model_name)
         self.model_name = model_name

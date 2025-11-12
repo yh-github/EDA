@@ -9,21 +9,18 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from classifier import train_model, evaluate_model, HybridModel
-from data import TransactionDataset
+from data import TransactionDataset, FeatureSet
 from feature_processor import HybridFeatureProcessor, check_unknown_rate, FeatProcParams
 from config import *
 from embedder import EmbeddingService
 import logging
+from config import EmbModel
 
 logger = logging.getLogger(__name__)
 
 
-from config import BaseModel
-
-
 def r(x: float):
     return round(x, 3)
-
 
 @dataclass(frozen=True)
 class ExpData:
@@ -33,7 +30,6 @@ class ExpData:
     y_test: np.ndarray
 
 class ExpRunner:
-
 
     @classmethod
     def copy(cls, other:Self) -> Self:
@@ -69,7 +65,7 @@ class ExpRunner:
         self.emb_proc_params = emb_params
         self.feat_proc_params = feat_proc_params
         self.field_config = field_config
-        self.embedder_map: dict[BaseModel, EmbeddingService] = {}
+        self.embedder_map: dict[EmbModel, EmbeddingService] = {}
 
     def get_embedder(self, model_params:EmbeddingService.Params) -> EmbeddingService:
         model_name = model_params.model_name
@@ -179,10 +175,10 @@ class ExpRunner:
             logger.info(f"Yielding {frac * 100:.0f}% split: {n_accounts_to_take} accounts, {len(sub_df)} rows")
             yield frac, sub_df
 
-    # In ExpRunner class (a modified build_data)
+    # In ExpRunner class (in src/runner.py)
 
     def build_data_for_pytorch(self, df_train: pd.DataFrame, df_test: pd.DataFrame) -> tuple[
-        dict, dict, HybridFeatureProcessor]:
+        FeatureSet, FeatureSet, HybridFeatureProcessor]:
         embedder = self.get_embedder(self.emb_params)
 
         y_train = df_train[self.field_config.label].values
@@ -199,7 +195,7 @@ class ExpRunner:
         train_features_df = processor.transform(df_train)
         test_features_df = processor.transform(df_test)
 
-        # --- 3. *** NEW: Separate feature groups *** ---
+        # --- 3. Separate feature groups ---
 
         # Define which columns go where
         continuous_cols = [
@@ -215,7 +211,6 @@ class ExpRunner:
         continuous_cols = [c for c in continuous_cols if c in train_features_df.columns]
         categorical_cols = [c for c in categorical_cols if c in train_features_df.columns]
 
-        # Create the final numpy arrays
         X_cont_train = train_features_df[continuous_cols].values
         X_cont_test = test_features_df[continuous_cols].values
 
@@ -223,22 +218,21 @@ class ExpRunner:
         X_cat_test = test_features_df[categorical_cols].values
 
         # --- 4. Package for output ---
-        train_data_dict = {
-            'X_text': X_text_train,
-            'X_continuous': X_cont_train,
-            'X_categorical': X_cat_train,
-            'y': y_train
-        }
+        train_feature_set = FeatureSet(
+            X_text=X_text_train,
+            X_continuous=X_cont_train,
+            X_categorical=X_cat_train,
+            y=y_train
+        )
 
-        test_data_dict = {
-            'X_text': X_text_test,
-            'X_continuous': X_cont_test,
-            'X_categorical': X_cat_test,
-            'y': y_test
-        }
+        test_feature_set = FeatureSet(
+            X_text=X_text_test,
+            X_continuous=X_cont_test,
+            X_categorical=X_cat_test,
+            y=y_test
+        )
 
-        # We also return the fitted processor to get vocab sizes
-        return train_data_dict, test_data_dict, processor
+        return train_feature_set, test_feature_set, processor
 
     def build_data(self, df_train:pd.DataFrame, df_test:pd.DataFrame) -> ExpData:
         embedder = self.get_embedder(self.emb_params)
@@ -350,34 +344,39 @@ class ExpRunner:
         }
         return res
 
-    def run_experiment_pytorch(self, train_data_dict, test_data_dict, processor):
-        # --- 1. Hyperparameters (need to tune) ---
+    def run_experiment_pytorch(
+        self,
+       train_features: FeatureSet,
+       test_features: FeatureSet,
+       processor: HybridFeatureProcessor
+    ):
+        # --- 1. Hyperparameters (tune) ---
         DEVICE = get_device()
         NUM_EPOCHS = 10
         BATCH_SIZE = 256
         LEARNING_RATE = 1e-3
 
         # --- 2. Create DataLoaders ---
-        train_dataset = TransactionDataset(**train_data_dict)
-        test_dataset = TransactionDataset(**test_data_dict)
+        # The __init__ is now simpler
+        train_dataset = TransactionDataset(train_features)
+        test_dataset = TransactionDataset(test_features)
 
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
         test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
         # --- 3. Instantiate the Model ---
 
-        # Get dimensions from the data and processor
-        text_embed_dim = train_data_dict['X_text'].shape[1]
-        continuous_feat_dim = train_data_dict['X_continuous'].shape[1]
+        # Get dimensions from the FeatureSet attributes
+        text_embed_dim = train_features.X_text.shape[1]
+        continuous_feat_dim = train_features.X_continuous.shape[1]
 
-        # Get vocab sizes from the processor
+        # Get vocab sizes from the processor (unchanged)
         categorical_vocab_sizes = {
             'day_of_week': 7,  # 0-6
             'day_of_month': 31,  # 0-30
             'amount_token': processor.vocab_size
         }
 
-        # Define the size of the embedding for each
         embedding_dims = {
             'day_of_week': 16,
             'day_of_month': 32,
@@ -389,17 +388,17 @@ class ExpRunner:
             continuous_feat_dim=continuous_feat_dim,
             categorical_vocab_sizes=categorical_vocab_sizes,
             embedding_dims=embedding_dims,
-            mlp_hidden_layers=[256, 128],  # Larger MLP
+            mlp_hidden_layers=[256, 128],
             dropout_rate=0.4
         ).to(DEVICE)
 
         # --- 4. Setup Optimizer and Loss ---
-        # Use BCEWithLogitsLoss as our model outputs raw logits
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
         logger.info(f"Starting PyTorch training on {DEVICE} for {NUM_EPOCHS} epochs...")
 
+        # --- 5. Training Loop ---
         best_f1 = -1.0
         final_metrics = {}
 
@@ -420,12 +419,10 @@ class ExpRunner:
             if metrics['f1'] > best_f1:
                 best_f1 = metrics['f1']
                 final_metrics = metrics
-                # model checkpoint here
-                # torch.save(model.state_dict(), "best_model.pth")
 
         logger.info("Training complete.")
 
-        # Return metrics rounded for clarity, plus the model name
+        # --- 6. Return Metrics (unchanged) ---
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
         return {
             **final_metrics_rounded,
