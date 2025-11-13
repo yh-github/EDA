@@ -264,7 +264,8 @@ class ExpRunner:
         self,
        train_features: FeatureSet,
        test_features: FeatureSet,
-       processor: HybridFeatureProcessor
+       processor: HybridFeatureProcessor,
+       metadata: FeatureMetadata
     ):
         # --- Hyperparameters (tune) ---
         DEVICE = get_device()
@@ -287,7 +288,7 @@ class ExpRunner:
         # --- Instantiate the Model ---
 
         # Get dimensions from the FeatureSet attributes
-        model_config = processor.build_model_config(train_features)
+        model_config = processor.build_model_config(train_features, metadata)
 
         model = HybridModel(
             config=model_config,
@@ -338,7 +339,7 @@ class ExpRunner:
         results = {}
         for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
             train_feature_set, test_feature_set, processor, meta = self.build_data_for_pytorch(sub_train_df, df_test)
-            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor)
+            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor, meta)
             d = {
                 **res,
                 "train_frac": r(frac),

@@ -207,6 +207,14 @@ class HybridFeatureProcessor:
                 'day_of_14_cycle_sin', 'day_of_14_cycle_cos'
             ])
 
+        if self.use_categorical_dates:
+            meta.categorical_features['day_of_week_id'] = CategoricalFeatureConfig(
+                vocab_size=7, embedding_dim=16
+            )
+            meta.categorical_features['day_of_month_id'] = CategoricalFeatureConfig(
+                vocab_size=31, embedding_dim=32
+            )
+
         if self.use_continuous_amount:
             meta.continuous_scalable_cols.append('log_abs_amount')
             meta.categorical_features['is_positive'] = CategoricalFeatureConfig(
@@ -323,39 +331,37 @@ class HybridFeatureProcessor:
 
     def build_model_config(
         self,
-        train_features: FeatureSet
+        train_features: FeatureSet,
+        metadata: FeatureMetadata  # <-- Add this parameter
     ) -> HybridModelConfig:
         """
-        Dynamically builds the HybridModelConfig dataclass
-        based on the features that were actually generated.
+        Dynamically builds the HybridModelConfig dataclass based on the
+        feature metadata returned from the processor.
         """
 
         # 1. Get dimensions for text and continuous features
         text_embed_dim = train_features.X_text.shape[1]
         continuous_feat_dim = train_features.X_continuous.shape[1]
 
-        # 2. DYNAMICALLY build categorical config
-        categorical_vocab_sizes = {}
-        embedding_dims = {}
+        # 2. Get categorical config directly FROM THE METADATA
+        categorical_vocab_sizes = {
+            name: config.vocab_size
+            for name, config in metadata.categorical_features.items()
+        }
 
-        if self.use_categorical_dates:
-            categorical_vocab_sizes['day_of_week_id'] = 7  # 0-6
-            categorical_vocab_sizes['day_of_month_id'] = 31  # 0-30
-            embedding_dims['day_of_week_id'] = 16
-            embedding_dims['day_of_month_id'] = 32
+        # 3. Get embedding dims directly FROM THE METADATA
+        embedding_dims = {
+            name: config.embedding_dim
+            for name, config in metadata.categorical_features.items()
+        }
 
-        if self.use_categorical_amount:
-            categorical_vocab_sizes['amount_token_id'] = self.vocab_size
-            embedding_dims['amount_token_id'] = 64
-
-        # 3. Return a single config dataclass
+        # 4. Return the complete, frozen config object
         return HybridModelConfig(
             text_embed_dim=text_embed_dim,
             continuous_feat_dim=continuous_feat_dim,
             categorical_vocab_sizes=categorical_vocab_sizes,
             embedding_dims=embedding_dims
         )
-
 
 # ---
 # Health Check Utilities

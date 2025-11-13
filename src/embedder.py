@@ -97,7 +97,6 @@ class EmbeddingService:
                 time_per_sample = elapsed_time / processed_samples if processed_samples > 0 else 0
                 estimated_time_remaining = (total_samples - processed_samples) * time_per_sample
 
-                # Use logger.info for progress, with \r for single-line update
                 logger.info(
                     f"Processed {processed_samples}/{total_samples} samples | "
                     f"Elapsed: {elapsed_time:.2f}s | "

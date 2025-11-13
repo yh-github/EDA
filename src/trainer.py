@@ -15,14 +15,11 @@ def train_model(model: HybridModel,
     model.train()  # Set model to training mode
     total_loss = 0
 
-    # 'batch' is now a TrainingSample object
     for batch in train_loader:
-        # --- Change from [...] to . ---
         x_text = batch.x_text.to(device)
         x_continuous = batch.x_continuous.to(device)
         x_categorical = batch.x_categorical.to(device)
         y_true = batch.y.to(device)
-        # -----------------------------
 
         # 1. Forward pass
         logits = model(x_text, x_continuous, x_categorical)
