@@ -13,6 +13,7 @@ class ExperimentConfig:
     random_state:int = 2025
     max_text_length:int = 64 # Max tokens for the text feature
     go_no_go_threshold_pct:float = 5.0 # Max 5% unknown tokens
+    early_stopping_patience: int = 3  # Stop after 3 epochs of no improvement
 
 @dataclass(frozen=True)
 class FieldConfig:

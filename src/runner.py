@@ -272,6 +272,8 @@ class ExpRunner:
         NUM_EPOCHS = 10
         BATCH_SIZE = 256
         LEARNING_RATE = 1e-3
+        patience = self.exp_params.early_stopping_patience
+        patience_counter = 0
 
         # --- Create DataLoaders ---
         train_dataset = TransactionDataset(train_features)
@@ -323,6 +325,13 @@ class ExpRunner:
             if metrics['f1'] > best_f1:
                 best_f1 = metrics['f1']
                 final_metrics = metrics
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                logger.info(f"Early stopping triggered at epoch {epoch}. Best F1: {best_f1:.4f}")
+                break
 
         logger.info("Training complete.")
 
