@@ -1,20 +1,17 @@
+import logging
 import time
 from typing import Self, Generator
-
 import pandas as pd
-from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from sklearn.model_selection import GroupShuffleSplit
-from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader
-
 from classifier import HybridModel
-from data import TransactionDataset, FeatureSet, TrainingSample
-from feature_processor import HybridFeatureProcessor, check_unknown_rate, FeatProcParams
 from config import *
-from embedder import EmbeddingService
-import logging
 from config import EmbModel
+from data import TransactionDataset, FeatureSet, TrainingSample
+from embedder import EmbeddingService
+from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, HybridModelConfig
 from trainer import train_model, evaluate_model
 
 logger = logging.getLogger(__name__)
@@ -176,49 +173,77 @@ class ExpRunner:
             logger.info(f"Yielding {frac * 100:.0f}% split: {n_accounts_to_take} accounts, {len(sub_df)} rows")
             yield frac, sub_df
 
-    # In ExpRunner class (in src/runner.py)
+    def build_data_for_pytorch(
+        self,
+        df_train_frac: pd.DataFrame,
+        df_test: pd.DataFrame
+    ) -> tuple[FeatureSet, FeatureSet, HybridFeatureProcessor, FeatureMetadata]:
+        """
+        Builds all feature sets (text, continuous, categorical) for the model.
+        This method is now driven entirely by the FeatureMetadata returned
+        from the processor.
+        """
 
-    def build_data_for_pytorch(self, df_train: pd.DataFrame, df_test: pd.DataFrame) -> tuple[
-        FeatureSet, FeatureSet, HybridFeatureProcessor]:
+        # --- 1. Get Text Embeddings and Labels ---
         embedder = self.get_embedder(self.emb_params)
-
-        y_train = df_train[self.field_config.label].values
+        y_train = df_train_frac[self.field_config.label].values
         y_test = df_test[self.field_config.label].values
 
-        # --- 1. Text Features ---
-        X_text_train = embedder.embed(df_train[self.field_config.text].tolist())
+        logger.info(f"Embedding {len(df_train_frac)} train texts...")
+        X_text_train = embedder.embed(df_train_frac[self.field_config.text].tolist())
+
+        logger.info(f"Embedding {len(df_test)} test texts...")
         X_text_test = embedder.embed(df_test[self.field_config.text].tolist())
 
-        # --- 2. Numerical/Date Features ---
+        # --- 2. Fit and Transform Date/Amount Features ---
         processor = HybridFeatureProcessor.create(self.feat_proc_params, self.field_config)
-        processor.fit(df_train)
 
-        train_features_df = processor.transform(df_train)
+        # Fit on train data and get the metadata
+        metadata = processor.fit(df_train_frac)
+
+        # Transform both train and test
+        train_features_df = processor.transform(df_train_frac)
         test_features_df = processor.transform(df_test)
 
-        # --- 3. Separate feature groups ---
+        # --- 3. Get Feature Lists from Metadata ---
+        cyclical_cols = metadata.cyclical_cols
+        continuous_scalable_cols = metadata.continuous_scalable_cols
+        categorical_cols = list(metadata.categorical_features.keys())
 
-        # Define which columns go where
-        continuous_cols = [
-            'day_of_week_sin', 'day_of_week_cos', 'day_of_month_sin', 'day_of_month_cos',
-            'day_of_14_cycle_sin', 'day_of_14_cycle_cos', 'is_positive', 'log_abs_amount'
-        ]
+        # --- 4. Build Continuous Features Array (X_continuous) ---
+        # This list will hold the arrays to be concatenated
+        train_cont_arrays_to_stack = []
+        test_cont_arrays_to_stack = []
 
-        categorical_cols = [
-            'day_of_week_id', 'day_of_month_id', 'amount_token_id'
-        ]
+        # Add cyclical (unscaled) features if they exist
+        if cyclical_cols:
+            train_cont_arrays_to_stack.append(train_features_df[cyclical_cols].values)
+            test_cont_arrays_to_stack.append(test_features_df[cyclical_cols].values)
 
-        # Filter columns that were actually created (based on config)
-        continuous_cols = [c for c in continuous_cols if c in train_features_df.columns]
-        categorical_cols = [c for c in categorical_cols if c in train_features_df.columns]
+        # Add scaled continuous features if they exist
+        if continuous_scalable_cols:
+            scaler = StandardScaler()
+            X_cont_scaled_train = scaler.fit_transform(train_features_df[continuous_scalable_cols])
+            X_cont_scaled_test = scaler.transform(test_features_df[continuous_scalable_cols])
 
-        X_cont_train = train_features_df[continuous_cols].values
-        X_cont_test = test_features_df[continuous_cols].values
+            train_cont_arrays_to_stack.append(X_cont_scaled_train)
+            test_cont_arrays_to_stack.append(X_cont_scaled_test)
 
+        # Concatenate all continuous features
+        if train_cont_arrays_to_stack:
+            X_cont_train = np.concatenate(train_cont_arrays_to_stack, axis=1)
+            X_cont_test = np.concatenate(test_cont_arrays_to_stack, axis=1)
+        else:
+            # Handle edge case where no continuous/cyclical features are made
+            X_cont_train = np.empty((len(df_train_frac), 0))
+            X_cont_test = np.empty((len(df_test), 0))
+
+        # --- 5. Build Categorical Features Array (X_categorical) ---
+        # This works even if categorical_cols is empty (creates an [N, 0] array)
         X_cat_train = train_features_df[categorical_cols].values
         X_cat_test = test_features_df[categorical_cols].values
 
-        # --- 4. Package for output ---
+        # --- 6. Package into FeatureSet Dataclasses ---
         train_feature_set = FeatureSet(
             X_text=X_text_train,
             X_continuous=X_cont_train,
@@ -233,117 +258,7 @@ class ExpRunner:
             y=y_test
         )
 
-        return train_feature_set, test_feature_set, processor
-
-    def build_data(self, df_train:pd.DataFrame, df_test:pd.DataFrame) -> ExpData:
-        embedder = self.get_embedder(self.emb_params)
-        logger.info(f"{embedder.model_name = }")
-
-        y_train = df_train[self.field_config.label]
-        y_test = df_test[self.field_config.label]
-
-        logger.info(f"Total data: {len(self.full_df)}, Train: {len(df_train)}, Test: {len(df_test)}")
-        logger.info(f"positive class %: train={y_train.mean() * 100:.2f}%  test={y_test.mean() * 100:.2f}%")
-
-        # --- Create Text Features (Cached) ---
-        logger.info("\nProcessing text features (using EmbeddingService)...")
-        logger.info(f"Embedding {len(df_train)} train texts...")
-        train_text_features_np = embedder.embed(df_train[self.field_config.text].tolist())
-
-        logger.info(f"Embedding {len(df_test)} test texts...")
-        test_text_features_np = embedder.embed(df_test[self.field_config.text].tolist())
-
-        # --- Create Numerical Features ---
-        if self.feat_proc_params.is_nop():
-            X_train = train_text_features_np
-            X_test = test_text_features_np
-        else:
-            logger.info("\nProcessing numerical/date features...")
-            processor = HybridFeatureProcessor.create(self.feat_proc_params)
-
-            processor.fit(df_train)
-
-            train_num_features_df = processor.transform(df_train)
-            test_num_features_df = processor.transform(df_test)
-
-            # --- Health Check (Go/No-Go) ---
-            logger.info("\n--- Health Check on Processor ---")
-            report = check_unknown_rate(processor, test_num_features_df, "Test Set")
-            test_unknown_pct = report.get('percent', 100.0)
-
-            if test_unknown_pct > self.exp_params.go_no_go_threshold_pct:
-                raise Exception(f"**NO-GO!** Test [UNKNOWN] rate is {test_unknown_pct:.2f}%. Halting experiment.")
-            else:
-                logger.info(f"**GO!** Test [UNKNOWN] rate is {test_unknown_pct:.2f}%, which is acceptable.")
-
-            # --- Concatenate ---
-            logger.info("\nConcatenating all features...")
-            X_train = np.concatenate([train_text_features_np, train_num_features_df.values], axis=1)
-            X_test = np.concatenate([test_text_features_np, test_num_features_df.values], axis=1)
-
-        logger.info(f"Total feature space size: {X_train.shape[1]} features")
-        return ExpData(
-            X_train=X_train,
-            X_test=X_test,
-            y_train=y_train,
-            y_test=y_test
-        )
-
-    def run(self, fractions: list[float]) -> dict[int, dict]:
-        df_train, df_test = self.split_data_by_group()
-        results = {}
-        for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
-            exp_data = self.build_data(sub_train_df, df_test)
-            res = self.run_experiment(exp_data)
-            d = {
-                **res,
-                "train_frac": r(frac),
-                "train_size": len(sub_train_df),
-                "test_size": len(df_test),
-                "train_accounts": sub_train_df[self.field_config.accountId].nunique(),
-                "test_accounts": df_test[self.field_config.accountId].nunique()
-            }
-            logger.info(d)
-            results[len(sub_train_df)] = d
-        return results
-
-    def run_experiment(self, data:ExpData):
-        """
-        Runs the full "Scenario 1" pipeline:
-        1. Splits data
-        2. Creates numerical features
-        3. Creates "frozen" text embeddings
-        4. Concatenates features
-        5. Trains and scores a simple classifier
-        """
-        X_train, X_test, y_train, y_test = data.X_train, data.X_test, data.y_train, data.y_test
-
-        # --- 5. Train the "Learner" ---
-        logger.info("Training the final, simple classifier (MLP)...")
-        start_time = time.time()
-        learner = MLPClassifier(
-            hidden_layer_sizes=(128, 64),
-            max_iter=500,
-            random_state=self.exp_params.random_state,
-            early_stopping=True
-        )
-        learner.fit(X_train, y_train)
-        logger.info(f"Training complete in {time.time() - start_time:.2f} seconds.")
-
-        # --- Score the Experiment ---
-        y_pred = learner.predict(X_test)
-        y_pred_proba = learner.predict_proba(X_test)[:, 1]
-        accuracy = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        roc_auc = roc_auc_score(y_test, y_pred_proba)
-
-        res = {
-            "f1": r(f1),
-            "roc_auc": r(roc_auc),
-            "accuracy": r(accuracy),
-            "embedder.model_name": str(self.emb_params.model_name),
-        }
-        return res
+        return train_feature_set, test_feature_set, processor, metadata
 
     def run_experiment_pytorch(
         self,
@@ -422,7 +337,7 @@ class ExpRunner:
 
         results = {}
         for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
-            train_feature_set, test_feature_set, processor = self.build_data_for_pytorch(sub_train_df, df_test)
+            train_feature_set, test_feature_set, processor, meta = self.build_data_for_pytorch(sub_train_df, df_test)
             res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor)
             d = {
                 **res,
@@ -435,3 +350,38 @@ class ExpRunner:
             logger.info(d)
             results[len(sub_train_df)] = d
         return results
+
+    def _build_model_config(self,
+                            train_features: FeatureSet,
+                            metadata: FeatureMetadata) -> HybridModelConfig:
+        """
+        Dynamically builds the HybridModelConfig dataclass based on the
+        feature metadata returned from the processor.
+
+        This method is now fully data-driven and does not contain any
+        hardcoded feature names.
+        """
+
+        # 1. Get dimensions for text and continuous features
+        text_embed_dim = train_features.X_text.shape[1]
+        continuous_feat_dim = train_features.X_continuous.shape[1]
+
+        # 2. Get categorical config directly FROM THE METADATA
+        categorical_vocab_sizes = {
+            name: config.vocab_size
+            for name, config in metadata.categorical_features.items()
+        }
+
+        # 3. Get embedding dims directly FROM THE METADATA
+        embedding_dims = {
+            name: config.embedding_dim
+            for name, config in metadata.categorical_features.items()
+        }
+
+        # 4. Return the complete, frozen config object
+        return HybridModelConfig(
+            text_embed_dim=text_embed_dim,
+            continuous_feat_dim=continuous_feat_dim,
+            categorical_vocab_sizes=categorical_vocab_sizes,
+            embedding_dims=embedding_dims
+        )

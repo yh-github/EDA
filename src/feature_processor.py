@@ -67,9 +67,7 @@ class FeatProcParams:
 
 @dataclass(frozen=True)
 class HybridModelConfig:
-    """
-    Holds all feature-related parameters for initializing the HybridModel.
-    """
+    # feature-related parameters for initializing the HybridModel.
     text_embed_dim: int = 0
     continuous_feat_dim: int = 0
     categorical_vocab_sizes: dict[str, int] = field(default_factory=dict)
@@ -135,79 +133,116 @@ class HybridFeatureProcessor:
         self.top_k_token_ids: set[int] = set()
         self.bin_token_ids: set[int] = set()
 
+    def _fit_categorical_amount(self, df: pd.DataFrame):
+        amount_col = self.fields_config.amount
+        logger.info("Fitting categorical amount features...")
+        top_k_series = df[amount_col].value_counts().head(self.k_top).index
+        self.top_k_amounts = set(top_k_series)
+
+        # --- Cents Distribution Analysis ---
+        self.magic_number_cents_distribution = Counter()
+        for amount in self.top_k_amounts:
+            cents = int(round(abs(amount) * 100)) % 100
+            self.magic_number_cents_distribution[cents] += 1
+
+        # logger.info("--- Magic Number Cents Analysis (Top 10) ---")
+        # for cents, count in self.magic_number_cents_distribution.most_common(10):
+        #     logger.info(f"  {cents}: {count}")
+
+        # Create the fallback data (all amounts NOT in the Top-K)
+        fallback_amounts = df[~df[amount_col].isin(self.top_k_amounts)][amount_col]
+
+        if not fallback_amounts.empty:
+            log_abs_fallback = np.log(np.abs(fallback_amounts) + 1)
+            quantiles = np.linspace(0, 1, self.n_bins + 1)
+            all_bins = log_abs_fallback.quantile(quantiles).values
+            self.bin_edges = np.unique(all_bins)
+
+            if len(self.bin_edges) < 2:
+                self.bin_edges = np.array([-np.inf, np.inf])
+        else:
+            self.bin_edges = np.array([-np.inf, np.inf])
+
+        # --- Build the Amount "Vocabulary" ---
+        self.vocab_map = {}
+        vocab_id_counter = 0
+
+        self.vocab_map['[PAD]'] = vocab_id_counter
+        vocab_id_counter += 1
+
+        self.vocab_map['[UNKNOWN]'] = vocab_id_counter
+        self.unknown_token_id = vocab_id_counter
+        vocab_id_counter += 1
+
+        self.top_k_token_ids.clear()
+        for amount in self.top_k_amounts:
+            self.vocab_map[amount] = vocab_id_counter
+            self.top_k_token_ids.add(vocab_id_counter)
+            vocab_id_counter += 1
+
+        self.bin_token_ids.clear()
+        # Check for valid bin_edges
+        if self.bin_edges is not None:
+            for i in range(len(self.bin_edges) - 1):
+                bin_name = f"log_bin_{i}"
+                self.vocab_map[bin_name] = vocab_id_counter
+                self.bin_token_ids.add(vocab_id_counter)
+                vocab_id_counter += 1
+
+        self.vocab_size = len(self.vocab_map)
+
+        logger.info(f"Fit complete. Found {len(self.top_k_amounts)} magic numbers.")
+        bin_count = len(self.bin_edges) - 1 if self.bin_edges is not None else 0
+        logger.info(f"Created {bin_count} fallback bins.")
+        logger.info(f"Total Amount Vocabulary size: {self.vocab_size}")
+
+    def _build_meta(self) -> FeatureMetadata:
+        # --- 1. Create the metadata object we will populate ---
+        meta = FeatureMetadata()
+
+        # --- 2. Populate metadata from STATIC params ---
+        if self.use_cyclical_dates:
+            meta.cyclical_cols.extend([
+                'day_of_week_sin', 'day_of_week_cos', 'day_of_month_sin', 'day_of_month_cos',
+                'day_of_14_cycle_sin', 'day_of_14_cycle_cos'
+            ])
+
+        if self.use_continuous_amount:
+            meta.continuous_scalable_cols.append('log_abs_amount')
+            meta.categorical_features['is_positive'] = CategoricalFeatureConfig(
+                vocab_size=2, embedding_dim=2
+            )
+
+        # (Example: Add text_length here if self.params.use_text_length)
+        # (Example: Add cents_id here if self.params.use_cents)
+
+        # --- 3. Run DYNAMIC fitting logic ---
+        if self.use_categorical_amount:
+            # Assume self.vocab_map is now built
+            self.vocab_size = len(self.vocab_map)
+            # add the discovered config to the metadata
+            meta.categorical_features['amount_token_id'] = CategoricalFeatureConfig(
+                vocab_size=self.vocab_size,
+                embedding_dim=64 # proportional?
+            )
+
+            logger.info(f"Fit complete. Found {len(self.top_k_amounts)} magic numbers.")
+
+        return meta
+
     def fit(self, df: pd.DataFrame):
         """
         Learns all the "rules" from the training data based on enabled features.
         """
-        amount_col = self.fields_config.amount
+
         logger.info(f"Fitting processor on {len(df)} rows...")
 
-        # --- 1. Learn from 'amount' (if enabled) ---
+        # --- Learn from 'amount' (if enabled) ---
         if self.use_categorical_amount:
-            logger.info("Fitting categorical amount features...")
-            top_k_series = df[amount_col].value_counts().head(self.k_top).index
-            self.top_k_amounts = set(top_k_series)
+            self._fit_categorical_amount(df)
 
-            # --- Cents Distribution Analysis ---
-            self.magic_number_cents_distribution = Counter()
-            for amount in self.top_k_amounts:
-                cents = int(round(abs(amount) * 100)) % 100
-                self.magic_number_cents_distribution[cents] += 1
+        return self._build_meta()
 
-            logger.info("--- Magic Number Cents Analysis (Top 10) ---")
-            for cents, count in self.magic_number_cents_distribution.most_common(10):
-                 logger.info(f"  {cents}: {count}")
-
-
-            # Create the fallback data (all amounts NOT in the Top-K)
-            fallback_amounts = df[~df[amount_col].isin(self.top_k_amounts)][amount_col]
-
-            if not fallback_amounts.empty:
-                log_abs_fallback = np.log(np.abs(fallback_amounts) + 1)
-                quantiles = np.linspace(0, 1, self.n_bins + 1)
-                all_bins = log_abs_fallback.quantile(quantiles).values
-                self.bin_edges = np.unique(all_bins)
-
-                if len(self.bin_edges) < 2:
-                    self.bin_edges = np.array([-np.inf, np.inf])
-            else:
-                self.bin_edges = np.array([-np.inf, np.inf])
-
-            # --- 2. Build the Amount "Vocabulary" ---
-            self.vocab_map = {}
-            vocab_id_counter = 0
-
-            self.vocab_map['[PAD]'] = vocab_id_counter
-            vocab_id_counter += 1
-
-            self.vocab_map['[UNKNOWN]'] = vocab_id_counter
-            self.unknown_token_id = vocab_id_counter
-            vocab_id_counter += 1
-
-            self.top_k_token_ids.clear()
-            for amount in self.top_k_amounts:
-                self.vocab_map[amount] = vocab_id_counter
-                self.top_k_token_ids.add(vocab_id_counter)
-                vocab_id_counter += 1
-
-            self.bin_token_ids.clear()
-            # Check for valid bin_edges
-            if self.bin_edges is not None:
-                for i in range(len(self.bin_edges) - 1):
-                    bin_name = f"log_bin_{i}"
-                    self.vocab_map[bin_name] = vocab_id_counter
-                    self.bin_token_ids.add(vocab_id_counter)
-                    vocab_id_counter += 1
-
-            self.vocab_size = len(self.vocab_map)
-
-            logger.info(f"Fit complete. Found {len(self.top_k_amounts)} magic numbers.")
-            bin_count = len(self.bin_edges) - 1 if self.bin_edges is not None else 0
-            logger.info(f"Created {bin_count} fallback bins.")
-            logger.info(f"Total Amount Vocabulary size: {self.vocab_size}")
-
-        else:
-            logger.info("Categorical amount feature is disabled. Skipping vocab fit.")
 
     def transform(self, df: pd.DataFrame, date_col='date', amount_col='amount') -> pd.DataFrame:
         """
