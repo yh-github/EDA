@@ -11,7 +11,7 @@ from config import *
 from config import EmbModel
 from data import TransactionDataset, FeatureSet, TrainingSample
 from embedder import EmbeddingService
-from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata
+from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, FeatureHyperParams
 from trainer import train_model, evaluate_model
 
 logger = logging.getLogger(__name__)
@@ -293,7 +293,7 @@ class ExpRunner:
         # --- Instantiate the Model ---
 
         # Get dimensions from the FeatureSet attributes
-        model_config = HybridModel.FeatureHyperParams.build(train_features, metadata)
+        model_config = FeatureHyperParams.build(train_features, metadata)
 
         model = HybridModel(
             feature_config=model_config,
