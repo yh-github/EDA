@@ -72,7 +72,7 @@ def main():
 
         # This one call runs the entire pipeline:
         # split -> 10% frac -> embed -> process -> train -> evaluate
-        results = runner.run_torch(fractions=[0.1])
+        results = runner.run_training_set_size(fractions=[0.1])
 
         logger.info("--- Dry Run Experiment Results (10% frac) ---")
         logger.info(results)

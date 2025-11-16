@@ -1,7 +1,8 @@
 import logging
 import time
-from typing import Self, Generator
+from typing import Self, Generator, Any
 import pandas as pd
+from numpy import floating
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from torch import nn
@@ -17,8 +18,8 @@ from trainer import train_model, evaluate_model
 logger = logging.getLogger(__name__)
 
 
-def r(x: float):
-    return round(x, 3)
+def r(x: float| floating[Any]) -> float:
+    return round(float(x), 3)
 
 @dataclass(frozen=True)
 class ExpData:
@@ -177,7 +178,7 @@ class ExpRunner:
             logger.info(f"Yielding {frac * 100:.0f}% split: {n_accounts_to_take} accounts, {len(sub_df)} rows")
             yield frac, sub_df
 
-    def build_data_for_pytorch(
+    def build_data(
         self,
         df_train_frac: pd.DataFrame,
         df_test: pd.DataFrame
@@ -264,7 +265,7 @@ class ExpRunner:
 
         return train_feature_set, test_feature_set, processor, metadata
 
-    def run_experiment_pytorch(
+    def run_experiment(
         self,
        train_features: FeatureSet,
        test_features: FeatureSet,
@@ -344,13 +345,13 @@ class ExpRunner:
             "embedder.model_name": str(self.emb_params.model_name)
         }
 
-    def run_torch(self, fractions: list[float]) -> dict[int, dict]:
+    def run_training_set_size(self, fractions: list[float]) -> dict[int, dict]:
         df_train, df_test = self.split_data_by_group()
 
         results = {}
         for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
-            train_feature_set, test_feature_set, processor, meta = self.build_data_for_pytorch(sub_train_df, df_test)
-            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, meta)
+            train_feature_set, test_feature_set, processor, meta = self.build_data(sub_train_df, df_test)
+            res = self.run_experiment(train_feature_set, test_feature_set, meta)
             d = {
                 **res,
                 "train_frac": r(frac),
@@ -362,3 +363,110 @@ class ExpRunner:
             logger.info(d)
             results[len(sub_train_df)] = d
         return results
+
+    def create_train_val_test_split(
+            self, test_size: float = 0.2, val_size: float = 0.2
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Splits data into three sets: train, validation, and a holdout test set.
+        Ensures group integrity (accountId) across all splits.
+        """
+        full_df: pd.DataFrame = self.full_df.copy()
+        field_config: FieldConfig = self.field_config
+        random_state: int = self.exp_params.random_state
+
+        logger.info(f"Splitting {len(full_df)} rows into Train/Val/Test...")
+
+        # --- 1. Split off the Holdout Test set (e.g., 20%) ---
+        gss_test = GroupShuffleSplit(
+            n_splits=1, test_size=test_size, random_state=random_state
+        )
+        train_val_idx, test_idx = next(gss_test.split(
+            full_df, y=full_df[field_config.label], groups=full_df[field_config.accountId]
+        ))
+
+        df_train_val = full_df.iloc[train_val_idx]
+        df_test_holdout = full_df.iloc[test_idx]
+
+        # --- 2. Split the Train/Val set into Train and Validation ---
+        # We need to adjust the val_size relative to the remaining data
+        # e.g., if val_size=0.2 and test_size=0.2, we want 20% of original,
+        # which is 0.2 / (1.0 - 0.2) = 0.25 of the remaining df_train_val.
+
+        relative_val_size = val_size / (1.0 - test_size)
+
+        gss_val = GroupShuffleSplit(
+            n_splits=1, test_size=relative_val_size, random_state=random_state
+        )
+        train_idx, val_idx = next(gss_val.split(
+            df_train_val, y=df_train_val[field_config.label], groups=df_train_val[field_config.accountId]
+        ))
+
+        df_train = df_train_val.iloc[train_idx]
+        df_val = df_train_val.iloc[val_idx]
+
+        # --- 3. Sanity Checks ---
+        train_acc = set(df_train[field_config.accountId].unique())
+        val_acc = set(df_val[field_config.accountId].unique())
+        test_acc = set(df_test_holdout[field_config.accountId].unique())
+
+        assert train_acc.isdisjoint(val_acc), "Leakage: Train/Val account overlap"
+        assert train_acc.isdisjoint(test_acc), "Leakage: Train/Test account overlap"
+        assert val_acc.isdisjoint(test_acc), "Leakage: Val/Test account overlap"
+
+        logger.info("Split complete. No account overlap.")
+        logger.info(f"  Train:   {len(df_train)} rows, {len(train_acc)} accounts")
+        logger.info(f"  Val:     {len(df_val)} rows, {len(val_acc)} accounts")
+        logger.info(f"  Test:    {len(df_test_holdout)} rows, {len(test_acc)} accounts")
+
+        return df_train, df_val, df_test_holdout
+
+    def run_cross_validation(
+            self, df_train_val: pd.DataFrame, n_splits: int = 5
+    ) -> dict[str, float]:
+        """
+        Performs k-fold cross-validation on the provided df_train_val.
+        Returns the averaged metrics.
+        """
+        field_config: FieldConfig = self.field_config
+        random_state: int = self.exp_params.random_state
+
+        gss_cv = GroupShuffleSplit(
+            n_splits=n_splits, test_size=1.0 / n_splits, random_state=random_state
+        )
+
+        all_metrics = []
+
+        logger.info(f"Starting {n_splits}-Fold Cross-Validation...")
+
+        for i, (train_idx, val_idx) in enumerate(gss_cv.split(
+                df_train_val, y=df_train_val[field_config.label], groups=df_train_val[field_config.accountId]
+        )):
+            logger.info(f"--- Fold {i + 1}/{n_splits} ---")
+            df_train_fold = df_train_val.iloc[train_idx]
+            df_val_fold = df_train_val.iloc[val_idx]
+
+            # --- Run the standard pipeline ---
+            train_fs, val_fs, processor, meta = self.build_data(
+                df_train_fold, df_val_fold
+            )
+
+            # Use run_experiment_pytorch, which trains and evaluates
+            metrics = self.run_experiment(train_fs, val_fs, meta)
+
+            logger.info(f"Fold {i + 1} Metrics: f1={metrics['f1']:.4f}, roc_auc={metrics['roc_auc']:.4f}")
+            all_metrics.append(metrics)
+
+        # --- Average the metrics ---
+        avg_metrics = {
+            'cv_f1': r(np.mean([m['f1'] for m in all_metrics])),
+            'cv_roc_auc': r(np.mean([m['roc_auc'] for m in all_metrics])),
+            'cv_loss': r(np.mean([m['loss'] for m in all_metrics])),
+            'cv_f1_std': r(np.std([m['f1'] for m in all_metrics])),
+        }
+
+        logger.info("Cross-Validation complete.")
+        logger.info(f"Average F1: {avg_metrics['cv_f1']:.4f} +/- {avg_metrics['cv_f1_std']:.4f}")
+        logger.info(f"Average ROC-AUC: {avg_metrics['cv_roc_auc']:.4f}")
+
+        return avg_metrics
