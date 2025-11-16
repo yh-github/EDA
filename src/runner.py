@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Self, Generator, Any
 import pandas as pd
 from numpy import floating
@@ -12,6 +11,7 @@ from config import *
 from config import EmbModel
 from data import TransactionDataset, FeatureSet, TrainingSample
 from embedder import EmbeddingService
+from exp_utils import set_global_seed
 from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, FeatureHyperParams
 from trainer import PyTorchTrainer
 
@@ -50,8 +50,8 @@ class ExpRunner:
         model_params:HybridModel.MlpHyperParams,
         field_config:FieldConfig = FieldConfig()
     ):
+        set_global_seed(exp_params.random_state)
         return ExpRunner(exp_params, full_df, emb_params, feat_proc_params, model_params, field_config)
-
 
     def __init__(self,
         exp_params: ExperimentConfig,
