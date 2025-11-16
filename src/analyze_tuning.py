@@ -105,8 +105,7 @@ def main():
                 if "unhashable type" in str(e):
                     # If it's a list, group by its string representation
                     logger.info(f"--- Average F1 by {col} (as string) ---")
-                    perf_str = df[col].astype(str).groupby(df[col].astype(str))['cv_f1'].mean().sort_values(
-                        ascending=False)
+                    perf_str = df.groupby(df[col].astype(str))['cv_f1'].mean().sort_values(ascending=False)
                     logger.info(perf_str.to_string())
                 else:
                     logger.warning(f"Could not group by column '{col}'. Error: {e}")
