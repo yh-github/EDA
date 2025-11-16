@@ -292,9 +292,8 @@ class ExpRunner:
         model_config = HybridModel.FeatureHyperParams.build(train_features, metadata)
 
         model = HybridModel(
-            config=model_config,
-            mlp_hidden_layers=[256, 128],
-            dropout_rate=0.4
+            feature_config=model_config,
+            mlp_config=HybridModel.MlpHyperParams()
         ).to(DEVICE)
 
         # --- Setup Optimizer and Loss ---

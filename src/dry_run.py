@@ -16,7 +16,7 @@ from config import (
     get_device
 )
 from embedder import EmbeddingService
-from feature_processor import FeatProcParams
+from feature_processor import FeatProcParams, FeatureHyperParams
 from runner import ExpRunner
 from classifier import HybridModel
 from data import TransactionDataset, TrainingSample
@@ -144,14 +144,14 @@ def main():
     # --- 6. Model Instantiation Test ---
     logger.info("--- 6. Testing Model Instantiation ---")
     try:
-        # Assuming you've made the fix to use metadata here
-        model_config = processor.build_model_config(train_fs, meta) 
-        logger.info(f"Built ModelConfig: {model_config}")
+        feature_config = FeatureHyperParams.build(train_fs, meta)
+        mlp_config = HybridModel.MlpHyperParams()
+        logger.info(f"Built FeatureHyperParams: {feature_config}")
+        logger.info(f"Built MlpHyperParams: {mlp_config}")
         
         model = HybridModel(
-            config=model_config,
-            mlp_hidden_layers=[256, 128],
-            dropout_rate=0.4
+            feature_config,
+            mlp_config
         )
         logger.info("Model instantiated successfully.")
         print("\n" + str(model) + "\n") # Print the model architecture

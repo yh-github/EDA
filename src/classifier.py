@@ -29,35 +29,35 @@ class HybridModel(nn.Module):
 
     def __init__(
         self,
-        config: FeatureHyperParams,
+        feature_config: FeatureHyperParams,
         mlp_config: MlpHyperParams
     ):
 
         super().__init__()
 
         # --- Store which features are active based on the config ---
-        self.use_text = config.text_embed_dim > 0
-        self.use_continuous = config.continuous_feat_dim > 0
-        self.use_categorical = len(config.categorical_vocab_sizes) > 0
+        self.use_text = feature_config.text_embed_dim > 0
+        self.use_continuous = feature_config.continuous_feat_dim > 0
+        self.use_categorical = len(feature_config.categorical_vocab_sizes) > 0
 
-        self.categorical_feature_names = list(config.categorical_vocab_sizes.keys())
+        self.categorical_feature_names = list(feature_config.categorical_vocab_sizes.keys())
 
         total_input_dim = 0
 
         # --- 1. Text Features ---
         if self.use_text:
-            total_input_dim += config.text_embed_dim
+            total_input_dim += feature_config.text_embed_dim
 
         # --- 2. Continuous Features ---
         if self.use_continuous:
-            total_input_dim += config.continuous_feat_dim
+            total_input_dim += feature_config.continuous_feat_dim
 
         # --- 3. Categorical Features ---
         total_categorical_embed_dim = 0
         if self.use_categorical:
             self.embedding_layers = nn.ModuleDict()
-            for name, vocab_size in config.categorical_vocab_sizes.items():
-                embed_dim = config.embedding_dims.get(name, 16)  # Default dim
+            for name, vocab_size in feature_config.categorical_vocab_sizes.items():
+                embed_dim = feature_config.embedding_dims.get(name, 16)  # Default dim
                 self.embedding_layers[name] = nn.Embedding(vocab_size, embed_dim)
                 total_categorical_embed_dim += embed_dim
             total_input_dim += total_categorical_embed_dim
