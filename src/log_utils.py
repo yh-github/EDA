@@ -11,7 +11,11 @@ def setup_logging(log_dir: Path, file_prefix: str=""):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_filename = log_dir / f"{file_prefix}_{timestamp}.log"
+    if file_prefix is None or file_prefix.strip() == "":
+        file_prefix = ""
+    else:
+        file_prefix += "_"
+    log_filename = log_dir / f"{file_prefix}{timestamp}.log"
 
     # Create handlers locally. They will be "owned" by the root logger.
     stdout_handler = logging.StreamHandler(sys.stdout)
