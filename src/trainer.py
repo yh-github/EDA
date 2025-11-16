@@ -29,6 +29,7 @@ class PyTorchTrainer:
         self.device = device
         self.patience = patience
 
+        self.best_epoch = 0
         self.best_metric = -1.0
         self.patience_counter = 0
         self.final_metrics = {}
@@ -113,6 +114,7 @@ class PyTorchTrainer:
             current_metric = metrics['f1']  # Or 'roc_auc', etc.
             if current_metric > self.best_metric:
                 self.best_metric = current_metric
+                self.best_epoch = epoch
                 self.final_metrics = metrics
                 self.patience_counter = 0
             else:
@@ -122,5 +124,14 @@ class PyTorchTrainer:
                 logger.info(f"Early stopping triggered at epoch {epoch}. Best F1: {self.best_metric:.4f}")
                 break
 
+        self.final_metrics['best_epoch'] = self.best_epoch
         logger.info("Training complete.")
+
+        if self.best_epoch == 1:
+            logger.warning("=" * 50)
+            logger.warning("  BEST METRIC WAS ON EPOCH 1.")
+            logger.warning("  This run may have failed to learn effectively.")
+            logger.warning("  Consider lowering the learning rate or simplifying the model.")
+            logger.warning("=" * 50)
+
         return self.final_metrics
