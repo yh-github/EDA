@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModel
 import diskcache
-from config import EmbModel
+from config import EmbModel, get_device
 from data import TextDataset
 
 CACHE_DIR_BASE = "cache/"
@@ -37,7 +37,7 @@ class EmbeddingService:
         model_name = str(model_name)
         self.model_name = model_name
         self.batch_size = batch_size
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_device()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
         self.max_length = max_length

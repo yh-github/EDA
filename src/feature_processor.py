@@ -1,21 +1,15 @@
 import logging
 from collections import Counter
-from dataclasses import dataclass, fields, field
+from dataclasses import fields
 from typing import Self
-
 import numpy as np
 import pandas as pd
-
 from config import TWO_PI, FieldConfig
 from data import FeatureSet
 
 logger = logging.getLogger(__name__)
 
-# In src/feature_processor.py
 from dataclasses import dataclass, field
-
-
-# ... (FeatProcParams is already here) ...
 
 @dataclass(frozen=True)
 class CategoricalFeatureConfig:
@@ -56,22 +50,13 @@ class FeatProcParams:
         )
 
     @classmethod
-    def NOP(cls) -> Self:
+    def all_off(cls) -> Self:
         kwargs = {
             f.name: False
             for f in fields(cls)
             if f.name.startswith("use_") and f.type == bool
         }
         return cls(**kwargs)
-
-
-@dataclass(frozen=True)
-class HybridModelConfig:
-    # feature-related parameters for initializing the HybridModel.
-    text_embed_dim: int = 0
-    continuous_feat_dim: int = 0
-    categorical_vocab_sizes: dict[str, int] = field(default_factory=dict)
-    embedding_dims: dict[str, int] = field(default_factory=dict)
 
 class HybridFeatureProcessor:
     """
@@ -155,7 +140,7 @@ class HybridFeatureProcessor:
         if not fallback_amounts.empty:
             log_abs_fallback = np.log(np.abs(fallback_amounts) + 1)
             quantiles = np.linspace(0, 1, self.n_bins + 1)
-            all_bins = log_abs_fallback.quantile(quantiles).values
+            all_bins = np.quantile(log_abs_fallback, quantiles)
             self.bin_edges = np.unique(all_bins)
 
             if len(self.bin_edges) < 2:
@@ -282,7 +267,7 @@ class HybridFeatureProcessor:
                 features['day_of_month_cos'] = np.cos(day_of_month_raw * (TWO_PI / days_in_month))
 
                 # 14-day cycle
-                epoch_days = (dates - pd.Timestamp("2000-01-01")).dt.days
+                epoch_days = (dates - pd.Timestamp("2000-01-01")).dt.days # type: ignore
                 raw_cycle_day_14 = epoch_days % 14
                 features['day_of_14_cycle_sin'] = np.sin(raw_cycle_day_14 * (TWO_PI / 14))
                 features['day_of_14_cycle_cos'] = np.cos(raw_cycle_day_14 * (TWO_PI / 14))
@@ -329,39 +314,6 @@ class HybridFeatureProcessor:
         else:
             return self.unknown_token_id
 
-    def build_model_config(
-        self,
-        train_features: FeatureSet,
-        metadata: FeatureMetadata  # <-- Add this parameter
-    ) -> HybridModelConfig:
-        """
-        Dynamically builds the HybridModelConfig dataclass based on the
-        feature metadata returned from the processor.
-        """
-
-        # 1. Get dimensions for text and continuous features
-        text_embed_dim = train_features.X_text.shape[1]
-        continuous_feat_dim = train_features.X_continuous.shape[1]
-
-        # 2. Get categorical config directly FROM THE METADATA
-        categorical_vocab_sizes = {
-            name: config.vocab_size
-            for name, config in metadata.categorical_features.items()
-        }
-
-        # 3. Get embedding dims directly FROM THE METADATA
-        embedding_dims = {
-            name: config.embedding_dim
-            for name, config in metadata.categorical_features.items()
-        }
-
-        # 4. Return the complete, frozen config object
-        return HybridModelConfig(
-            text_embed_dim=text_embed_dim,
-            continuous_feat_dim=continuous_feat_dim,
-            categorical_vocab_sizes=categorical_vocab_sizes,
-            embedding_dims=embedding_dims
-        )
 
 # ---
 # Health Check Utilities
@@ -404,11 +356,11 @@ def check_token_distribution(
         return {}
 
     logger.info(f"\n{name} Token Distribution:")
-    counts = Counter(features['amount_token_id'])
+    counts:Counter[int] = Counter(features['amount_token_id']) # type: ignore
     total_rows = len(features)
 
-    magic_count = sum(counts[i] for i in processor.top_k_token_ids if i in counts)
-    bin_count = sum(counts[i] for i in processor.bin_token_ids if i in counts)
+    magic_count = sum(counts.get(i, 0) for i in processor.top_k_token_ids)
+    bin_count = sum(counts.get(i, 0) for i in processor.bin_token_ids)
     unknown_count = counts.get(processor.unknown_token_id, 0)
 
     magic_pct = (magic_count / total_rows) * 100 if total_rows > 0 else 0
@@ -425,3 +377,48 @@ def check_token_distribution(
         'unknown': {'count': unknown_count, 'percent': unknown_pct}
     }
     return stats
+
+
+@dataclass(frozen=True)
+class FeatureHyperParams:
+    # feature-related parameters for initializing the HybridModel.
+    text_embed_dim: int = 0
+    continuous_feat_dim: int = 0
+    categorical_vocab_sizes: dict[str, int] = field(default_factory=dict)
+    embedding_dims: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def build(
+        cls,
+        train_features: FeatureSet,
+        metadata: FeatureMetadata
+    ) -> Self:
+        """
+        Dynamically builds the HybridModelConfig dataclass based on the
+        feature metadata returned from the processor.
+        """
+
+        # 1. Get dimensions for text and continuous features
+        text_embed_dim = train_features.X_text.shape[1]
+        continuous_feat_dim = train_features.X_continuous.shape[1]
+
+        # 2. Get categorical config directly FROM THE METADATA
+        categorical_vocab_sizes = {
+            name: config.vocab_size
+            for name, config in metadata.categorical_features.items()
+        }
+
+        # 3. Get embedding dims directly FROM THE METADATA
+        embedding_dims = {
+            name: config.embedding_dim
+            for name, config in metadata.categorical_features.items()
+        }
+
+        # 4. Return the complete, frozen config object
+        return cls(
+            text_embed_dim=text_embed_dim,
+            continuous_feat_dim=continuous_feat_dim,
+            categorical_vocab_sizes=categorical_vocab_sizes,
+            embedding_dims=embedding_dims
+        )
+

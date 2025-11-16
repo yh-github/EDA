@@ -11,7 +11,7 @@ from config import *
 from config import EmbModel
 from data import TransactionDataset, FeatureSet, TrainingSample
 from embedder import EmbeddingService
-from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, HybridModelConfig
+from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata
 from trainer import train_model, evaluate_model
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ class ExpRunner:
                 continue
             if frac >= 1.0:
                 logger.info(f"Yielding {frac * 100:.0f}% split: {total_accounts} accounts, {len(full_train_df)} rows")
-                yield (1.0, full_train_df)
+                yield 1.0, full_train_df
                 continue
 
             n_accounts_to_take = int(total_accounts * frac)
@@ -264,7 +264,6 @@ class ExpRunner:
         self,
        train_features: FeatureSet,
        test_features: FeatureSet,
-       processor: HybridFeatureProcessor,
        metadata: FeatureMetadata
     ):
         # --- Hyperparameters (tune) ---
@@ -290,7 +289,7 @@ class ExpRunner:
         # --- Instantiate the Model ---
 
         # Get dimensions from the FeatureSet attributes
-        model_config = processor.build_model_config(train_features, metadata)
+        model_config = HybridModel.FeatureHyperParams.build(train_features, metadata)
 
         model = HybridModel(
             config=model_config,
@@ -348,7 +347,7 @@ class ExpRunner:
         results = {}
         for frac, sub_train_df in self.create_learning_curve_splits(df_train, fractions):
             train_feature_set, test_feature_set, processor, meta = self.build_data_for_pytorch(sub_train_df, df_test)
-            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, processor, meta)
+            res = self.run_experiment_pytorch(train_feature_set, test_feature_set, meta)
             d = {
                 **res,
                 "train_frac": r(frac),
@@ -360,38 +359,3 @@ class ExpRunner:
             logger.info(d)
             results[len(sub_train_df)] = d
         return results
-
-    def _build_model_config(self,
-                            train_features: FeatureSet,
-                            metadata: FeatureMetadata) -> HybridModelConfig:
-        """
-        Dynamically builds the HybridModelConfig dataclass based on the
-        feature metadata returned from the processor.
-
-        This method is now fully data-driven and does not contain any
-        hardcoded feature names.
-        """
-
-        # 1. Get dimensions for text and continuous features
-        text_embed_dim = train_features.X_text.shape[1]
-        continuous_feat_dim = train_features.X_continuous.shape[1]
-
-        # 2. Get categorical config directly FROM THE METADATA
-        categorical_vocab_sizes = {
-            name: config.vocab_size
-            for name, config in metadata.categorical_features.items()
-        }
-
-        # 3. Get embedding dims directly FROM THE METADATA
-        embedding_dims = {
-            name: config.embedding_dim
-            for name, config in metadata.categorical_features.items()
-        }
-
-        # 4. Return the complete, frozen config object
-        return HybridModelConfig(
-            text_embed_dim=text_embed_dim,
-            continuous_feat_dim=continuous_feat_dim,
-            categorical_vocab_sizes=categorical_vocab_sizes,
-            embedding_dims=embedding_dims
-        )

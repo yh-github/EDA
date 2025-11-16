@@ -1,6 +1,11 @@
 from dataclasses import dataclass, field
+from typing import Self
+
 import torch
 import torch.nn as nn
+
+from data import FeatureSet
+from feature_processor import FeatureMetadata, FeatureHyperParams
 
 
 @dataclass(frozen=True)
@@ -15,17 +20,17 @@ class HybridModelConfig:
 
 
 class HybridModel(nn.Module):
-    """
-    A PyTorch classifier that is "ablation-aware."
-    It is now initialized using a single HybridModelConfig dataclass.
-    """
+
+    @dataclass(frozen=True)
+    class MlpHyperParams:
+        """Holds all hyperparameters for the MLP classifier head."""
+        mlp_hidden_layers: list[int] = field(default_factory=lambda: [128, 64])
+        dropout_rate: float = 0.3
 
     def __init__(
         self,
-        config: HybridModelConfig,
-        # MLP (Classifier Head) Config remains separate
-        mlp_hidden_layers: list[int] = [128, 64],
-        dropout_rate: float = 0.3
+        config: FeatureHyperParams,
+        mlp_config: MlpHyperParams
     ):
 
         super().__init__()
@@ -65,14 +70,14 @@ class HybridModel(nn.Module):
             raise ValueError("No features are enabled. Model cannot be built.")
 
         # --- 4. Classifier Head (MLP) ---
-        layer_dims = [total_input_dim] + mlp_hidden_layers
+        layer_dims = [total_input_dim] + mlp_config.mlp_hidden_layers
 
         mlp_layers = []
         for i in range(len(layer_dims) - 1):
             mlp_layers.append(nn.Linear(layer_dims[i], layer_dims[i + 1]))
             mlp_layers.append(nn.ReLU())
             mlp_layers.append(nn.BatchNorm1d(layer_dims[i + 1]))
-            mlp_layers.append(nn.Dropout(dropout_rate))
+            mlp_layers.append(nn.Dropout(mlp_config.dropout_rate))
 
         mlp_layers.append(nn.Linear(layer_dims[-1], 1))
         self.mlp = nn.Sequential(*mlp_layers)
