@@ -200,7 +200,7 @@ class HyperTuner:
             logger.info("=" * 50)
             logger.info("--- TUNING COMPLETE ---")
 
-            all_results = [result for result in results_cache.iterall()]
+            all_results = [results_cache[k] for k in results_cache]
 
             if not all_results:
                 logger.warning("No results were found in the cache.")
