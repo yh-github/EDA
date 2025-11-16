@@ -66,7 +66,7 @@ def main():
             full_df=df_cleaned,
             emb_params=emb_params,
             feat_proc_params=feat_params,
-            mlp_params=mlp_params,  # Pass in the MLP params
+            model_params=mlp_params,
             field_config=field_config
         )
 
