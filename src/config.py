@@ -10,7 +10,7 @@ TWO_PI = 2 * np.pi
 @dataclass(frozen=True)
 class ExperimentConfig:
     test_size:float = 0.2
-    random_state:int = 2025
+    random_state:int = 112025
     max_text_length:int = 64 # Max tokens for the text feature
     go_no_go_threshold_pct:float = 5.0 # Max 5% unknown tokens
 
