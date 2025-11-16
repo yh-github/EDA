@@ -13,7 +13,7 @@ from config import EmbModel
 from data import TransactionDataset, FeatureSet, TrainingSample
 from embedder import EmbeddingService
 from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, FeatureHyperParams
-from trainer import train_model, evaluate_model
+from trainer import PyTorchTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -265,19 +265,18 @@ class ExpRunner:
 
         return train_feature_set, test_feature_set, processor, metadata
 
+
     def run_experiment(
         self,
-       train_features: FeatureSet,
-       test_features: FeatureSet,
-       metadata: FeatureMetadata
+        train_features: FeatureSet,
+        test_features: FeatureSet,
+        metadata: FeatureMetadata
     ):
-        # --- Hyperparameters (tune) ---
+        # --- Use params from config ---
         DEVICE = get_device()
         NUM_EPOCHS = self.exp_params.epochs
         BATCH_SIZE = self.exp_params.batch_size
         LEARNING_RATE = self.exp_params.learning_rate
-        patience = self.exp_params.early_stopping_patience
-        patience_counter = 0
 
         # --- Create DataLoaders ---
         train_dataset = TransactionDataset(train_features)
@@ -292,10 +291,7 @@ class ExpRunner:
         test_loader = dataloader(test_dataset, shuffle=False)
 
         # --- Instantiate the Model ---
-
-        # Get dimensions from the FeatureSet attributes
         model_config = FeatureHyperParams.build(train_features, metadata)
-
         model = HybridModel(
             feature_config=model_config,
             mlp_config=self.model_params
@@ -305,40 +301,19 @@ class ExpRunner:
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        logger.info(f"Starting PyTorch training on {DEVICE} for {NUM_EPOCHS} epochs...")
+        # --- Create and run the Trainer ---
+        trainer = PyTorchTrainer(
+            model=model,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=DEVICE,
+            patience=self.exp_params.early_stopping_patience
+        )
 
-        # --- 5. Training Loop ---
-        best_f1 = -1.0
-        final_metrics = {}
+        # This one call does all the work!
+        final_metrics = trainer.fit(train_loader, test_loader, NUM_EPOCHS)
 
-        for epoch in range(1, NUM_EPOCHS + 1):
-            start_time = time.time()
-
-            train_loss = train_model(model, train_loader, optimizer, criterion, DEVICE)
-            metrics = evaluate_model(model, test_loader, criterion, DEVICE)
-
-            epoch_time = time.time() - start_time
-
-            logger.info(
-                f"Epoch {epoch}/{NUM_EPOCHS} [{epoch_time:.2f}s] | "
-                f"Train Loss: {train_loss:.4f} | Test Loss: {metrics['loss']:.4f} | "
-                f"F1: {metrics['f1']:.4f} | ROC-AUC: {metrics['roc_auc']:.4f}"
-            )
-
-            if metrics['f1'] > best_f1:
-                best_f1 = metrics['f1']
-                final_metrics = metrics
-                patience_counter = 0
-            else:
-                patience_counter += 1
-
-            if patience_counter >= patience:
-                logger.info(f"Early stopping triggered at epoch {epoch}. Best F1: {best_f1:.4f}")
-                break
-
-        logger.info("Training complete.")
-
-        # --- 6. Return Metrics (unchanged) ---
+        # --- Return Metrics ---
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
         return {
             **final_metrics_rounded,
