@@ -6,10 +6,8 @@ from pathlib import Path
 # --- Configuration ---
 CACHE_DIR = Path('cache/results/')
 
-
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
-
 
 def load_results_to_dataframe(cache_path: Path) -> pd.DataFrame | None:
     """Loads all results from a diskcache into a flat pandas DataFrame."""
@@ -21,7 +19,7 @@ def load_results_to_dataframe(cache_path: Path) -> pd.DataFrame | None:
 
     try:
         with diskcache.Cache(cache_path) as cache:
-            all_results = [result for result in cache.iterall()]
+            all_results = [cache[k] for k in cache]
     except Exception as e:
         logger.error(f"Error reading cache: {e}")
         return None
@@ -71,7 +69,11 @@ def main():
         'cv_roc_auc',
         'emb_params.model_name',
         'exp_params.learning_rate',
-        'model_params.mlp_hidden_layers'
+        'model_params.mlp_hidden_layers',
+        'feat_proc_params.use_cyclical_dates',
+        'feat_proc_params.use_categorical_dates',
+        'feat_proc_params.use_continuous_amount',
+        'feat_proc_params.use_categorical_amount'
     ]
 
     # Filter for columns that actually exist in the DataFrame
