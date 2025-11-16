@@ -61,6 +61,7 @@ class EmbeddingService:
         logger.info(f'{len(text_list)=} {len(unique_texts)=} {len(texts_to_embed)=}')
 
         # 2. Embed *only* the new texts (if any)
+        elapsed_time = 0.0
         if texts_to_embed:
             total_samples = len(texts_to_embed)
             num_batches = ((total_samples - 1) // self.batch_size) + 1

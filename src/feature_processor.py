@@ -237,11 +237,14 @@ class HybridFeatureProcessor:
         return self._build_meta()
 
 
-    def transform(self, df: pd.DataFrame, date_col='date', amount_col='amount') -> pd.DataFrame:
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Applies the learned rules to transform a DataFrame based on enabled features.
         """
         logger.info(f"Transforming {len(df)} rows...")
+
+        date_col = self.fields_config.date
+        amount_col = self.fields_config.amount
 
         features = pd.DataFrame(index=df.index)
 

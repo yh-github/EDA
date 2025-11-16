@@ -1,22 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Self
-
 import torch
 import torch.nn as nn
-
-from data import FeatureSet
-from feature_processor import FeatureMetadata, FeatureHyperParams
-
-
-@dataclass(frozen=True)
-class HybridModelConfig:
-    """
-    Holds all feature-related parameters for initializing the HybridModel.
-    """
-    text_embed_dim: int = 0
-    continuous_feat_dim: int = 0
-    categorical_vocab_sizes: dict[str, int] = field(default_factory=dict)
-    embedding_dims: dict[str, int] = field(default_factory=dict)
+from feature_processor import FeatureHyperParams
 
 
 class HybridModel(nn.Module):

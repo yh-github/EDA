@@ -36,6 +36,7 @@ class ExpRunner:
             full_df=other.full_df,
             emb_params=other.emb_params,
             feat_proc_params=other.feat_proc_params,
+            model_params=other.model_params,
             field_config=other.field_config
         )
 
@@ -45,9 +46,10 @@ class ExpRunner:
         full_df:pd.DataFrame,
         emb_params:EmbeddingService.Params,
         feat_proc_params:FeatProcParams,
+        model_params:HybridModel.MlpHyperParams,
         field_config:FieldConfig = FieldConfig()
     ):
-        return ExpRunner(exp_params, full_df, emb_params, feat_proc_params, field_config)
+        return ExpRunner(exp_params, full_df, emb_params, feat_proc_params, model_params, field_config)
 
 
     def __init__(self,
@@ -55,6 +57,7 @@ class ExpRunner:
         full_df: pd.DataFrame,
         emb_params: EmbeddingService.Params,
         feat_proc_params: FeatProcParams,
+        model_params: HybridModel.MlpHyperParams,
         field_config: FieldConfig = FieldConfig()
     ):
         self.exp_params = exp_params
@@ -62,6 +65,7 @@ class ExpRunner:
         self.emb_params = emb_params
         self.emb_proc_params = emb_params
         self.feat_proc_params = feat_proc_params
+        self.model_params = model_params
         self.field_config = field_config
         self.embedder_map: dict[EmbModel, EmbeddingService] = {}
 
@@ -268,9 +272,9 @@ class ExpRunner:
     ):
         # --- Hyperparameters (tune) ---
         DEVICE = get_device()
-        NUM_EPOCHS = 10
-        BATCH_SIZE = 256
-        LEARNING_RATE = 1e-3
+        NUM_EPOCHS = self.exp_params.epochs
+        BATCH_SIZE = self.exp_params.batch_size
+        LEARNING_RATE = self.exp_params.learning_rate
         patience = self.exp_params.early_stopping_patience
         patience_counter = 0
 
@@ -293,7 +297,7 @@ class ExpRunner:
 
         model = HybridModel(
             feature_config=model_config,
-            mlp_config=HybridModel.MlpHyperParams()
+            mlp_config=self.model_params
         ).to(DEVICE)
 
         # --- Setup Optimizer and Loss ---
