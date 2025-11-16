@@ -1,5 +1,4 @@
 import logging
-import json
 import pandas as pd
 import diskcache
 from pathlib import Path
@@ -22,10 +21,9 @@ def load_results_to_dataframe(cache_path: Path) -> pd.DataFrame | None:
         return None
 
     try:
-        with diskcache.Cache(str(cache_path)) as cache:  # Use str() for older/safer diskcache
-            # --- FIX 1: Correct cache iteration ---
+        with diskcache.Cache(str(cache_path)) as cache:
+            # Use the correct iteration method you found
             all_results = [cache[k] for k in cache]
-            # --- END OF FIX 1 ---
     except Exception as e:
         logger.error(f"Error reading cache: {e}")
         return None
@@ -56,36 +54,34 @@ def main():
         return
 
     # --- 1. Find the "Best" and "Most Stable" Models ---
-    metric_cols = [
-        'cv_f1',
-        'cv_f1_std',
-        'cv_roc_auc'
-    ]
-    metric_cols = [col for col in metric_cols if col in df.columns]
-    param_cols = [col for col in df.columns if col not in metric_cols and col != 'error']
 
-    # --- FIX 2: Handle unhashable types (like lists) ---
+    # This ensures 'cv_loss' etc. are not treated as parameters
+    metric_cols = [
+        'cv_f1', 'cv_f1_std', 'cv_roc_auc', 'cv_loss',
+        'loss', 'accuracy', 'f1', 'roc_auc', 'error'
+    ]
+    present_metric_cols = [col for col in metric_cols if col in df.columns]
+
+    # Param cols are everything else
+    param_cols = [col for col in df.columns if col not in present_metric_cols]
+
     varying_param_cols = []
     for col in param_cols:
         try:
-            # Try the fast, normal way first
             is_varying = df[col].nunique() > 1
         except TypeError:
-            # If it fails (e.g., unhashable list), convert to string and try again
             try:
                 is_varying = df[col].astype(str).nunique() > 1
             except Exception as e:
-                # If it *still* fails, just skip this column
                 logger.warning(f"Could not determine uniqueness for column '{col}'. Skipping. Error: {e}")
                 is_varying = False
 
         if is_varying:
             varying_param_cols.append(col)
-    # --- END OF FIX 2 ---
 
     logger.info(f"Analyzing {len(varying_param_cols)} varying parameters: {varying_param_cols}")
 
-    cols_to_show = metric_cols + varying_param_cols
+    cols_to_show = present_metric_cols + varying_param_cols
     top_10_models = df.sort_values(by='cv_f1', ascending=False).head(10)
 
     logger.info("\n--- Top 10 Best-Performing Models (Only Showing Varying Params) ---")
@@ -97,16 +93,25 @@ def main():
     logger.info("Look for a model with high 'cv_f1' AND low 'cv_f1_std'.")
 
     # --- 2. Analyze Trends (GroupBy) ---
+
     for col in varying_param_cols:
         if col in df.columns:
             try:
                 logger.info(f"\n--- Average F1 by {col} ---")
+                # This will fail for lists
                 perf = df.groupby(col)['cv_f1'].mean().sort_values(ascending=False)
                 logger.info(perf.to_string())
-            except TypeError:
-                logger.warning(f"Could not group by unhashable column: {col}")
+            except TypeError as e:
+                if "unhashable type" in str(e):
+                    # If it's a list, group by its string representation
+                    logger.info(f"--- Average F1 by {col} (as string) ---")
+                    perf_str = df[col].astype(str).groupby(df[col].astype(str))['cv_f1'].mean().sort_values(
+                        ascending=False)
+                    logger.info(perf_str.to_string())
+                else:
+                    logger.warning(f"Could not group by column '{col}'. Error: {e}")
             except Exception as e:
-                logger.warning(f"Could not analyze {col}: {e}")
+                logger.warning(f"General error analyzing column '{col}': {e}")
 
 
 if __name__ == "__main__":
