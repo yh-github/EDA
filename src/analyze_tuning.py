@@ -53,6 +53,20 @@ def main():
         logger.info("Exiting.")
         return
 
+    # Check if 'use_categorical_amount' was part of this experiment
+    if 'feat_proc_params.use_categorical_amount' in df.columns:
+        logger.info("Normalizing conditional parameters for 'use_categorical_amount'...")
+        # Create a mask for all rows where the feature was OFF
+        mask = df['feat_proc_params.use_categorical_amount'] == False
+
+        # If k_top exists, set it to 0 for all "OFF" rows
+        if 'feat_proc_params.k_top' in df.columns:
+            df.loc[mask, 'feat_proc_params.k_top'] = 0
+
+        # If n_bins exists, set it to 0 for all "OFF" rows
+        if 'feat_proc_params.n_bins' in df.columns:
+            df.loc[mask, 'feat_proc_params.n_bins'] = 0
+
     # --- 1. Find the "Best" and "Most Stable" Models ---
 
     # This ensures 'cv_loss' etc. are not treated as parameters
