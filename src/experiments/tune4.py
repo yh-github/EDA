@@ -28,6 +28,6 @@ structured_grid_config = {
 }
 
 if __name__ == "__main__":
-    tuner = HyperTuner.load(4)
+    tuner = HyperTuner.load(4, unique_cache=True)
     tuner.run(structured_grid_config, n_splits=4)
 
