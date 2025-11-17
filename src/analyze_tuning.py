@@ -1,6 +1,5 @@
 import logging
 import sys
-
 import pandas as pd
 import diskcache
 from pathlib import Path
@@ -128,7 +127,6 @@ def main(dir_index:str):
             except Exception as e:
                 logger.warning(f"General error analyzing column '{col}': {e}")
 
-import sys
 if __name__ == "__main__":
     ind = sys.argv[1] if len(sys.argv) > 1 else ""
     main(ind)
