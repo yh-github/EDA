@@ -23,11 +23,14 @@ class HyperTuner:
     """
 
     @classmethod
-    def load(cls, index: int) ->Self:
+    def load(cls, index: int, unique_cache=False) ->Self:
         setup_logging(Path('logs/'), f"tuning{index}")
+        postfix = ""
+        if unique_cache:
+            postfix = f"{index}/"
         return cls(
             data_path=Path('data/rec_data2.csv'),
-            cache_dir=Path('cache/results/'),
+            cache_dir=Path(f'cache/results/{postfix}'),
             field_config=FieldConfig(),
         )
 

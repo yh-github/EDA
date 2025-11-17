@@ -1,4 +1,6 @@
 import logging
+import sys
+
 import pandas as pd
 import diskcache
 from pathlib import Path
@@ -46,8 +48,8 @@ def load_results_to_dataframe(cache_path: Path) -> pd.DataFrame | None:
         return None
 
 
-def main():
-    df = load_results_to_dataframe(CACHE_DIR)
+def main(dir_index:str):
+    df = load_results_to_dataframe(CACHE_DIR/dir_index)
 
     if df is None or df.empty:
         logger.info("Exiting.")
@@ -126,6 +128,7 @@ def main():
             except Exception as e:
                 logger.warning(f"General error analyzing column '{col}': {e}")
 
-
+import sys
 if __name__ == "__main__":
-    main()
+    ind = sys.argv[1] if len(sys.argv) > 1 else ""
+    main(ind)
