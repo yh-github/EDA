@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader
 from classifier import HybridModel
+from classifier_transformer import TransformerHyperParams, TabularTransformerModel
 from config import *
 from config import EmbModel
 from data import TransactionDataset, FeatureSet, TrainingSample
@@ -17,6 +18,7 @@ from trainer import PyTorchTrainer
 
 logger = logging.getLogger(__name__)
 
+ModelParams = HybridModel.MlpHyperParams|TransformerHyperParams
 
 def r(x: float| floating[Any]) -> float:
     return round(float(x), 3)
@@ -47,7 +49,7 @@ class ExpRunner:
         full_df:pd.DataFrame,
         emb_params:EmbeddingService.Params,
         feat_proc_params:FeatProcParams,
-        model_params:HybridModel.MlpHyperParams,
+        model_params:ModelParams,
         field_config:FieldConfig = FieldConfig()
     ):
         set_global_seed(exp_params.random_state)
@@ -58,7 +60,7 @@ class ExpRunner:
         full_df: pd.DataFrame,
         emb_params: EmbeddingService.Params,
         feat_proc_params: FeatProcParams,
-        model_params: HybridModel.MlpHyperParams,
+        model_params: ModelParams,
         field_config: FieldConfig = FieldConfig()
     ):
         self.exp_params = exp_params
@@ -291,11 +293,8 @@ class ExpRunner:
         test_loader = dataloader(test_dataset, shuffle=False)
 
         # --- Instantiate the Model ---
-        model_config = FeatureHyperParams.build(train_features, metadata)
-        model = HybridModel(
-            feature_config=model_config,
-            mlp_config=self.model_params
-        ).to(DEVICE)
+        feature_config = FeatureHyperParams.build(train_features, metadata)
+        model = self.build_model(feature_config).to(DEVICE)
 
         # --- Setup Optimizer and Loss ---
         criterion = nn.BCEWithLogitsLoss()
@@ -445,3 +444,19 @@ class ExpRunner:
         logger.info(f"Average ROC-AUC: {avg_metrics['cv_roc_auc']:.4f}")
 
         return avg_metrics
+
+    def build_model(self, feature_config):
+        if isinstance(self.model_params, HybridModel.MlpHyperParams):
+            return HybridModel(
+                feature_config=feature_config,
+                mlp_config=self.model_params
+            )
+
+        elif isinstance(self.model_params, TransformerHyperParams):
+            return TabularTransformerModel(
+                feature_config=feature_config,
+                transformer_config=self.model_params
+            )
+
+        else:
+            raise TypeError(f"Unknown model_params type: {type(self.model_params)}")

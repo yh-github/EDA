@@ -1,7 +1,7 @@
 import logging
 import json
 from pathlib import Path
-from typing import Self
+from typing import Self, Any
 import pandas as pd
 import diskcache
 from sklearn.model_selection import ParameterGrid
@@ -23,7 +23,7 @@ class HyperTuner:
     """
 
     @classmethod
-    def load(cls, index: int, unique_cache=False) ->Self:
+    def load(cls, index: int, model_config_class: Any = HybridModel.MlpHyperParams, unique_cache=True) ->Self:
         setup_logging(Path('logs/'), f"tuning{index}")
         postfix = ""
         if unique_cache:
@@ -32,9 +32,15 @@ class HyperTuner:
             data_path=Path('data/rec_data2.csv'),
             cache_dir=Path(f'cache/results/{postfix}'),
             field_config=FieldConfig(),
+            model_config_class=model_config_class
         )
 
-    def __init__(self, data_path: Path, cache_dir: Path, field_config: FieldConfig = FieldConfig()):
+    def __init__(self,
+         data_path: Path,
+         cache_dir: Path,
+         model_config_class: Any = HybridModel.MlpHyperParams,
+         field_config: FieldConfig = FieldConfig()
+    ):
         """
         Initializes the Tuner by loading and splitting the data one time.
 
@@ -45,6 +51,7 @@ class HyperTuner:
         self.data_path = data_path
         self.cache_dir = cache_dir
         self.field_config = field_config
+        self.model_config_class = model_config_class
 
         logger.info(f"HyperTuner initialized. Cache at: {self.cache_dir}")
 
@@ -76,7 +83,7 @@ class HyperTuner:
             full_df=df_cleaned,
             emb_params=EmbeddingService.Params(model_name=EmbModel.ALBERT),
             feat_proc_params=FeatProcParams.all_off(),
-            model_params=HybridModel.MlpHyperParams()
+            model_params=self.model_config_class()
         )
 
         logger.info("Creating Train/Val/Test split for tuning...")
@@ -103,7 +110,7 @@ class HyperTuner:
             'exp_params': (ExperimentConfig, asdict(base_exp_config)),
             'emb_params': (EmbeddingService.Params, {}),
             'feat_proc_params': (FeatProcParams, {}),
-            'model_params': (HybridModel.MlpHyperParams, {}),
+            'model_params': (self.model_config_class, {})
         }
 
         materialized_grid = {}
