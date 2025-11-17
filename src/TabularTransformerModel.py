@@ -1,0 +1,232 @@
+from dataclasses import dataclass, field
+import torch
+import torch.nn as nn
+from feature_processor import FeatureHyperParams
+
+
+@dataclass(frozen=True)
+class TransformerHyperParams:
+    """Holds all hyperparameters for the TabularTransformerModel."""
+    # The internal embedding dimension for all features
+    d_model: int = 128
+    # Number of heads in the MultiHeadAttention
+    n_head: int = 4
+    # Number of TransformerEncoder layers to stack
+    num_encoder_layers: int = 2
+    # Hidden layers for the *final* classifier head
+    final_mlp_layers: list[int] = field(default_factory=lambda: [64])
+    dropout_rate: float = 0.2
+
+
+class TabularTransformerModel(nn.Module):
+    """
+    A Transformer-based model for our hybrid data.
+
+    It embeds all features (text, continuous, categorical) into a
+    common dimension (d_model), treats them as a sequence of tokens,
+    and passes them through a TransformerEncoder.
+    """
+
+    def __init__(
+            self,
+            feature_config: FeatureHyperParams,
+            transformer_config: TransformerHyperParams
+    ):
+        super().__init__()
+
+        d_model = transformer_config.d_model
+        self.feature_config = feature_config
+
+        # --- 1. Create Embedding Layers for all features ---
+
+        self.feature_embedders = nn.ModuleDict()
+
+        # A. Text Feature
+        if feature_config.text_embed_dim > 0:
+            self.feature_embedders['text'] = nn.Linear(
+                feature_config.text_embed_dim, d_model
+            )
+
+        # B. Continuous Features
+        # We'll embed each continuous feature with its own small network
+        if feature_config.continuous_feat_dim > 0:
+            cont_names = self._get_continuous_feature_names(feature_config)
+            for name in cont_names:
+                self.feature_embedders[name] = nn.Linear(1, d_model)  # 1-dim (scalar) -> d_model
+
+        # C. Categorical Features
+        for name, vocab_size in feature_config.categorical_vocab_sizes.items():
+            embed_dim = feature_config.embedding_dims.get(name, 16)
+            # We use an Embedding, then a Linear to get to d_model
+            self.feature_embedders[name] = nn.Sequential(
+                nn.Embedding(vocab_size, embed_dim),
+                nn.Linear(embed_dim, d_model)
+            )
+
+        # --- 2. The Transformer Encoder ---
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=transformer_config.n_head,
+            dropout=transformer_config.dropout_rate,
+            batch_first=True  # We use (Batch, Seq, Features)
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=transformer_config.num_encoder_layers
+        )
+
+        # --- 3. The [CLS] Token ---
+        # A learnable token we prepend to the sequence.
+        # Its final output will represent the aggregated "meaning"
+        # of the entire transaction.
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+
+        # --- 4. The Final Classifier Head ---
+        mlp_head_layers = [d_model] + transformer_config.final_mlp_layers
+
+        mlp_layers = []
+        for i in range(len(mlp_head_layers) - 1):
+            mlp_layers.append(nn.Linear(mlp_head_layers[i], mlp_head_layers[i + 1]))
+            mlp_layers.append(nn.ReLU())
+            mlp_layers.append(nn.Dropout(transformer_config.dropout_rate))
+
+        mlp_layers.append(nn.Linear(mlp_head_layers[-1], 1))
+        self.mlp_head = nn.Sequential(*mlp_layers)
+
+        print(f"TabularTransformerModel Initialized. d_model={d_model}")
+
+    def _get_continuous_feature_names(self, fc: FeatureHyperParams) -> list[str]:
+        # This is a helper to get names for the continuous features.
+        # Based on how runner.py builds them:
+        names = []
+        if fc.continuous_feat_dim > 0:
+            # We need to know how many cyclical and scalable cols there are.
+            # This is a bit of a "hack" as we're inferring from dims.
+            # A cleaner way would be to pass the *names* in FeatureHyperParams.
+            # For now, we assume FeatureSet order [cyclical, scalable]
+
+            # This is imperfect. Let's just create one Linear for all continuous.
+            # Simpler and more robust.
+            pass
+
+        # --- REVISED PLAN ---
+        # Let's create one Linear embedder for the *entire* continuous block
+        if fc.continuous_feat_dim > 0:
+            self.feature_embedders['continuous_block'] = nn.Linear(
+                fc.continuous_feat_dim, fc.d_model
+            )
+        # --- END REVISED PLAN ---
+        # This is much cleaner. Let's update the init.
+
+        return []  # We won't use this helper
+
+    def __init__(  # --- REVISED __init__ ---
+            self,
+            feature_config: FeatureHyperParams,
+            transformer_config: TransformerHyperParams
+    ):
+        super().__init__()
+
+        d_model = transformer_config.d_model
+        self.feature_config = feature_config
+        self.categorical_names = list(feature_config.categorical_vocab_sizes.keys())
+
+        self.feature_embedders = nn.ModuleDict()
+        num_features = 0  # Count how many "tokens" we will have
+
+        # A. Text Feature
+        if feature_config.text_embed_dim > 0:
+            self.feature_embedders['text'] = nn.Linear(
+                feature_config.text_embed_dim, d_model
+            )
+            num_features += 1
+
+        # B. Continuous Features (Revised)
+        if feature_config.continuous_feat_dim > 0:
+            self.feature_embedders['continuous_block'] = nn.Linear(
+                feature_config.continuous_feat_dim, d_model
+            )
+            num_features += 1
+
+        # C. Categorical Features
+        for name, vocab_size in feature_config.categorical_vocab_sizes.items():
+            embed_dim = feature_config.embedding_dims.get(name, 16)
+            self.feature_embedders[name] = nn.Sequential(
+                nn.Embedding(vocab_size, embed_dim),
+                nn.Linear(embed_dim, d_model)
+            )
+        num_features += len(self.categorical_names)
+
+        # --- 2. The Transformer Encoder ---
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=transformer_config.n_head,
+            dropout=transformer_config.dropout_rate,
+            batch_first=True  # We use (Batch, Seq, Features)
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=transformer_config.num_encoder_layers
+        )
+
+        # --- 3. The [CLS] Token ---
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+        num_features += 1  # Add one for the CLS token
+
+        # --- 4. The Final Classifier Head ---
+        mlp_head_layers = [d_model] + transformer_config.final_mlp_layers
+        mlp_layers = []
+        for i in range(len(mlp_head_layers) - 1):
+            mlp_layers.append(nn.Linear(mlp_head_layers[i], mlp_head_layers[i + 1]))
+            mlp_layers.append(nn.ReLU())
+            mlp_layers.append(nn.Dropout(transformer_config.dropout_rate))
+        mlp_layers.append(nn.Linear(mlp_head_layers[-1], 1))
+        self.mlp_head = nn.Sequential(*mlp_layers)
+
+        print(f"TabularTransformerModel Initialized. d_model={d_model}, num_tokens={num_features}")
+
+    def forward(self,
+                x_text: torch.Tensor,
+                x_continuous: torch.Tensor,
+                x_categorical: torch.Tensor) -> torch.Tensor:
+
+        # 1. Embed all features into (B, 1, d_model)
+        # Use .unsqueeze(1) to create the "sequence" dimension
+        embedded_tokens = []
+
+        if self.feature_config.text_embed_dim > 0:
+            embedded_tokens.append(self.feature_embedders['text'](x_text).unsqueeze(1))
+
+        if self.feature_config.continuous_feat_dim > 0:
+            embedded_tokens.append(
+                self.feature_embedders['continuous_block'](x_continuous).unsqueeze(1)
+            )
+
+        if len(self.categorical_names) > 0:
+            for i, name in enumerate(self.categorical_names):
+                cat_token = x_categorical[:, i]  # Get the i-th categorical feature
+                embedded_tokens.append(
+                    self.feature_embedders[name](cat_token).unsqueeze(1)
+                )
+
+        # 2. Prepend CLS token
+        # Expand CLS token to match batch size
+        batch_size = x_text.shape[0] if self.feature_config.text_embed_dim > 0 else x_continuous.shape[0]
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+
+        all_tokens = [cls_tokens] + embedded_tokens
+
+        # 3. Concatenate into a sequence: (B, num_tokens, d_model)
+        feature_sequence = torch.cat(all_tokens, dim=1)
+
+        # 4. Pass through Transformer
+        # Output shape is also (B, num_tokens, d_model)
+        transformer_output = self.transformer_encoder(feature_sequence)
+
+        # 5. Get the output of the [CLS] token (the first token)
+        cls_output = transformer_output[:, 0]
+
+        # 6. Classify
+        logits = self.mlp_head(cls_output)
+
+        return logits.squeeze(-1)
