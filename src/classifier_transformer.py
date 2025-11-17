@@ -1,8 +1,10 @@
+import logging
 from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 from feature_processor import FeatureHyperParams
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TransformerHyperParams:
@@ -16,7 +18,8 @@ class TransformerHyperParams:
     # Hidden layers for the *final* classifier head
     final_mlp_layers: list[int] = field(default_factory=lambda: [64])
     dropout_rate: float = 0.2
-    pooling_strategy: str = "cls"
+    pooling_strategy: str = "cls",
+    norm_first: bool = False
 
 
 class TabularTransformerModel(nn.Module):
@@ -73,7 +76,8 @@ class TabularTransformerModel(nn.Module):
             d_model=d_model,
             nhead=transformer_config.n_head,
             dropout=transformer_config.dropout_rate,
-            batch_first=True  # We use (Batch, Seq, Features)
+            batch_first=True,  # We use (Batch, Seq, Features)
+            norm_first=transformer_config.norm_first
         )
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer,
@@ -94,7 +98,8 @@ class TabularTransformerModel(nn.Module):
         mlp_layers.append(nn.Linear(mlp_head_layers[-1], 1))
         self.mlp_head = nn.Sequential(*mlp_layers)
 
-        print(f"TabularTransformerModel Initialized. d_model={d_model}, num_tokens={num_features}")
+        logger.info(f"TabularTransformerModel Initialized. d_model={d_model}, num_tokens={num_features}, "
+              f"pooling={self.pooling_strategy}, norm_first={transformer_config.norm_first}")
 
     def forward(self,
                 x_text: torch.Tensor,
