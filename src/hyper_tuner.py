@@ -14,6 +14,7 @@ from feature_processor import FeatProcParams
 from classifier import HybridModel
 
 logger = logging.getLogger(__name__)
+exclude_none_values = lambda x: {k: v for (k, v) in x if v is not None}
 
 class HyperTuner:
     """
@@ -124,7 +125,10 @@ class HyperTuner:
 
     def _get_param_key(self, param_set: dict) -> str:
         """Creates a unique, consistent string key for a parameter set."""
-        params_as_dict = {key: asdict(value) for key, value in param_set.items()}
+        params_as_dict = {
+            key: asdict(value, dict_factory=exclude_none_values)
+            for key, value in param_set.items()
+        }
         return json.dumps(params_as_dict, sort_keys=True)
 
     def run(self, structured_grid_config: dict, n_splits: int = 3):

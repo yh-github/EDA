@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import numpy as np
 import random
@@ -19,3 +21,28 @@ def set_global_seed(seed: int):
     # but can slow down training. We can add them if we still see variance.
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
+
+def exclude_none(self, data: Any) -> Any:
+    """
+    Recursively traverses a data structure (dict or list) and
+    removes all keys from dictionaries that have a None value.
+    """
+
+    if data is None:
+        return data
+
+    if isinstance(data, dict):
+        # Create a new dict, iterating and filtering
+        new_dict = {}
+        for k, v in data.items():
+            if v is not None:
+                # Recurse on the value
+                new_dict[k] = self._recursive_strip_none(v)
+        return new_dict
+
+    if isinstance(data, list):
+        # Return a new list, recursing on each item
+        return [self._recursive_strip_none(item) for item in data]
+
+    # Base case: return value as-is (int, str, bool, etc.)
+    return data

@@ -11,6 +11,7 @@ class HybridModel(nn.Module):
         """Holds all hyperparameters for the MLP classifier head."""
         mlp_hidden_layers: list[int] = field(default_factory=lambda: [128, 64])
         dropout_rate: float = 0.3
+        text_projection_dim: int | None = None  # e.g., 128
 
     def __init__(
         self,
@@ -30,8 +31,19 @@ class HybridModel(nn.Module):
         total_input_dim = 0
 
         # --- 1. Text Features ---
+        self.text_projector = None
         if self.use_text:
-            total_input_dim += feature_config.text_embed_dim
+            # Check if we are using a projection layer
+            if mlp_config.text_projection_dim and mlp_config.text_projection_dim > 0:
+                self.text_projector = nn.Linear(
+                    feature_config.text_embed_dim,
+                    mlp_config.text_projection_dim
+                )
+                total_input_dim += mlp_config.text_projection_dim
+                print(f"  Using text projection: {feature_config.text_embed_dim} -> {mlp_config.text_projection_dim}")
+            else:
+                # No projection, use full embedding
+                total_input_dim += feature_config.text_embed_dim
 
         # --- 2. Continuous Features ---
         if self.use_continuous:
@@ -75,7 +87,11 @@ class HybridModel(nn.Module):
         active_features = []
 
         if self.use_text:
-            active_features.append(x_text)
+            if self.text_projector:
+                x_text_processed = self.text_projector(x_text)
+            else:
+                x_text_processed = x_text
+            active_features.append(x_text_processed)
 
         if self.use_continuous:
             active_features.append(x_continuous)
