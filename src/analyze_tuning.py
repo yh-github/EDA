@@ -7,6 +7,8 @@ from pathlib import Path
 # --- Configuration ---
 # Point this to the cache you want to analyze
 CACHE_DIR = Path('cache/results/')
+# Set a threshold for what you consider a "failed" run
+MIN_F1_FOR_ANALYSIS = 0.3
 # ---------------------
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -47,8 +49,8 @@ def load_results_to_dataframe(cache_path: Path) -> pd.DataFrame | None:
         return None
 
 
-def main(dir_index:str):
-    df = load_results_to_dataframe(CACHE_DIR/dir_index)
+def main(dir_index: str):
+    df = load_results_to_dataframe(CACHE_DIR / dir_index)
 
     if df is None or df.empty:
         logger.info("Exiting.")
@@ -109,23 +111,55 @@ def main(dir_index:str):
 
     # --- 2. Analyze Trends (GroupBy) ---
 
+    # --- NEW: Define helper columns for aggregation ---
+    df['is_failure'] = df['cv_f1'] < MIN_F1_FOR_ANALYSIS
+    # Create a copy of 'cv_f1' where failures are NaN, so mean() ignores them
+    df['success_f1'] = df['cv_f1'].where(df['cv_f1'] >= MIN_F1_FOR_ANALYSIS)
+
+    if df['is_failure'].any():
+        logger.info(
+            f"\n--- NOTE: Analyzing trends. 'Failed' runs (F1 < {MIN_F1_FOR_ANALYSIS}) are counted separately. ---")
+
     for col in varying_param_cols:
         if col in df.columns:
             try:
-                logger.info(f"\n--- Average F1 by {col} ---")
-                # This will fail for lists
-                perf = df.groupby(col)['cv_f1'].mean().sort_values(ascending=False)
-                logger.info(perf.to_string())
-            except TypeError as e:
-                if "unhashable type" in str(e):
-                    # If it's a list, group by its string representation
-                    logger.info(f"--- Average F1 by {col} (as string) ---")
-                    perf_str = df.groupby(df[col].astype(str))['cv_f1'].mean().sort_values(ascending=False)
-                    logger.info(perf_str.to_string())
+                logger.info(f"\n--- Analysis by {col} ---")
+
+                # Handle unhashable types (like lists) by grouping by their string representation
+                if df[col].apply(type).isin([list, dict]).any():
+                    logger.info("(Grouping by string representation for list/dict params)")
+                    group_key = df[col].astype(str)
                 else:
-                    logger.warning(f"Could not group by column '{col}'. Error: {e}")
+                    group_key = df[col]
+
+                # Perform the complex aggregation
+                analysis = df.groupby(group_key).agg(
+                    total_runs=('cv_f1', 'count'),
+                    failed_runs=('is_failure', 'sum'),
+                    avg_success_f1=('success_f1', 'mean'),  # Mean of *only* successful runs
+                    avg_f1_std=('success_f1', 'std'),  # Std of *only* successful runs
+                )
+
+                # Calculate failure rate
+                analysis['failure_rate'] = (analysis['failed_runs'] / analysis['total_runs']).apply(
+                    lambda x: f"{x:.0%}")
+
+                # Clean up NaNs in 'avg_success_f1' for display
+                analysis['avg_success_f1'] = analysis['avg_success_f1'].fillna('N/A (All Failed)')
+                analysis['avg_f1_std'] = analysis['avg_f1_std'].fillna(0)
+
+                # Sort by the most important metric
+                analysis = analysis.sort_values(by='avg_success_f1', ascending=False)
+
+                # Define columns to show
+                display_cols = ['total_runs', 'failed_runs', 'failure_rate', 'avg_success_f1', 'avg_f1_std']
+
+                with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 1000):
+                    logger.info(analysis[display_cols].to_string())
+
             except Exception as e:
                 logger.warning(f"General error analyzing column '{col}': {e}")
+
 
 if __name__ == "__main__":
     ind = sys.argv[1] if len(sys.argv) > 1 else ""
