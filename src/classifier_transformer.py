@@ -16,6 +16,7 @@ class TransformerHyperParams:
     # Hidden layers for the *final* classifier head
     final_mlp_layers: list[int] = field(default_factory=lambda: [64])
     dropout_rate: float = 0.2
+    pooling_strategy: str = "cls"
 
 
 class TabularTransformerModel(nn.Module):
@@ -39,6 +40,10 @@ class TabularTransformerModel(nn.Module):
 
         self.feature_embedders = nn.ModuleDict()
         num_features = 0  # Count how many "tokens" we will have
+
+        self.pooling_strategy = transformer_config.pooling_strategy
+        if self.pooling_strategy not in ["cls", "mean", "max"]:
+            raise ValueError(f"Unknown pooling_strategy: {self.pooling_strategy}")
 
         # A. Text Feature
         if feature_config.text_embed_dim > 0:
@@ -128,9 +133,15 @@ class TabularTransformerModel(nn.Module):
             # This should be impossible if the model built correctly
             raise ValueError("Model has no inputs enabled.")
 
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        if self.pooling_strategy == "cls":
+            # (Note: This is the line we discussed for the bug fix,
+            # you can apply the more robust batch_size logic here when ready)
+            batch_size = x_text.shape[0] if self.feature_config.text_embed_dim > 0 else x_continuous.shape[0]
+            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+            all_tokens = [cls_tokens] + embedded_tokens
+        else:
+            all_tokens = embedded_tokens  # No CLS token
 
-        all_tokens = [cls_tokens] + embedded_tokens
 
         # 3. Concatenate into a sequence: (B, num_tokens, d_model)
         feature_sequence = torch.cat(all_tokens, dim=1)
@@ -140,9 +151,25 @@ class TabularTransformerModel(nn.Module):
         transformer_output = self.transformer_encoder(feature_sequence)
 
         # 5. Get the output of the [CLS] token (the first token)
-        cls_output = transformer_output[:, 0]
+        if self.pooling_strategy == "cls":
+            # Get the output of the [CLS] token (the first token)
+            pooled_output = transformer_output[:, 0]
+
+        elif self.pooling_strategy == "mean":
+            # Take the mean of all token outputs
+            # dim=1 is the sequence dimension
+            pooled_output = transformer_output.mean(dim=1)
+
+        elif self.pooling_strategy == "max":
+            # Take the max of all token outputs
+            # .max returns (values, indices), we just want the values
+            pooled_output = torch.max(transformer_output, dim=1).values
+
+        else:
+            # This should be impossible due to the __init__ check
+            raise RuntimeError(f"Invalid pooling_strategy '{self.pooling_strategy}' in forward pass.")
 
         # 6. Classify
-        logits = self.mlp_head(cls_output)
+        logits = self.mlp_head(pooled_output)
 
         return logits.squeeze(-1)
