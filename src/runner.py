@@ -284,9 +284,15 @@ class ExpRunner:
         train_dataset = TransactionDataset(train_features)
         test_dataset = TransactionDataset(test_features)
 
-        def dataloader(dataset, shuffle:bool):
+        def dataloader(dataset, shuffle: bool):
+            use_gpu = DEVICE.type != "cpu"
             return DataLoader(
-                dataset, batch_size=BATCH_SIZE, shuffle=shuffle, collate_fn=TrainingSample.collate_fn
+                dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=shuffle,
+                collate_fn=TrainingSample.collate_fn,
+                num_workers=4,
+                pin_memory=use_gpu
             )
 
         train_loader = dataloader(train_dataset, shuffle=True)
