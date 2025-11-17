@@ -35,7 +35,7 @@ class EmbModel(StrEnum):
     DISTILBERT = "distilbert-base-uncased"
     FINBERT = "ProsusAI/finbert"
     MiniLM_L12 = 'sentence-transformers/all-MiniLM-L12-v2'
-    MPNET = 'all-mpnet-base-v2'
+    MPNET = 'sentence-transformers/all-mpnet-base-v2'
 
 
 @dataclass(frozen=True)
