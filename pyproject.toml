@@ -1,0 +1,20 @@
+[project]
+name = "EDA"
+version = "0.1.2"
+authors = [
+	{ name="Yoav Haimovitch", email="yoav.haimovitch@personetics.com" },
+]
+description = "EDA"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [ "src" ]
+asyncio_mode="auto"
+asyncio_default_fixture_loop_scope = "function"
