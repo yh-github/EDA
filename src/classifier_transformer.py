@@ -117,7 +117,17 @@ class TabularTransformerModel(nn.Module):
 
         # 2. Prepend CLS token
         # Expand CLS token to match batch size
-        batch_size = x_text.shape[0] if self.feature_config.text_embed_dim > 0 else x_continuous.shape[0]
+        batch_size = -1
+        if self.feature_config.text_embed_dim > 0:
+            batch_size = x_text.shape[0]
+        elif self.feature_config.continuous_feat_dim > 0:
+            batch_size = x_continuous.shape[0]
+        elif len(self.categorical_names) > 0:
+            batch_size = x_categorical.shape[0]
+        else:
+            # This should be impossible if the model built correctly
+            raise ValueError("Model has no inputs enabled.")
+
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
 
         all_tokens = [cls_tokens] + embedded_tokens
