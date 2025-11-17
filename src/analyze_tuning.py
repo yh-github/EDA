@@ -136,30 +136,38 @@ def main(dir_index: str):
                 analysis = df.groupby(group_key).agg(
                     total_runs=('cv_f1', 'count'),
                     failed_runs=('is_failure', 'sum'),
-                    avg_success_f1=('success_f1', 'mean'),  # Mean of *only* successful runs
-                    avg_f1_std=('success_f1', 'std'),  # Std of *only* successful runs
+                    avg_success_f1=('success_f1', 'mean'),  # mean() ignores NaNs by default
+                    avg_f1_std=('success_f1', 'std'),  # std() ignores NaNs by default
                 )
 
-                # Calculate failure rate
                 analysis['failure_rate'] = (analysis['failed_runs'] / analysis['total_runs']).apply(
                     lambda x: f"{x:.0%}")
 
-                # Clean up NaNs in 'avg_success_f1' for display
-                analysis['avg_success_f1'] = analysis['avg_success_f1'].fillna('N/A (All Failed)')
-                analysis['avg_f1_std'] = analysis['avg_f1_std'].fillna(0)
+                # --- THIS IS THE FIX ---
+                # 1. Fill NaNs in the sorting key (avg_success_f1) with 0 so we can sort.
+                #    We will fill them with a string for display *after* sorting.
+                analysis_sorted = analysis.fillna({'avg_success_f1': 0}).sort_values(
+                    by='avg_success_f1',
+                    ascending=False
+                )
 
-                # Sort by the most important metric
-                analysis = analysis.sort_values(by='avg_success_f1', ascending=False)
+                # 2. Now that it's sorted, format for display
+                analysis_sorted['avg_success_f1'] = analysis['avg_success_f1'].apply(
+                    lambda x: f"{x:.6f}" if x > 0 else 'N/A (All Failed)'
+                )
+                analysis_sorted['avg_f1_std'] = analysis['avg_f1_std'].fillna(0).apply(
+                    lambda x: f"{x:.6f}"
+                )
+                # --- END FIX ---
 
-                # Define columns to show
                 display_cols = ['total_runs', 'failed_runs', 'failure_rate', 'avg_success_f1', 'avg_f1_std']
 
                 with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 1000):
-                    logger.info(analysis[display_cols].to_string())
+                    # Use the new sorted and formatted dataframe
+                    logger.info(analysis_sorted[display_cols].to_string())
 
             except Exception as e:
-                logger.warning(f"General error analyzing column '{col}': {e}")
-
+                logger.warning(f"General error analyzing column '{col}': {e}", exc_info=True)
 
 if __name__ == "__main__":
     ind = sys.argv[1] if len(sys.argv) > 1 else ""
