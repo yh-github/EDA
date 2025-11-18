@@ -284,19 +284,20 @@ class ExpRunner:
         train_dataset = TransactionDataset(train_features)
         test_dataset = TransactionDataset(test_features)
 
-        def dataloader(dataset, shuffle: bool):
+        def dataloader(dataset, is_train: bool):
             use_gpu = DEVICE.type != "cpu"
             return DataLoader(
                 dataset,
                 batch_size=BATCH_SIZE,
-                shuffle=shuffle,
+                shuffle=is_train,
                 collate_fn=TrainingSample.collate_fn,
                 num_workers=4,
-                pin_memory=use_gpu
+                pin_memory=use_gpu,
+                drop_last=is_train
             )
 
-        train_loader = dataloader(train_dataset, shuffle=True)
-        test_loader = dataloader(test_dataset, shuffle=False)
+        train_loader = dataloader(train_dataset, is_train=True)
+        test_loader = dataloader(test_dataset, is_train=False)
 
         # --- Instantiate the Model ---
         feature_config = FeatureHyperParams.build(train_features, metadata)
