@@ -262,10 +262,10 @@ class HybridFeatureProcessor:
             try:
                 dates = pd.to_datetime(df[date_col], format='%m/%d/%Y %H:%M:%S')
             except ValueError:
-                dates = pd.to_datetime(df[date_col], errors='coerce')
+                dates = pd.to_datetime(df[date_col], errors='raise')
 
             if dates.isnull().any():
-                dates = dates.fillna(pd.Timestamp.now())
+                raise ValueError(f"Found {dates.isnull().sum()} rows with missing or invalid dates.")
 
             day_of_week_raw = dates.dt.dayofweek  # 0=Monday, 6=Sunday
             day_of_month_raw = dates.dt.day  # 1-31
