@@ -139,9 +139,6 @@ class TabularTransformerModel(nn.Module):
             raise ValueError("Model has no inputs enabled.")
 
         if self.pooling_strategy == "cls":
-            # (Note: This is the line we discussed for the bug fix,
-            # you can apply the more robust batch_size logic here when ready)
-            batch_size = x_text.shape[0] if self.feature_config.text_embed_dim > 0 else x_continuous.shape[0]
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)
             all_tokens = [cls_tokens] + embedded_tokens
         else:
