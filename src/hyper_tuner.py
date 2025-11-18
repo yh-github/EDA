@@ -146,7 +146,7 @@ class HyperTuner:
             key: asdict(value, dict_factory=exclude_none_values)
             for key, value in param_set.items()
         }
-        return json.dumps(params_as_dict, sort_keys=True)
+        return json.dumps(params_as_dict, sort_keys=True, default=str)
 
     def run(self, structured_grid_config: dict, n_splits: int = 3):
         """

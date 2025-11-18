@@ -168,7 +168,7 @@ class HybridFeatureProcessor:
         vocab_id_counter += 1
 
         self.top_k_token_ids.clear()
-        for amount in self.top_k_amounts:
+        for amount in sorted(list(self.top_k_amounts)):
             self.vocab_map[amount] = vocab_id_counter
             self.top_k_token_ids.add(vocab_id_counter)
             vocab_id_counter += 1
@@ -271,12 +271,11 @@ class HybridFeatureProcessor:
             day_of_month_raw = dates.dt.day  # 1-31
 
             if self.use_cyclical_dates:
-                # Use "smart" N for day_of_month
-                days_in_month = dates.dt.days_in_month
+                # days_in_month = dates.dt.days_in_month # TODO additional feature?
                 features['day_of_week_sin'] = np.sin(day_of_week_raw * (TWO_PI / 7))
                 features['day_of_week_cos'] = np.cos(day_of_week_raw * (TWO_PI / 7))
-                features['day_of_month_sin'] = np.sin(day_of_month_raw * (TWO_PI / days_in_month))
-                features['day_of_month_cos'] = np.cos(day_of_month_raw * (TWO_PI / days_in_month))
+                features['day_of_month_sin'] = np.sin(day_of_month_raw * (TWO_PI / 31))
+                features['day_of_month_cos'] = np.cos(day_of_month_raw * (TWO_PI / 31))
 
                 # 14-day cycle
                 epoch_days = (dates - pd.Timestamp("2000-01-01")).dt.days # type: ignore
