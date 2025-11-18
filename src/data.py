@@ -74,10 +74,14 @@ class TransactionDataset(Dataset):
     def __init__(self, features: FeatureSet):
 
         # Convert to tensors from the FeatureSet
-        self.X_text = torch.tensor(features.X_text, dtype=torch.float32)
-        self.X_continuous = torch.tensor(features.X_continuous, dtype=torch.float32)
-        self.X_categorical = torch.tensor(features.X_categorical, dtype=torch.int64)
-        self.y = torch.tensor(features.y, dtype=torch.float32)
+        # self.X_text = torch.tensor(features.X_text, dtype=torch.float32)
+        # self.X_continuous = torch.tensor(features.X_continuous, dtype=torch.float32)
+        # self.X_categorical = torch.tensor(features.X_categorical, dtype=torch.int64)
+        # self.y = torch.tensor(features.y, dtype=torch.float32)
+        self.X_text = torch.from_numpy(features.X_text).float()
+        self.X_continuous = torch.from_numpy(features.X_continuous).float()
+        self.X_categorical = torch.from_numpy(features.X_categorical).long()
+        self.y = torch.from_numpy(features.y).float()
 
     def __len__(self) -> int:
         return len(self.y)
