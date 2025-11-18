@@ -76,13 +76,14 @@ class HybridModel(nn.Module):
             mlp_layers.append(nn.BatchNorm1d(layer_dims[i + 1]))
             mlp_layers.append(nn.Dropout(mlp_config.dropout_rate))
 
-        mlp_layers.append(nn.Linear(layer_dims[-1], 1))
         self.mlp = nn.Sequential(*mlp_layers)
+        self.head = nn.Linear(layer_dims[-1], 1)
 
-    def forward(self,
-                x_text: torch.Tensor,
-                x_continuous: torch.Tensor,
-                x_categorical: torch.Tensor) -> torch.Tensor:
+    def embed(self,
+        x_text: torch.Tensor,
+        x_continuous: torch.Tensor,
+        x_categorical: torch.Tensor
+    ) -> torch.Tensor:
 
         active_features = []
 
@@ -106,6 +107,13 @@ class HybridModel(nn.Module):
             active_features.append(all_embedded_cats)
 
         combined_features = torch.cat(active_features, dim=1)
-        logits = self.mlp(combined_features)
+        return self.mlp(combined_features)
 
+    def forward(self,
+        x_text: torch.Tensor,
+        x_continuous: torch.Tensor,
+        x_categorical: torch.Tensor
+    ) -> torch.Tensor:
+        embedding = self.embed(x_text, x_continuous, x_categorical)
+        logits = self.head(embedding)
         return logits.squeeze(-1)
