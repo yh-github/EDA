@@ -7,7 +7,7 @@ import diskcache
 from sklearn.model_selection import ParameterGrid
 from dataclasses import asdict
 from log_utils import setup_logging
-from runner import ExpRunner
+from runner import ExpRunner, ModelParams
 from config import ExperimentConfig, FieldConfig, EmbModel
 from embedder import EmbeddingService
 from feature_processor import FeatProcParams
@@ -23,7 +23,9 @@ class HyperTuner:
     """
 
     @classmethod
-    def load(cls, index: int, model_config_class: Any = HybridModel.MlpHyperParams, unique_cache=True) ->Self:
+    def load(cls,
+        index: int, model_config_class: Any = HybridModel.MlpHyperParams, unique_cache=True, filter_direction=False
+    ) ->Self:
         setup_logging(Path('logs/'), f"tuning{index}")
         postfix = ""
         if unique_cache:
@@ -31,6 +33,7 @@ class HyperTuner:
         return cls(
             data_path=Path('data/rec_data2.csv'),
             cache_dir=Path(f'cache/results/{postfix}'),
+            filter_direction=filter_direction,
             field_config=FieldConfig(),
             model_config_class=model_config_class
         )
@@ -38,7 +41,8 @@ class HyperTuner:
     def __init__(self,
          data_path: Path,
          cache_dir: Path,
-         model_config_class: Any = HybridModel.MlpHyperParams,
+         filter_direction: bool,
+         model_config_class:ModelParams,
          field_config: FieldConfig = FieldConfig()
     ):
         """
@@ -56,6 +60,7 @@ class HyperTuner:
         logger.info(f"HyperTuner initialized. Cache at: {self.cache_dir}")
 
         # Load and split data *once* during initialization
+        self.filter_direction = filter_direction
         self._load_and_split_data()
 
     def _load_and_split_data(self):
@@ -75,6 +80,8 @@ class HyperTuner:
                 self.field_config.label
             ]
         )
+        if self.filter_direction:
+            df_cleaned = df_cleaned[(df_cleaned[self.field_config.amount] * self.filter_direction) > 0]
         logger.info(f"Loaded {len(full_df)} rows, {len(df_cleaned)} after cleaning.")
 
         # We need a base runner just to access the split method
@@ -83,7 +90,7 @@ class HyperTuner:
             full_df=df_cleaned,
             emb_params=EmbeddingService.Params(model_name=EmbModel.ALBERT),
             feat_proc_params=FeatProcParams.all_off(),
-            model_params=self.model_config_class()
+            model_params=self.model_config_class
         )
 
         logger.info("Creating Train/Val/Test split for tuning...")

@@ -36,6 +36,7 @@ class FeatProcParams:
     use_categorical_dates: bool = True
 
     use_continuous_amount: bool = True
+    use_is_positive: bool = True
 
     use_categorical_amount: bool = True
     k_top: int = 500
@@ -82,6 +83,7 @@ class HybridFeatureProcessor:
                  use_categorical_dates: bool,
                  use_continuous_amount: bool,
                  use_categorical_amount: bool,
+                 use_is_positive: bool,
                  fields_config: FieldConfig):
         """
         Initialize the processor.
@@ -105,6 +107,7 @@ class HybridFeatureProcessor:
         self.use_categorical_dates = use_categorical_dates
         self.use_continuous_amount = use_continuous_amount
         self.use_categorical_amount = use_categorical_amount
+        self.use_is_positive = use_is_positive
 
         # These will be "learned" during .fit()
         self.top_k_amounts: set[float] = set()
@@ -117,6 +120,11 @@ class HybridFeatureProcessor:
         self.unknown_token_id: int | None = None
         self.top_k_token_ids: set[int] = set()
         self.bin_token_ids: set[int] = set()
+
+        if self.k_top == 0 or self.n_bins == 0 or not self.use_categorical_amount:
+            self.k_top = 0
+            self.n_bins = 0
+            self.use_categorical_amount = False
 
     def _fit_categorical_amount(self, df: pd.DataFrame):
         amount_col = self.fields_config.amount
@@ -202,9 +210,10 @@ class HybridFeatureProcessor:
 
         if self.use_continuous_amount:
             meta.continuous_scalable_cols.append('log_abs_amount')
-            meta.categorical_features['is_positive'] = CategoricalFeatureConfig(
-                vocab_size=2, embedding_dim=2
-            )
+            if self.use_is_positive:
+                meta.categorical_features['is_positive'] = CategoricalFeatureConfig(
+                    vocab_size=2, embedding_dim=2
+                )
 
         # (Example: Add text_length here if self.params.use_text_length)
         # (Example: Add cents_id here if self.params.use_cents)
