@@ -77,7 +77,9 @@ class GreedyTuner:
     def _evaluate_params(self, params) -> dict:
         # Construct Configs from Params
         filter_config = FilterConfig(
+            # The minimum number of transactions required to form a valid group.
             min_txns_for_period=params.get('min_txns', 3),
+            # The maximum allowed "Jitter" (Standard Deviation) in the number of days between transactions.
             date_std_threshold=params.get('date_std', 2.0)
         )
 
