@@ -74,6 +74,7 @@ def main(dir_index: str):
 
     # This ensures 'cv_loss' etc. are not treated as parameters
     metric_cols = [
+        'cv_val_best_f1', 'cv_val_best_threshold',
         'cv_f1', 'cv_f1_std', 'cv_roc_auc', 'cv_loss',
         'loss', 'accuracy', 'f1', 'roc_auc', 'error'
     ]
@@ -140,6 +141,13 @@ def main(dir_index: str):
                     'avg_success_f1': ('success_f1', 'mean'),
                     'avg_f1_std': ('success_f1', 'std'),
                 }
+
+                # Add aggregations for the new metrics if they exist
+                if 'cv_val_best_f1' in df.columns:
+                    agg_dict['avg_potential_f1'] = ('success_potential_f1', 'mean')
+
+                if 'cv_val_best_threshold' in df.columns:
+                    agg_dict['avg_optim_thresh'] = ('cv_val_best_threshold', 'mean')
 
                 if 'cv_best_epoch' in df.columns:
                     agg_dict['avg_best_epoch'] = ('cv_best_epoch', 'mean')

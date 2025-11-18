@@ -267,6 +267,59 @@ class ExpRunner:
 
         return train_feature_set, test_feature_set, processor, metadata
 
+    def _calculate_optimal_threshold_metrics(
+            self,
+            model: nn.Module,
+            data_loader: DataLoader,
+            device: torch.device
+    ) -> dict[str, Any]:
+        """
+        Evaluates the model on a dataset, calculates the Precision-Recall curve,
+        and finds the threshold that maximizes the F1 score.
+        """
+        model.eval()
+        all_logits = []
+        all_y_true = []
+
+        with torch.no_grad():
+            for batch in data_loader:
+                x_text = batch.x_text.to(device)
+                x_continuous = batch.x_continuous.to(device)
+                x_categorical = batch.x_categorical.to(device)
+                y_true = batch.y.to(device)
+
+                logits = model(x_text, x_continuous, x_categorical)
+                all_logits.append(logits)
+                all_y_true.append(y_true)
+
+        np_logits = torch.cat(all_logits).cpu().numpy()
+        np_y_true = torch.cat(all_y_true).cpu().numpy()
+        np_probs = 1 / (1 + np.exp(-np_logits))  # Sigmoid
+
+        # Calculate the raw PR curve
+        precisions, recalls, thresholds = precision_recall_curve(np_y_true, np_probs)
+
+        # Calculate F1 for every single possible threshold
+        with np.errstate(divide='ignore', invalid='ignore'):
+            f1_scores = 2 * (precisions * recalls) / (precisions + recalls)
+
+        f1_scores = np.nan_to_num(f1_scores)
+        best_idx = np.argmax(f1_scores)
+
+        best_f1 = f1_scores[best_idx]
+        # thresholds array is length N, prec/rec arrays are N+1.
+        # If best_idx is the last element (F1 at max recall/prec), use standard 0.5 or last thresh
+        best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
+
+        return {
+            "val_best_f1": r(best_f1),
+            "val_best_threshold": r(best_threshold),
+            "pr_curve": {
+                "precisions": precisions,
+                "recalls": recalls,
+                "thresholds": thresholds
+            }
+        }
 
     def run_experiment(
         self,
@@ -316,13 +369,19 @@ class ExpRunner:
             patience=self.exp_params.early_stopping_patience
         )
 
-        # This one call does all the work!
         final_metrics = trainer.fit(train_loader, test_loader, NUM_EPOCHS)
 
-        # --- Return Metrics ---
+        diagnostics = self._calculate_optimal_threshold_metrics(model, test_loader, DEVICE)
+
+        logger.info(f"  Default F1 (0.5): {final_metrics['f1']:.4f} | "
+                    f"Potential Best F1: {diagnostics['val_best_f1']:.4f} "
+                    f"(thresh={diagnostics['val_best_threshold']:.4f})")
+
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
+
         return {
             **final_metrics_rounded,
+            **diagnostics,
             "embedder.model_name": str(self.emb_params.model_name)
         }
 
