@@ -127,7 +127,7 @@ class TabularTransformerModel(nn.Module):
 
         # 2. Prepend CLS token
         # Expand CLS token to match batch size
-        batch_size = -1
+        # batch_size = -1
         if self.feature_config.text_embed_dim > 0:
             batch_size = x_text.shape[0]
         elif self.feature_config.continuous_feat_dim > 0:

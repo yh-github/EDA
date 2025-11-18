@@ -177,8 +177,6 @@ def main(dir_index: str):
 
                 display_cols = ['total_runs', 'failed_runs', 'failure_rate', 'avg_success_f1', 'avg_f1_std']
 
-                # Add the new columns to your display list
-                display_cols = ['total_runs', 'failed_runs', 'failure_rate']
                 if 'epoch_1_fail_rate' in analysis.columns:
                     display_cols.append('epoch_1_fail_rate')
 

@@ -2,6 +2,7 @@ import logging
 from typing import Self, Generator, Any
 import pandas as pd
 from numpy import floating
+from sklearn.metrics import precision_recall_curve
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from torch import nn

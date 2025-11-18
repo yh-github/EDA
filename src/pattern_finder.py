@@ -9,13 +9,8 @@ from sklearn.cluster import DBSCAN
 from config import FilterConfig, FieldConfig
 
 # --- Optional SOTA Imports ---
-try:
-    import umap
-    import hdbscan
-
-    HAS_SOTA_LIBS = True
-except ImportError:
-    HAS_SOTA_LIBS = False
+import umap
+import hdbscan
 
 logger = logging.getLogger(__name__)
 
