@@ -312,7 +312,8 @@ class HybridFeatureProcessor:
             return self.vocab_map[amount]
 
         log_val = np.log(np.abs(amount) + 1)
-        bin_index = np.digitize(log_val, self.bin_edges) - 1
+        # bin_index = np.digitize(log_val, self.bin_edges) - 1
+        bin_index = np.digitize(log_val, self.bin_edges, right=True) - 1
 
         if bin_index < 0:
             bin_index = 0
