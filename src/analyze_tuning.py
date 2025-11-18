@@ -111,7 +111,7 @@ def main(dir_index: str):
 
     # --- 2. Analyze Trends (GroupBy) ---
 
-    # --- NEW: Define helper columns for aggregation ---
+    # --- helper columns for aggregation ---
     df['is_failure'] = df['cv_f1'] < MIN_F1_FOR_ANALYSIS
     # Create a copy of 'cv_f1' where failures are NaN, so mean() ignores them
     df['success_f1'] = df['cv_f1'].where(df['cv_f1'] >= MIN_F1_FOR_ANALYSIS)
@@ -152,7 +152,6 @@ def main(dir_index: str):
                 analysis['failure_rate'] = (analysis['failed_runs'] / analysis['total_runs']).apply(
                     lambda x: f"{x:.0%}")
 
-                # --- THIS IS THE FIX ---
                 # 1. Fill NaNs in the sorting key (avg_success_f1) with 0 so we can sort.
                 #    We will fill them with a string for display *after* sorting.
                 analysis_sorted = analysis.fillna({'avg_success_f1': 0}).sort_values(
