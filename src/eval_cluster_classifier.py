@@ -25,7 +25,7 @@ full_df = full_df.dropna(subset=[field_config.date, field_config.amount, field_c
 
 # 2. Initialize Services
 emb_service = EmbeddingService(
-    model_name=EmbModel.MiniLM_L12,
+    model_name=EmbModel.MPNET,
     max_length=64,
     batch_size=256
 )
