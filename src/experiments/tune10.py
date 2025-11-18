@@ -3,7 +3,7 @@ from config import EmbModel
 
 structured_grid_config = {
     'exp_params': {
-        'learning_rate': [1e-3],
+        'learning_rate': [1e-3, 5e-4],
         'batch_size': [128]
     },
     'emb_params': {
@@ -23,9 +23,8 @@ structured_grid_config = {
             [256, 128, 64],
             [512, 256, 128]
         ],
-        'dropout_rate': [0.25],
-        'text_projection_dim': [None],
-        'pooling_strategy': ["cls", "mean", "max"]
+        'dropout_rate': [0.25, 0.4],
+        'text_projection_dim': [None, 128]
     }
 }
 
