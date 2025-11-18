@@ -443,6 +443,8 @@ class ExpRunner:
             'cv_roc_auc': r(np.mean([m['roc_auc'] for m in all_metrics])),
             'cv_loss': r(np.mean([m['loss'] for m in all_metrics])),
             'cv_f1_std': r(np.std([m['f1'] for m in all_metrics])),
+            'cv_best_epoch': r(np.mean([m.get('best_epoch', 0) for m in all_metrics])),
+            'cv_epoch_1_stop': r(np.mean([1 if m.get('best_epoch', 0) == 1 else 0 for m in all_metrics]))
         }
 
         logger.info("Cross-Validation complete.")

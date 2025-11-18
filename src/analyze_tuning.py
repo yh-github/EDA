@@ -133,12 +133,21 @@ def main(dir_index: str):
                     group_key = df[col]
 
                 # Perform the complex aggregation
-                analysis = df.groupby(group_key).agg(
-                    total_runs=('cv_f1', 'count'),
-                    failed_runs=('is_failure', 'sum'),
-                    avg_success_f1=('success_f1', 'mean'),  # mean() ignores NaNs by default
-                    avg_f1_std=('success_f1', 'std'),  # std() ignores NaNs by default
-                )
+                # Define the aggregations dictionary dynamically
+                agg_dict = {
+                    'total_runs': ('cv_f1', 'count'),
+                    'failed_runs': ('is_failure', 'sum'),
+                    'avg_success_f1': ('success_f1', 'mean'),
+                    'avg_f1_std': ('success_f1', 'std'),
+                }
+
+                if 'cv_best_epoch' in df.columns:
+                    agg_dict['avg_best_epoch'] = ('cv_best_epoch', 'mean')
+
+                if 'cv_epoch_1_stop' in df.columns:
+                    agg_dict['epoch_1_fail_rate'] = ('cv_epoch_1_stop', 'mean')
+
+                analysis = df.groupby(group_key).agg(**agg_dict)
 
                 analysis['failure_rate'] = (analysis['failed_runs'] / analysis['total_runs']).apply(
                     lambda x: f"{x:.0%}")
@@ -158,12 +167,20 @@ def main(dir_index: str):
                 analysis_sorted['avg_f1_std'] = analysis['avg_f1_std'].fillna(0).apply(
                     lambda x: f"{x:.6f}"
                 )
-                # --- END FIX ---
 
                 display_cols = ['total_runs', 'failed_runs', 'failure_rate', 'avg_success_f1', 'avg_f1_std']
 
+                # Add the new columns to your display list
+                display_cols = ['total_runs', 'failed_runs', 'failure_rate']
+                if 'epoch_1_fail_rate' in analysis.columns:
+                    display_cols.append('epoch_1_fail_rate')
+
+                display_cols += ['avg_success_f1', 'avg_f1_std']
+
+                if 'avg_best_epoch' in analysis.columns:
+                    display_cols.append('avg_best_epoch')
+
                 with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 1000):
-                    # Use the new sorted and formatted dataframe
                     logger.info(analysis_sorted[display_cols].to_string())
 
             except Exception as e:
