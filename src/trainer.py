@@ -1,3 +1,4 @@
+import copy
 import time
 import logging
 import numpy as np
@@ -33,6 +34,7 @@ class PyTorchTrainer:
         self.best_metric = -1.0
         self.patience_counter = 0
         self.final_metrics = {}
+        self.best_model_state = None
 
     def _train_epoch(self, train_loader: DataLoader) -> float:
         """Runs one full epoch of training."""
@@ -117,12 +119,17 @@ class PyTorchTrainer:
                 self.best_epoch = epoch
                 self.final_metrics = metrics
                 self.patience_counter = 0
+                self.best_model_state = copy.deepcopy(self.model.state_dict())
             else:
                 self.patience_counter += 1
 
             if self.patience_counter >= self.patience:
                 logger.info(f"Early stopping triggered at epoch {epoch}. Best F1: {self.best_metric:.4f}")
                 break
+
+        if self.best_model_state is not None:
+            self.model.load_state_dict(self.best_model_state)
+            logger.info(f"Restored best model weights from Epoch {self.best_epoch}.")
 
         self.final_metrics['best_epoch'] = self.best_epoch
         logger.info("Training complete.")
