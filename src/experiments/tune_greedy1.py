@@ -23,7 +23,7 @@ grid_search_config = {
 }
 
 if __name__ == "__main__":
-    tuner = GreedyTuner(cache_dir="cache/greedy_tuning_mpnet")
+    tuner = GreedyTuner(ind=1, filter_direction=1)
     tuner.load_data()
 
     # Pre-compute MPNET embeddings so the loop is fast

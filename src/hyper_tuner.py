@@ -64,24 +64,28 @@ class HyperTuner:
         self._load_and_split_data()
 
     def _load_and_split_data(self):
+        return self.load_and_split_data(self.data_path, self.filter_direction, self.field_config)
+
+    @classmethod
+    def load_and_split_data(cls, data_path:Path, filter_direction:int, field_config:FieldConfig=FieldConfig()):
         """Loads and splits the data into train_val/test sets."""
-        logger.info(f"Loading data from {self.data_path}...")
+        logger.info(f"Loading data from {data_path}...")
         try:
-            full_df = pd.read_csv(self.data_path)
+            full_df = pd.read_csv(data_path)
         except Exception as e:
             logger.error(f"FATAL: Failed to load data. Error: {e}")
             raise
 
         df_cleaned = full_df.dropna(
             subset=[
-                self.field_config.date,
-                self.field_config.amount,
-                self.field_config.text,
-                self.field_config.label
+                field_config.date,
+                field_config.amount,
+                field_config.text,
+                field_config.label
             ]
         )
-        if self.filter_direction:
-            df_cleaned = df_cleaned[(df_cleaned[self.field_config.amount] * self.filter_direction) > 0]
+        if filter_direction:
+            df_cleaned = df_cleaned[(df_cleaned[field_config.amount] * filter_direction) > 0]
         logger.info(f"Loaded {len(full_df)} rows, {len(df_cleaned)} after cleaning.")
 
         # We need a base runner just to access the split method
@@ -90,7 +94,7 @@ class HyperTuner:
             full_df=df_cleaned,
             emb_params=EmbeddingService.Params(model_name=EmbModel.ALBERT),
             feat_proc_params=FeatProcParams.all_off(),
-            model_params=self.model_config_class
+            model_params=None
         )
 
         logger.info("Creating Train/Val/Test split for tuning...")
@@ -99,9 +103,11 @@ class HyperTuner:
         )
 
         # Store the sets that the run() method will need
-        self.df_train_val = pd.concat([df_train, df_val])
-        self.df_cleaned = df_cleaned  # Needed by the ExpRunner
-        logger.info(f"Tuning will be performed on {len(self.df_train_val)} rows.")
+        df_train_val = pd.concat([df_train, df_val])
+        df_cleaned = df_cleaned  # Needed by the ExpRunner
+        logger.info(f"Tuning will be performed on {len(df_train_val)} rows.")
+        return df_train_val, df_cleaned
+
 
     def _materialize_grid(self, structured_grid_config: dict) -> list[dict]:
         """
