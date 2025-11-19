@@ -1,6 +1,6 @@
 import pandas as pd
 from pytorch_forecasting import TimeSeriesDataSet
-from pytorch_forecasting.data.encoders import NaNLabelEncoder  # <--- Important Import
+from pytorch_forecasting.data.encoders import NaNLabelEncoder, EncoderNormalizer
 from config import FieldConfig
 
 
@@ -40,8 +40,14 @@ def build_tft_dataset(df: pd.DataFrame, field_config: FieldConfig, max_predictio
             field_config.amount: [1, 2, 3, 4, 5, 10]
         },
 
-        # Use NaNLabelEncoder for Classification.
-        # Do NOT use GroupNormalizer (it's for regression).
+        # --- SCALERS (The Fix) ---
+        # Explicitly use EncoderNormalizer for 'amount' to avoid sklearn name mismatch errors on lags.
+        # We use standard scaling (method='standard') because amounts can be negative.
+        scalers={
+            field_config.amount: EncoderNormalizer(method="standard")
+        },
+
+        # Target Encoder
         target_normalizer=NaNLabelEncoder(add_nan=False),
 
         add_relative_time_idx=True,
