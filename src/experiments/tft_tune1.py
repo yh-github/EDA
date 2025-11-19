@@ -1,20 +1,18 @@
 import logging
+from pathlib import Path
 import optuna
-import torch
+import pandas as pd
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
-from pathlib import Path
-import pandas as pd
+from pytorch_lightning.callbacks import EarlyStopping
 
 # --- Imports from your new files ---
-from config import FieldConfig, ExperimentConfig
-from tft_data import build_tft_dataset
+from config import FieldConfig
 from data import create_train_val_test_split  # Reuse your existing split logic
-
 # Setup Logging
 from log_utils import setup_logging
+from tft_data import build_tft_dataset, prepare_tft_data
 
 setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")
@@ -91,16 +89,24 @@ if __name__ == "__main__":
     full_df = full_df.dropna(subset=[field_config.date, field_config.amount, field_config.text])
 
     # Split using your existing logic (Account-aware)
-    train_df, val_df, _ = create_train_val_test_split(
-        test_size=0.2, val_size=0.2, full_df=full_df, random_state=42
+    train_df, val_df, _ = create_train_val_test_split(...)
+
+    # --- Prepare BOTH DataFrames ---
+    logger.info("Preparing data for TFT (sorting, time_idx)...")
+    train_df_prepped = prepare_tft_data(train_df, field_config)
+    val_df_prepped = prepare_tft_data(val_df, field_config)
+
+    # 2. Build Dataset Definition (from Training data)
+    train_ds = build_tft_dataset(train_df_prepped, field_config)
+
+    # 3. Create Validation Dataset (using definition from Train)
+    # Now val_df_prepped has 'time_idx', so this will work!
+    val_ds = TimeSeriesDataSet.from_dataset(
+        train_ds,
+        val_df_prepped,
+        predict=True,
+        stop_randomization=True
     )
-
-    # --- 2. Build TimeSeriesDataSet ---
-    # We build the dataset definition from Training data
-    train_ds = build_tft_dataset(train_df, field_config)
-
-    # Apply that definition to Validation data
-    val_ds = TimeSeriesDataSet.from_dataset(train_ds, val_df, predict=True, stop_randomization=True)
 
     # Create Loaders
     BATCH_SIZE = 128

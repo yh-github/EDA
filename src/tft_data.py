@@ -4,55 +4,69 @@ from pytorch_forecasting.data.encoders import NaNLabelEncoder, EncoderNormalizer
 from config import FieldConfig
 
 
-def build_tft_dataset(df: pd.DataFrame, field_config: FieldConfig, max_prediction_length=1, max_encoder_length=30):
-    # 1. Ensure proper sorting and types
+def prepare_tft_data(df: pd.DataFrame, field_config: FieldConfig) -> pd.DataFrame:
+    """
+    Prepares a raw DataFrame for TFT by adding time_idx and casting types.
+    Must be called on Train, Val, and Test sets independently.
+    """
+    df = df.copy()
+
+    # 1. Sort by Account and Date (Critical for time_idx)
     df = df.sort_values([field_config.accountId, field_config.date]).reset_index(drop=True)
 
-    # CRITICAL: Ensure target is an integer for classification
+    # 2. Cast Target to Integer (for Classification)
     df[field_config.label] = df[field_config.label].astype(int)
 
-    # Create time index
+    # 3. Create Time Index (0, 1, 2... per account)
     df["time_idx"] = df.groupby(field_config.accountId).cumcount()
 
-    # 2. Define the dataset
+    return df
+
+
+def build_tft_dataset(train_df_prepped: pd.DataFrame, field_config: FieldConfig, max_prediction_length=1,
+                      max_encoder_length=30):
+    """
+    Defines the TimeSeriesDataSet using the prepared training data.
+    """
     training = TimeSeriesDataSet(
-        df,
+        train_df_prepped,
         time_idx="time_idx",
         target=field_config.label,
         group_ids=[field_config.accountId],
 
-        # Windowing
-        min_encoder_length=10,
+        # --- WINDOWING ---
+        # Relaxed constraints to allow smaller accounts (e.g., only 3 txns history)
+        min_encoder_length=3,  # Was 10 (caused the warning)
         max_encoder_length=max_encoder_length,
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
 
-        # Variables
+        # --- FEATURES ---
         static_categoricals=[field_config.accountId],
-        time_varying_known_categoricals=[],
-        time_varying_unknown_categoricals=[],
-        time_varying_unknown_reals=[
-            field_config.amount,
-        ],
+        time_varying_unknown_reals=[field_config.amount],
 
-        # Lags
+        # --- LAGS ---
+        # Lags provide the "Memory".
+        # (Lag 1=Prev Txn, Lag 10=10 Txns ago)
         lags={
             field_config.amount: [1, 2, 3, 4, 5, 10]
         },
 
-        # --- SCALERS (The Fix) ---
-        # Explicitly use EncoderNormalizer for 'amount' to avoid sklearn name mismatch errors on lags.
-        # We use standard scaling (method='standard') because amounts can be negative.
+        # --- SCALERS & ENCODERS ---
+        # Fix for sklearn error: Explicitly use EncoderNormalizer
         scalers={
             field_config.amount: EncoderNormalizer(method="standard")
         },
 
-        # Target Encoder
+        # Fix for Classification: Use NaNLabelEncoder (Not GroupNormalizer)
         target_normalizer=NaNLabelEncoder(add_nan=False),
 
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
+
+        # Allow missing timesteps (if your data isn't perfectly regular)
+        allow_missing_timesteps=True
     )
 
     return training
