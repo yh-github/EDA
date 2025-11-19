@@ -28,7 +28,7 @@ class HybridEmbeddingService:
 
     def __init__(self, emb_model:HyEmbModel):
         self.emb_model = emb_model
-        self.model_dir = Path(emb_model.value())
+        self.model_dir = Path(emb_model.value)
         self.field_config = FieldConfig()
         self.device = DEVICE
 
