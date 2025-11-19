@@ -11,7 +11,7 @@ from classifier import HybridModel
 from classifier_transformer import TransformerHyperParams, TabularTransformerModel
 from config import *
 from config import EmbModel
-from data import TransactionDataset, FeatureSet, TrainingSample
+from data import TransactionDataset, FeatureSet, TrainingSample, create_train_val_test_split
 from embedder import EmbeddingService
 from exp_utils import set_global_seed
 from feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, FeatureHyperParams
@@ -268,11 +268,12 @@ class ExpRunner:
 
         return train_feature_set, test_feature_set, processor, metadata
 
+    @classmethod
     def _calculate_optimal_threshold_metrics(
-            self,
-            model: nn.Module,
-            data_loader: DataLoader,
-            device: torch.device
+        cls,
+        model: nn.Module,
+        data_loader: DataLoader,
+        device: torch.device
     ) -> dict[str, Any]:
         """
         Evaluates the model on a dataset, calculates the Precision-Recall curve,
@@ -412,55 +413,13 @@ class ExpRunner:
         Splits data into three sets: train, validation, and a holdout test set.
         Ensures group integrity (accountId) across all splits.
         """
-        full_df: pd.DataFrame = self.full_df.copy()
-        field_config: FieldConfig = self.field_config
-        random_state: int = self.exp_params.random_state
-
-        logger.info(f"Splitting {len(full_df)} rows into Train/Val/Test...")
-
-        # --- 1. Split off the Holdout Test set (e.g., 20%) ---
-        gss_test = GroupShuffleSplit(
-            n_splits=1, test_size=test_size, random_state=random_state
+        return create_train_val_test_split(
+            test_size=test_size,
+            val_size=val_size,
+            random_state=self.exp_params.random_state,
+            full_df=self.full_df.copy(),
+            field_config=self.field_config
         )
-        train_val_idx, test_idx = next(gss_test.split(
-            full_df, y=full_df[field_config.label], groups=full_df[field_config.accountId]
-        ))
-
-        df_train_val = full_df.iloc[train_val_idx]
-        df_test_holdout = full_df.iloc[test_idx]
-
-        # --- 2. Split the Train/Val set into Train and Validation ---
-        # We need to adjust the val_size relative to the remaining data
-        # e.g., if val_size=0.2 and test_size=0.2, we want 20% of original,
-        # which is 0.2 / (1.0 - 0.2) = 0.25 of the remaining df_train_val.
-
-        relative_val_size = val_size / (1.0 - test_size)
-
-        gss_val = GroupShuffleSplit(
-            n_splits=1, test_size=relative_val_size, random_state=random_state
-        )
-        train_idx, val_idx = next(gss_val.split(
-            df_train_val, y=df_train_val[field_config.label], groups=df_train_val[field_config.accountId]
-        ))
-
-        df_train = df_train_val.iloc[train_idx]
-        df_val = df_train_val.iloc[val_idx]
-
-        # --- 3. Sanity Checks ---
-        train_acc = set(df_train[field_config.accountId].unique())
-        val_acc = set(df_val[field_config.accountId].unique())
-        test_acc = set(df_test_holdout[field_config.accountId].unique())
-
-        assert train_acc.isdisjoint(val_acc), "Leakage: Train/Val account overlap"
-        assert train_acc.isdisjoint(test_acc), "Leakage: Train/Test account overlap"
-        assert val_acc.isdisjoint(test_acc), "Leakage: Val/Test account overlap"
-
-        logger.info("Split complete. No account overlap.")
-        logger.info(f"  Train:   {len(df_train)} rows, {len(train_acc)} accounts")
-        logger.info(f"  Val:     {len(df_val)} rows, {len(val_acc)} accounts")
-        logger.info(f"  Test:    {len(df_test_holdout)} rows, {len(test_acc)} accounts")
-
-        return df_train, df_val, df_test_holdout
 
     def run_cross_validation(
             self, df_train_val: pd.DataFrame, n_splits: int = 5

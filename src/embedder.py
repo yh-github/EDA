@@ -133,7 +133,7 @@ class EmbeddingService:
 
             # Optional: Log progress
             if num_batches > 10 and processed_samples % (self.batch_size * 5) == 0:
-                elapsed = time.time() - start_time
+                # elapsed = time.time() - start_time
                 logger.info(f"    Processed {processed_samples}/{total_samples}...")
 
         elapsed_time = time.time() - start_time

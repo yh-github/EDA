@@ -6,9 +6,10 @@ import pandas as pd
 import diskcache
 from sklearn.model_selection import ParameterGrid
 from dataclasses import asdict
+from data import create_train_val_test_split
 from log_utils import setup_logging
 from runner import ExpRunner, ModelParams
-from config import ExperimentConfig, FieldConfig, EmbModel
+from config import ExperimentConfig, FieldConfig
 from embedder import EmbeddingService
 from feature_processor import FeatProcParams
 from classifier import HybridModel
@@ -43,7 +44,8 @@ class HyperTuner:
          cache_dir: Path,
          filter_direction: bool,
          model_config_class:ModelParams,
-         field_config: FieldConfig = FieldConfig()
+         field_config: FieldConfig = FieldConfig(),
+         exp_config: ExperimentConfig = ExperimentConfig()
     ):
         """
         Initializes the Tuner by loading and splitting the data one time.
@@ -61,13 +63,20 @@ class HyperTuner:
 
         # Load and split data *once* during initialization
         self.filter_direction = filter_direction
-        self._load_and_split_data()
-
-    def _load_and_split_data(self):
-        return self.load_and_split_data(self.data_path, self.filter_direction, self.field_config)
+        self.df_train_val, self.df_cleaned = self.load_and_split_data(
+            self.data_path,
+            self.filter_direction,
+            exp_config.random_state,
+            self.field_config
+        )
 
     @classmethod
-    def load_and_split_data(cls, data_path:Path, filter_direction:int, field_config:FieldConfig=FieldConfig()):
+    def load_and_split_data(cls,
+        data_path:Path,
+        filter_direction:int,
+        random_state:int,
+        field_config: FieldConfig = FieldConfig(),
+    ):
         """Loads and splits the data into train_val/test sets."""
         logger.info(f"Loading data from {data_path}...")
         try:
@@ -88,18 +97,13 @@ class HyperTuner:
             df_cleaned = df_cleaned[(df_cleaned[field_config.amount] * filter_direction) > 0]
         logger.info(f"Loaded {len(full_df)} rows, {len(df_cleaned)} after cleaning.")
 
-        # We need a base runner just to access the split method
-        base_runner = ExpRunner.create(
-            exp_params=ExperimentConfig(),
+        logger.info("Creating Train+Val/Test split for tuning...")
+        df_train, df_val, df_test = create_train_val_test_split(
+            test_size=0.2,
+            val_size=0.2,
+            random_state=random_state,
             full_df=df_cleaned,
-            emb_params=EmbeddingService.Params(model_name=EmbModel.ALBERT),
-            feat_proc_params=FeatProcParams.all_off(),
-            model_params=None
-        )
-
-        logger.info("Creating Train/Val/Test split for tuning...")
-        df_train, df_val, df_test = base_runner.create_train_val_test_split(
-            test_size=0.2, val_size=0.2
+            field_config=field_config
         )
 
         # Store the sets that the run() method will need
@@ -146,7 +150,8 @@ class HyperTuner:
         # Return the final list of all combinations
         return list(ParameterGrid(materialized_grid))
 
-    def _get_param_key(self, param_set: dict) -> str:
+    @classmethod
+    def _get_param_key(cls, param_set: dict) -> str:
         """Creates a unique, consistent string key for a parameter set."""
         params_as_dict = {
             key: asdict(value, dict_factory=exclude_none_values)
@@ -234,7 +239,9 @@ class HyperTuner:
                 return
 
             all_results_df = pd.DataFrame(all_results)
+            # noinspection PyTypeChecker
             metrics_df = pd.json_normalize(all_results_df['metrics'])
+            # noinspection PyTypeChecker
             params_df = pd.json_normalize(all_results_df['params'])
             summary_df = pd.concat([params_df, metrics_df], axis=1).fillna(0)
 
@@ -248,6 +255,7 @@ class HyperTuner:
             logger.info(f"  Avg F1: {best_run['cv_f1']:.4f}")
             logger.info(f"  Avg ROC-AUC: {best_run['cv_roc_auc']:.4f}")
             logger.info("  Params:")
+            # noinspection PyTypeChecker
             best_params_dict = all_results_df.iloc[best_run.name]['params']
             logger.info(json.dumps(best_params_dict, indent=2))
             logger.info("=" * 50)

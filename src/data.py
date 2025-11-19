@@ -2,6 +2,7 @@ import logging
 from typing import Self
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import GroupShuffleSplit
 from torch.utils.data import Dataset
 from config import FieldConfig
 
@@ -235,3 +236,57 @@ def create_mock_account_data(field_config: FieldConfig) -> pd.DataFrame:
     })
 
     return pd.DataFrame(data)
+
+
+def create_train_val_test_split(
+    test_size: float,
+    val_size: float,
+    full_df: pd.DataFrame,
+    random_state: int,
+    field_config: FieldConfig = FieldConfig()
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    logger.info(f"Splitting {len(full_df)} rows into Train/Val/Test...")
+
+    # --- 1. Split off the Holdout Test set (e.g., 20%) ---
+    gss_test = GroupShuffleSplit(
+        n_splits=1, test_size=test_size, random_state=random_state
+    )
+    train_val_idx, test_idx = next(gss_test.split(
+        full_df, y=full_df[field_config.label], groups=full_df[field_config.accountId]
+    ))
+
+    df_train_val = full_df.iloc[train_val_idx]
+    df_test_holdout = full_df.iloc[test_idx]
+
+    # --- 2. Split the Train/Val set into Train and Validation ---
+    # We need to adjust the val_size relative to the remaining data
+    # e.g., if val_size=0.2 and test_size=0.2, we want 20% of original,
+    # which is 0.2 / (1.0 - 0.2) = 0.25 of the remaining df_train_val.
+
+    relative_val_size = val_size / (1.0 - test_size)
+
+    gss_val = GroupShuffleSplit(
+        n_splits=1, test_size=relative_val_size, random_state=random_state
+    )
+    train_idx, val_idx = next(gss_val.split(
+        df_train_val, y=df_train_val[field_config.label], groups=df_train_val[field_config.accountId]
+    ))
+
+    df_train = df_train_val.iloc[train_idx]
+    df_val = df_train_val.iloc[val_idx]
+
+    # --- 3. Sanity Checks ---
+    train_acc = set(df_train[field_config.accountId].unique())
+    val_acc = set(df_val[field_config.accountId].unique())
+    test_acc = set(df_test_holdout[field_config.accountId].unique())
+
+    assert train_acc.isdisjoint(val_acc), "Leakage: Train/Val account overlap"
+    assert train_acc.isdisjoint(test_acc), "Leakage: Train/Test account overlap"
+    assert val_acc.isdisjoint(test_acc), "Leakage: Val/Test account overlap"
+
+    logger.info("Split complete. No account overlap.")
+    logger.info(f"  Train:   {len(df_train)} rows, {len(train_acc)} accounts")
+    logger.info(f"  Val:     {len(df_val)} rows, {len(val_acc)} accounts")
+    logger.info(f"  Test:    {len(df_test_holdout)} rows, {len(test_acc)} accounts")
+
+    return df_train, df_val, df_test_holdout

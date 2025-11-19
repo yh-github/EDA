@@ -4,33 +4,34 @@ import pandas as pd
 import numpy as np
 import diskcache
 from pathlib import Path
-from tqdm import tqdm
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import f1_score, precision_score, recall_score
-
-from config import FieldConfig, FilterConfig, EmbModel
+from config import FieldConfig, FilterConfig, EmbModel, ExperimentConfig
 from embedder import EmbeddingService
 from greedy_analyzer import GreedyGroupAnalyzer, GroupStabilityStatus
 from hyper_tuner import HyperTuner
-from log_utils import setup_logging
+
 
 logger = logging.getLogger(__name__)
-
 
 class GreedyTuner:
     def __init__(self, ind:int, filter_direction:int):
         self.cache_dir = Path(f"cache/greedy_results/{ind}")
         self.cache = diskcache.Cache(str(self.cache_dir))
         self.field_config = FieldConfig()
+        self.exp_config = ExperimentConfig()
         self.filter_direction = filter_direction
         self.accounts: pd.DataFrame|None = None
         self.df: pd.DataFrame|None = None
+        self.emb_service: EmbeddingService|None = None
 
     def load_data(self):
         logger.info("Loading data for tuning...")
         df_train_val, df_cleaned = HyperTuner.load_and_split_data(
             filter_direction=self.filter_direction,
-            data_path=Path('data/rec_data2.csv')
+            data_path=Path('data/rec_data2.csv'),
+            field_config=self.field_config,
+            random_state=self.exp_config.random_state
         )
         self.df = df_train_val
         self.accounts = self.df[self.field_config.accountId].unique()
