@@ -43,6 +43,7 @@ class EmbModel(StrEnum):
     FINBERT = "ProsusAI/finbert"
     MiniLM_L12 = 'sentence-transformers/all-MiniLM-L12-v2'
     MPNET = 'sentence-transformers/all-mpnet-base-v2'
+    FT_MPNET1 = './ft_models/fine_tuned_mpnet/'
 
 
 class ClusteringStrategy(StrEnum):
