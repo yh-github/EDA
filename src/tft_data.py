@@ -1,13 +1,17 @@
 import pandas as pd
-from pytorch_forecasting import TimeSeriesDataSet, GroupNormalizer
-from pytorch_forecasting.data.encoders import NaNLabelEncoder
+from pytorch_forecasting import TimeSeriesDataSet
+from pytorch_forecasting.data.encoders import NaNLabelEncoder  # <--- Important Import
 from config import FieldConfig
 
 
 def build_tft_dataset(df: pd.DataFrame, field_config: FieldConfig, max_prediction_length=1, max_encoder_length=30):
-    # 1. Create a strictly increasing time index for each account
-    # (Assumes df is already sorted by Date)
+    # 1. Ensure proper sorting and types
     df = df.sort_values([field_config.accountId, field_config.date]).reset_index(drop=True)
+
+    # CRITICAL: Ensure target is an integer for classification
+    df[field_config.label] = df[field_config.label].astype(int)
+
+    # Create time index
     df["time_idx"] = df.groupby(field_config.accountId).cumcount()
 
     # 2. Define the dataset
@@ -17,39 +21,29 @@ def build_tft_dataset(df: pd.DataFrame, field_config: FieldConfig, max_predictio
         target=field_config.label,
         group_ids=[field_config.accountId],
 
-        # HISTORY WINDOW: Look back 30 steps
+        # Windowing
         min_encoder_length=10,
         max_encoder_length=max_encoder_length,
-
-        # PREDICTION: Predict 1 step ahead (the current transaction)
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
 
-        # VARIABLE TYPES
+        # Variables
         static_categoricals=[field_config.accountId],
-        time_varying_known_categoricals=[
-            # "day_of_week" etc. if you have them
-        ],
-        time_varying_unknown_categoricals=[
-            # Your text embeddings should technically be handled differently,
-            # but TFT handles categorical inputs natively.
-            # For embeddings, we might pass them as "reals" if pre-computed.
-        ],
+        time_varying_known_categoricals=[],
+        time_varying_unknown_categoricals=[],
         time_varying_unknown_reals=[
             field_config.amount,
-            # Add your embedding dimensions here if passing as dense vectors
         ],
 
-        # AUTOMATIC LAGS (The "Cheat Code")
-        # This tells the model: "Look at the amount from 1 step ago, 2 steps ago..."
+        # Lags
         lags={
             field_config.amount: [1, 2, 3, 4, 5, 10]
         },
 
-        # AUTOMATIC SCALING
-        target_normalizer=GroupNormalizer(
-            groups=[field_config.accountId], transformation="softplus"
-        ),  # Use softplus for positive targets or None for binary classification
+        # Use NaNLabelEncoder for Classification.
+        # Do NOT use GroupNormalizer (it's for regression).
+        target_normalizer=NaNLabelEncoder(add_nan=False),
+
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
