@@ -49,6 +49,7 @@ class ClusteringStrategy(StrEnum):
     GREEDY = "greedy"
     DBSCAN = "dbscan"
     HDBSCAN_ROBUST = "hdbscan_robust"  # The pattern_finder.py one
+    LEXICAL = "lexical"  # String Distance (No Embeddings)
 
 
 @dataclass(frozen=True)
@@ -74,3 +75,6 @@ class FilterConfig:
     # DBSCAN
     dbscan_eps: float = 0.5
     dbscan_min_samples: int = 2
+
+    # --- Lexical Parameters ---
+    lexical_sim_threshold: float = 0.85

@@ -7,7 +7,7 @@ from pathlib import Path
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-from config import FieldConfig, FilterConfig, ExperimentConfig, EmbModel
+from config import FieldConfig, FilterConfig, ExperimentConfig, EmbModel, ClusteringStrategy
 from embedder import EmbeddingService
 from unified_analyzer import StrategyDispatcher
 from group_analyzer import GroupStabilityStatus
@@ -86,59 +86,63 @@ class ClusteringExperiment:
 
     def _evaluate_single_run(self, params: dict) -> dict:
         # 1. Map Grid Params -> FilterConfig
-        # Note: We use .get() with defaults matching the dataclass defaults
         config = FilterConfig(
-            strategy=params.get('strategy', 'greedy'),
+            strategy=ClusteringStrategy(params.get('strategy', 'greedy')),
 
             # Shared
             stability_metric=params.get('stability_metric', 'std'),
             date_variance_threshold=params.get('date_var', 2.0),
             amount_variance_threshold=params.get('amt_var', 1.0),
-            min_txns_for_period=params.get('min_txns', 3),
 
-            # Strategy: Greedy
+            # Greedy/Lexical
             greedy_sim_threshold=params.get('greedy_sim', 0.90),
-            greedy_amount_tol_abs=params.get('greedy_tol_abs', 2.00),
-            greedy_amount_tol_pct=params.get('greedy_tol_pct', 0.05),
+            lexical_sim_threshold=params.get('lexical_sim', 0.85),
 
-            # Strategy: DBSCAN
-            dbscan_eps=params.get('dbscan_eps', 0.5),
-            dbscan_min_samples=params.get('dbscan_min', 2)
+            # DBSCAN
+            dbscan_eps=params.get('dbscan_eps', 0.5)
         )
 
-        # 2. Instantiate Dispatcher
+        # 2. Instantiate
         analyzer = StrategyDispatcher(config, self.field_config)
 
         all_true = []
         all_pred = []
 
-        # 3. Run on Accounts
-        # (Optional: limit accounts for speed: self.accounts[:500])
         for acc_id in self.accounts:
-            acc_df = self.df[self.df[self.field_config.accountId] == acc_id]
+            mask = (self.df[self.field_config.accountId] == acc_id)
+            acc_df = self.df[mask]
             if acc_df.empty: continue
 
-            # Retrieve pre-computed embeddings
-            embeddings = self.emb_service.embed(acc_df[self.field_config.text].tolist())
+            # If strategy is Lexical, we don't strictly need embeddings,
+            # but passing them as None is handled by the analyzer.
+            # If Greedy/DBSCAN, we slice the matrix.
+            if config.strategy == 'lexical':
+                embeddings = None
+            else:
+                embeddings = self.all_embeddings[mask]
 
-            # --- THE CORE ANALYSIS ---
             groups = analyzer.analyze_account(acc_df, embeddings)
 
-            # Map predictions to row-level labels (0 or 1)
+            # Map back to labels
             pred_labels = np.zeros(len(acc_df), dtype=int)
             tx_ids = acc_df[self.field_config.trId].values
 
             for grp in groups:
                 if grp.status == GroupStabilityStatus.STABLE:
-                    # Mark these transactions as recurring
-                    mask = np.isin(tx_ids, grp.transaction_ids)
-                    pred_labels[mask] = 1
+                    txn_mask = np.isin(tx_ids, grp.transaction_ids)
+                    pred_labels[txn_mask] = 1
 
             all_true.extend(acc_df[self.field_config.label].values)
             all_pred.extend(pred_labels)
 
-        return {
+        metrics = {
             'f1': f1_score(all_true, all_pred),
             'precision': precision_score(all_true, all_pred, zero_division=0),
             'recall': recall_score(all_true, all_pred, zero_division=0)
         }
+
+        # ADDED LOGGING HERE
+        logger.info(
+            f"RUN RESULTS | F1: {metrics['f1']:.4f} | P: {metrics['precision']:.4f} | R: {metrics['recall']:.4f}")
+
+        return metrics
