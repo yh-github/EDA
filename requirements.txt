@@ -1,3 +1,4 @@
+lightning
 joblib
 rapidfuzz==3.14.3
 diskcache==5.6.3
