@@ -35,8 +35,7 @@ def build_tft_dataset(train_df_prepped: pd.DataFrame, field_config: FieldConfig,
         group_ids=[field_config.accountId],
 
         # --- WINDOWING ---
-        # Relaxed constraints to allow smaller accounts (e.g., only 3 txns history)
-        min_encoder_length=3,  # Was 10 (caused the warning)
+        min_encoder_length=3,
         max_encoder_length=max_encoder_length,
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
@@ -46,26 +45,29 @@ def build_tft_dataset(train_df_prepped: pd.DataFrame, field_config: FieldConfig,
         time_varying_unknown_reals=[field_config.amount],
 
         # --- LAGS ---
-        # Lags provide the "Memory".
-        # (Lag 1=Prev Txn, Lag 10=10 Txns ago)
         lags={
             field_config.amount: [1, 2, 3, 4, 5, 10]
         },
 
-        # --- SCALERS & ENCODERS ---
-        # Fix for sklearn error: Explicitly use EncoderNormalizer
+        # --- SCALERS & ENCODERS (The Fixes) ---
+
+        # 1. Fix for 'Unknown category' error:
+        # Allow the encoder to handle unseen Account IDs (in Val/Test) by mapping them to a special 'NaN' token.
+        categorical_encoders={
+            field_config.accountId: NaNLabelEncoder(add_nan=True)
+        },
+
+        # 2. Fix for sklearn feature name error:
         scalers={
             field_config.amount: EncoderNormalizer(method="standard")
         },
 
-        # Fix for Classification: Use NaNLabelEncoder (Not GroupNormalizer)
+        # 3. Fix for Classification Target:
         target_normalizer=NaNLabelEncoder(add_nan=False),
 
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
-
-        # Allow missing timesteps (if your data isn't perfectly regular)
         allow_missing_timesteps=True
     )
 
