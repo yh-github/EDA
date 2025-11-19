@@ -95,6 +95,7 @@ class HybridFeatureProcessor:
         :param use_continuous_amount: (bool) Create is_positive & log_abs_amount.
         :param use_categorical_amount: (bool) Create amount_token_id (magic/bins).
         """
+        self.already_fitted = False
         self._is_nop = is_nop
         self.fields_config = fields_config
 
@@ -236,6 +237,9 @@ class HybridFeatureProcessor:
         """
         Learns all the "rules" from the training data based on enabled features.
         """
+        if self.already_fitted:
+            raise Exception("Already fitted")
+        self.already_fitted = True
 
         logger.info(f"Fitting processor on {len(df)} rows...")
 

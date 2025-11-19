@@ -278,6 +278,8 @@ class ExpRunner:
         """
         Evaluates the model on a dataset, calculates the Precision-Recall curve,
         and finds the threshold that maximizes the F1 score.
+
+        Notice: If used on the test set, use ONLY to detect the NEED for threshold calibration
         """
         model.eval()
         all_logits = []

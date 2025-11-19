@@ -149,8 +149,3 @@ class EmbeddingService:
                 self.memory_cache[text] = embedding  # Keep in RAM
         else:
             logger.warning("  texts_to_compute was not empty, but no embeddings were generated.")
-
-    def __del__(self):
-        """Ensure the disk cache is closed when the object is destroyed."""
-        if hasattr(self, 'embedding_cache'):
-            self.embedding_cache.close()

@@ -6,6 +6,13 @@ import torch
 
 TWO_PI = 2 * np.pi
 
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    # if torch.xpu.is_available(): # XPU is buggy
+    #     return torch.device("xpu")
+    return torch.device("cpu")
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -38,25 +45,32 @@ class EmbModel(StrEnum):
     MPNET = 'sentence-transformers/all-mpnet-base-v2'
 
 
+class ClusteringStrategy(StrEnum):
+    GREEDY = "greedy"
+    DBSCAN = "dbscan"
+    HDBSCAN_ROBUST = "hdbscan_robust"  # The pattern_finder.py one
+
+
 @dataclass(frozen=True)
 class FilterConfig:
-    """
-    Holds all the "tunable" hyperparameters for our Stage 2 Filter.
-    These are the values you would "train" using a Hyperparameter Optimizer.
-    """
-    # DBSCAN parameters
-    dbscan_eps: float = 0.5       # The "distance" to consider neighbors. HIGHLY TUNABLE.
-    dbscan_min_samples: int = 2   # The minimum transactions to form a "group".
+    # --- Master Switch ---
+    strategy: ClusteringStrategy = ClusteringStrategy.GREEDY
 
-    # Filter parameters
-    min_txns_for_period: int = 3  # We need 3+ txns to find a stable period.
-    amount_std_threshold: float = 1.0  # Max $1.00 stdev in amount
-    date_std_threshold: float = 2.0    # Max 2.0 day stdev in time deltas
+    # --- Shared Constraints ---
+    min_txns_for_period: int = 3
 
+    # --- Stability Math (Shared) ---
+    # Use 'std' (standard) or 'mad' (robust from pattern_finder)
+    stability_metric: str = 'std'
+    date_variance_threshold: float = 2.0  # Days
+    amount_variance_threshold: float = 1.0  # Dollars
 
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda:0")
-    # if torch.xpu.is_available():
-    #     return torch.device("xpu")
-    return torch.device("cpu")
+    # --- Strategy-Specific Params ---
+    # Greedy
+    greedy_sim_threshold: float = 0.90
+    greedy_amount_tol_abs: float = 2.00
+    greedy_amount_tol_pct: float = 0.05
+
+    # DBSCAN
+    dbscan_eps: float = 0.5
+    dbscan_min_samples: int = 2

@@ -72,8 +72,8 @@ class HybridModel(nn.Module):
         mlp_layers = []
         for i in range(len(layer_dims) - 1):
             mlp_layers.append(nn.Linear(layer_dims[i], layer_dims[i + 1]))
-            mlp_layers.append(nn.ReLU())
             mlp_layers.append(nn.BatchNorm1d(layer_dims[i + 1]))
+            mlp_layers.append(nn.ReLU())
             mlp_layers.append(nn.Dropout(mlp_config.dropout_rate))
 
         self.mlp = nn.Sequential(*mlp_layers)
