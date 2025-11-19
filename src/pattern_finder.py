@@ -4,11 +4,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from sklearn.cluster import DBSCAN
-
-# Config imports
 from config import FilterConfig, FieldConfig
-
-# --- Optional SOTA Imports ---
 import umap
 import hdbscan
 
@@ -65,11 +61,7 @@ class RecurringPatternExtractor:
 
         self.config = filter_config
         self.fields = field_config
-        self.use_sota = use_advanced_clustering and HAS_SOTA_LIBS
-
-        if use_advanced_clustering and not HAS_SOTA_LIBS:
-            logger.warning(
-                "Advanced clustering requested but 'umap-learn' or 'hdbscan' not found. Falling back to sklearn DBSCAN.")
+        self.use_sota = use_advanced_clustering
 
     def extract_patterns(self, account_df: pd.DataFrame, embeddings: np.ndarray) -> list[RecurringPattern]:
         if account_df.empty or len(embeddings) == 0:

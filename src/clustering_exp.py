@@ -9,6 +9,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 
 from config import FieldConfig, FilterConfig, ExperimentConfig, EmbModel, ClusteringStrategy
 from embedder import EmbeddingService
+from hyb_emb_service import HybridEmbeddingService
 from unified_analyzer import StrategyDispatcher
 from group_analyzer import GroupStabilityStatus
 from hyper_tuner import HyperTuner  # reused for data loading
@@ -47,12 +48,26 @@ class ClusteringExperiment:
         self.accounts = self.df[self.field_config.accountId].unique()
         logger.info(f"Loaded {len(self.df)} rows, {len(self.accounts)} accounts.")
 
-    def precompute_embeddings(self, model_name=EmbModel.MPNET):
+    def precompute_embeddings(self, model_name:EmbModel|HybridEmbeddingService.HyEmbModel):
         """Pre-computes embeddings so we don't re-run BERT during the grid search."""
         logger.info(f"Pre-computing embeddings using {model_name}...")
-        self.emb_service = EmbeddingService(model_name=model_name, max_length=64, batch_size=256)
-        all_texts = self.df[self.field_config.text].unique().tolist()
-        self.emb_service.embed(all_texts)  # Populates internal cache
+
+        if isinstance(model_name,HybridEmbeddingService.HyEmbModel):
+            logger.info(">>> Using HybridEmbeddingService for Smart Embeddings <<<")
+            # Initialize the wrapper
+            hybrid_service = HybridEmbeddingService(model_name)
+
+            # Pass the full DataFrame (it needs dates/amounts, not just text!)
+            # Note: We process in chunks if memory is tight, but for 120k rows it fits in RAM
+            self.all_embeddings = hybrid_service.embed(self.df)
+
+            # Dummy service for caching interface if needed later
+            self.emb_service = None
+        else:
+            self.emb_service = EmbeddingService(model_name=model_name, max_length=64, batch_size=256)
+            all_texts = self.df[self.field_config.text].tolist()
+            self.emb_service.embed(all_texts)  # Populates internal cache
+            self.all_embeddings = self.emb_service.embed(all_texts)
 
     def run_grid(self, grid_config: dict):
         param_list = list(ParameterGrid(grid_config))
