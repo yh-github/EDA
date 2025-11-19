@@ -6,6 +6,7 @@ from feature_processor import FeatureHyperParams
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class TransformerHyperParams:
     """Holds all hyperparameters for the TabularTransformerModel."""
@@ -18,7 +19,7 @@ class TransformerHyperParams:
     # Hidden layers for the *final* classifier head
     final_mlp_layers: list[int] = field(default_factory=lambda: [64])
     dropout_rate: float = 0.2
-    pooling_strategy: str = "cls",
+    pooling_strategy: str = "cls"  # "cls", "mean", or "max"
     norm_first: bool = False
 
 
@@ -30,6 +31,7 @@ class TabularTransformerModel(nn.Module):
     common dimension (d_model), treats them as a sequence of tokens,
     and passes them through a TransformerEncoder.
     """
+
     def __init__(
             self,
             feature_config: FeatureHyperParams,
@@ -42,7 +44,6 @@ class TabularTransformerModel(nn.Module):
         self.categorical_names = list(feature_config.categorical_vocab_sizes.keys())
 
         self.feature_embedders = nn.ModuleDict()
-        num_features = 0  # Count how many "tokens" we will have
 
         self.pooling_strategy = transformer_config.pooling_strategy
         if self.pooling_strategy not in ["cls", "mean", "max"]:
@@ -53,14 +54,12 @@ class TabularTransformerModel(nn.Module):
             self.feature_embedders['text'] = nn.Linear(
                 feature_config.text_embed_dim, d_model
             )
-            num_features += 1
 
-        # B. Continuous Features (Revised)
+        # B. Continuous Features
         if feature_config.continuous_feat_dim > 0:
             self.feature_embedders['continuous_block'] = nn.Linear(
                 feature_config.continuous_feat_dim, d_model
             )
-            num_features += 1
 
         # C. Categorical Features
         for name, vocab_size in feature_config.categorical_vocab_sizes.items():
@@ -69,7 +68,6 @@ class TabularTransformerModel(nn.Module):
                 nn.Embedding(vocab_size, embed_dim),
                 nn.Linear(embed_dim, d_model)
             )
-        num_features += len(self.categorical_names)
 
         # --- 2. The Transformer Encoder ---
         encoder_layer = nn.TransformerEncoderLayer(
@@ -86,7 +84,6 @@ class TabularTransformerModel(nn.Module):
 
         # --- 3. The [CLS] Token ---
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
-        num_features += 1  # Add one for the CLS token
 
         # --- 4. The Final Classifier Head ---
         mlp_head_layers = [d_model] + transformer_config.final_mlp_layers
@@ -95,83 +92,88 @@ class TabularTransformerModel(nn.Module):
             mlp_layers.append(nn.Linear(mlp_head_layers[i], mlp_head_layers[i + 1]))
             mlp_layers.append(nn.ReLU())
             mlp_layers.append(nn.Dropout(transformer_config.dropout_rate))
+
+        # Final projection to 1 logit
         mlp_layers.append(nn.Linear(mlp_head_layers[-1], 1))
+
         self.mlp_head = nn.Sequential(*mlp_layers)
 
-        logger.info(f"TabularTransformerModel Initialized. d_model={d_model}, num_tokens={num_features}, "
-              f"pooling={self.pooling_strategy}, norm_first={transformer_config.norm_first}")
+        logger.info(f"TabularTransformerModel Initialized. d_model={d_model}, "
+                    f"pooling={self.pooling_strategy}, norm_first={transformer_config.norm_first}")
+
+    def get_representation(self,
+                           x_text: torch.Tensor,
+                           x_continuous: torch.Tensor,
+                           x_categorical: torch.Tensor) -> torch.Tensor:
+        """
+        Passes inputs through the Transformer and Pooling layers,
+        returning the dense vector representation (embedding) of size d_model.
+        """
+        embedded_tokens = []
+        batch_size = None
+
+        # 1. Embed Text
+        if self.feature_config.text_embed_dim > 0:
+            # (Batch, 1, d_model)
+            token = self.feature_embedders['text'](x_text).unsqueeze(1)
+            embedded_tokens.append(token)
+            batch_size = x_text.shape[0]
+
+        # 2. Embed Continuous
+        if self.feature_config.continuous_feat_dim > 0:
+            token = self.feature_embedders['continuous_block'](x_continuous).unsqueeze(1)
+            embedded_tokens.append(token)
+            if batch_size is None:
+                batch_size = x_continuous.shape[0]
+
+        # 3. Embed Categorical
+        if len(self.categorical_names) > 0:
+            # If this is the first active feature, set batch_size
+            if batch_size is None:
+                batch_size = x_categorical.shape[0]
+
+            for i, name in enumerate(self.categorical_names):
+                cat_token = x_categorical[:, i]
+                token = self.feature_embedders[name](cat_token).unsqueeze(1)
+                embedded_tokens.append(token)
+
+        if batch_size is None:
+            raise ValueError("Model has no inputs enabled.")
+
+        # 4. Prepend CLS token (if using CLS strategy)
+        if self.pooling_strategy == "cls":
+            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+            all_tokens = [cls_tokens] + embedded_tokens
+        else:
+            all_tokens = embedded_tokens
+
+        # 5. Concatenate into a sequence: (B, num_tokens, d_model)
+        feature_sequence = torch.cat(all_tokens, dim=1)
+
+        # 6. Pass through Transformer
+        transformer_output = self.transformer_encoder(feature_sequence)
+
+        # 7. Pooling
+        if self.pooling_strategy == "cls":
+            pooled_output = transformer_output[:, 0]
+        elif self.pooling_strategy == "mean":
+            pooled_output = transformer_output.mean(dim=1)
+        elif self.pooling_strategy == "max":
+            pooled_output = torch.max(transformer_output, dim=1).values
+        else:
+            raise RuntimeError(f"Invalid pooling_strategy '{self.pooling_strategy}'")
+
+        return pooled_output
 
     def forward(self,
                 x_text: torch.Tensor,
                 x_continuous: torch.Tensor,
                 x_categorical: torch.Tensor) -> torch.Tensor:
 
-        # 1. Embed all features into (B, 1, d_model)
-        # Use .unsqueeze(1) to create the "sequence" dimension
-        embedded_tokens = []
+        # 1. Get the learned representation
+        embedding = self.get_representation(x_text, x_continuous, x_categorical)
 
-        if self.feature_config.text_embed_dim > 0:
-            embedded_tokens.append(self.feature_embedders['text'](x_text).unsqueeze(1))
-
-        if self.feature_config.continuous_feat_dim > 0:
-            embedded_tokens.append(
-                self.feature_embedders['continuous_block'](x_continuous).unsqueeze(1)
-            )
-
-        if len(self.categorical_names) > 0:
-            for i, name in enumerate(self.categorical_names):
-                cat_token = x_categorical[:, i]  # Get the i-th categorical feature
-                embedded_tokens.append(
-                    self.feature_embedders[name](cat_token).unsqueeze(1)
-                )
-
-        # 2. Prepend CLS token
-        # Expand CLS token to match batch size
-        # batch_size = -1
-        if self.feature_config.text_embed_dim > 0:
-            batch_size = x_text.shape[0]
-        elif self.feature_config.continuous_feat_dim > 0:
-            batch_size = x_continuous.shape[0]
-        elif len(self.categorical_names) > 0:
-            batch_size = x_categorical.shape[0]
-        else:
-            # This should be impossible if the model built correctly
-            raise ValueError("Model has no inputs enabled.")
-
-        if self.pooling_strategy == "cls":
-            cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-            all_tokens = [cls_tokens] + embedded_tokens
-        else:
-            all_tokens = embedded_tokens  # No CLS token
-
-
-        # 3. Concatenate into a sequence: (B, num_tokens, d_model)
-        feature_sequence = torch.cat(all_tokens, dim=1)
-
-        # 4. Pass through Transformer
-        # Output shape is also (B, num_tokens, d_model)
-        transformer_output = self.transformer_encoder(feature_sequence)
-
-        # 5. Get the output of the [CLS] token (the first token)
-        if self.pooling_strategy == "cls":
-            # Get the output of the [CLS] token (the first token)
-            pooled_output = transformer_output[:, 0]
-
-        elif self.pooling_strategy == "mean":
-            # Take the mean of all token outputs
-            # dim=1 is the sequence dimension
-            pooled_output = transformer_output.mean(dim=1)
-
-        elif self.pooling_strategy == "max":
-            # Take the max of all token outputs
-            # .max returns (values, indices), we just want the values
-            pooled_output = torch.max(transformer_output, dim=1).values
-
-        else:
-            # This should be impossible due to the __init__ check
-            raise RuntimeError(f"Invalid pooling_strategy '{self.pooling_strategy}' in forward pass.")
-
-        # 6. Classify
-        logits = self.mlp_head(pooled_output)
+        # 2. Classify
+        logits = self.mlp_head(embedding)
 
         return logits.squeeze(-1)
