@@ -79,7 +79,8 @@ class TabularTransformerModel(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=transformer_config.num_encoder_layers
+            num_layers=transformer_config.num_encoder_layers,
+            enable_nested_tensor=not transformer_config.norm_first # to prevent warning
         )
 
         # --- 3. The [CLS] Token ---

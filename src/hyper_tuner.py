@@ -27,6 +27,13 @@ class HyperTuner:
     def load(cls,
         index: int, model_config_class: Any = HybridModel.MlpHyperParams, unique_cache=True, filter_direction=False
     ) ->Self:
+        """
+        :param index: cache and log identifier (use the same one to combine different runs)
+        :param model_config_class:
+        :param unique_cache: if to use the index for the cache
+        :param filter_direction: 1 is outgoing (from the account), -1 is incoming, 0 is both
+        :return: HyperTuner
+        """
         setup_logging(Path('logs/'), f"tuning{index}")
         postfix = ""
         if unique_cache:
