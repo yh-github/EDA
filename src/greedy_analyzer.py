@@ -4,9 +4,9 @@ import pandas as pd
 import torch
 from datetime import timedelta
 from typing import List, Literal
-from difflib import SequenceMatcher
 from config import FieldConfig, FilterConfig
 from group_analyzer import RecurringGroupResult, GroupStabilityStatus
+from rapidfuzz import process, fuzz
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,6 @@ class GreedyGroupAnalyzer:
     def __init__(self,
                  filter_config: FilterConfig,
                  field_config: FieldConfig,
-                 # Tunable parameters
                  sim_threshold: float = 0.90,
                  amount_tol_abs: float = 2.00,
                  amount_tol_pct: float = 0.05,
@@ -37,16 +36,21 @@ class GreedyGroupAnalyzer:
         ids = df_reset[self.fields.trId].values
         dates = pd.to_datetime(df_reset[self.fields.date])
         amounts = df_reset[self.fields.amount].values
-        texts = df_reset[self.fields.text].values
+        texts = df_reset[self.fields.text].astype(str).values  # Ensure strings
 
-        # 2. Pre-calculate Similarity Matrix (Only for Cosine)
+        # 2. Pre-calculate Similarity Matrix
         sim_matrix = None
+
         if self.metric == "cosine":
             if embeddings is None or len(embeddings) == 0:
                 raise ValueError("Embeddings required for cosine metric")
             emb_tensor = torch.from_numpy(embeddings).float()
             emb_tensor = torch.nn.functional.normalize(emb_tensor, p=2, dim=1)
-            sim_matrix = torch.mm(emb_tensor, emb_tensor.t())
+            # (N, N) on CPU or GPU
+            sim_matrix = torch.mm(emb_tensor, emb_tensor.t()).numpy()
+
+        elif self.metric == "lexical":
+            sim_matrix = process.cdist(texts, texts, scorer=fuzz.ratio, dtype=np.float32) / 100.0
 
         # 3. Greedy Iteration
         n_samples = len(df_reset)
@@ -60,33 +64,22 @@ class GreedyGroupAnalyzer:
             # --- A. Similarity Filter ---
             candidates = []
 
-            if self.metric == "cosine":
-                # Vectorized lookup
-                sim_scores = sim_matrix[i].numpy()
-                # Find indices where sim > threshold
+            if sim_matrix is not None:
+                # FAST PATH (Vectorized for both Cosine and RapidFuzz)
+                sim_scores = sim_matrix[i]
                 candidates_indices = np.where(sim_scores > self.sim_threshold)[0]
-                # Exclude already assigned
                 candidates = candidates_indices[~assigned_mask[candidates_indices]]
 
-            elif self.metric == "lexical":
-                # Iterative String Matching
-                anchor_text = str(texts[i])
+            else:
+                # SLOW FALLBACK (Python Loop)
+                anchor_text = texts[i]
                 potential_matches = []
-
                 for j in range(n_samples):
                     if assigned_mask[j]: continue
-                    # Optimization: Skip self in inner loop if needed,
-                    # but typically self-similarity is 1.0, so we keep it.
-
-                    # Calculate similarity
-                    # Note: This is O(N^2) string comparisons per account.
-                    # For N < 1000, this is acceptable (~0.5s).
-                    text_j = str(texts[j])
-                    score = SequenceMatcher(None, anchor_text, text_j).ratio()
-
+                    # difflib is slow
+                    score = SequenceMatcher(None, anchor_text, texts[j]).ratio()
                     if score > self.sim_threshold:
                         potential_matches.append(j)
-
                 candidates = np.array(potential_matches)
 
             if len(candidates) < self.filter_config.min_txns_for_period:
@@ -114,7 +107,6 @@ class GreedyGroupAnalyzer:
 
             gaps = gaps_series.values
 
-            # Robust vs Standard Variance
             if self.filter_config.stability_metric == 'mad':
                 gap_median = float(np.median(gaps))
                 gap_var = float(np.median(np.abs(gaps - gap_median)))
@@ -129,7 +121,6 @@ class GreedyGroupAnalyzer:
             assigned_mask[valid_indices] = True
             cluster_id_counter += 1
 
-            # Stats
             median_gap = float(np.median(gaps))
             amt_vals = amounts[valid_indices]
             amt_mean = float(np.mean(amt_vals))
