@@ -104,7 +104,8 @@ class HybridEmbeddingService:
 
         # 4. Load Model Weights
         self.model = HybridModel(feature_config, mlp_config)
-        state_dict = torch.load(self.model_dir / "hybrid_model_state.pt", map_location=self.device)
+        #TODO file name shouldn't be hardcoded here
+        state_dict = torch.load(self.model_dir / "mlp_model_state.pt", map_location=self.device)
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
