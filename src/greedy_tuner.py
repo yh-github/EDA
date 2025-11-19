@@ -11,19 +11,20 @@ from embedder import EmbeddingService
 from greedy_analyzer import GreedyGroupAnalyzer, GroupStabilityStatus
 from hyper_tuner import HyperTuner
 
-
 logger = logging.getLogger(__name__)
 
+
 class GreedyTuner:
-    def __init__(self, ind:int, filter_direction:int):
+    def __init__(self, ind: int, filter_direction: int):
         self.cache_dir = Path(f"cache/greedy_results/{ind}")
         self.cache = diskcache.Cache(str(self.cache_dir))
         self.field_config = FieldConfig()
         self.exp_config = ExperimentConfig()
         self.filter_direction = filter_direction
-        self.accounts: pd.DataFrame|None = None
-        self.df: pd.DataFrame|None = None
-        self.emb_service: EmbeddingService|None = None
+        self.accounts: pd.DataFrame | None = None
+        self.df: pd.DataFrame | None = None
+        self.emb_service: EmbeddingService | None = None
+        self.all_embeddings: np.ndarray | None = None
 
     def load_data(self):
         logger.info("Loading data for tuning...")
@@ -33,18 +34,26 @@ class GreedyTuner:
             field_config=self.field_config,
             random_state=self.exp_config.random_state
         )
-        self.df = df_train_val
+        # Ensure index is reset so boolean masking / slicing works predictably
+        self.df = df_train_val.reset_index(drop=True)
         self.accounts = self.df[self.field_config.accountId].unique()
         logger.info(f"Loaded {len(self.df)} rows, {len(self.accounts)} accounts.")
 
     def precompute_embeddings(self, model_name=EmbModel.MPNET):
         """
-        Pre-computes embeddings for all texts so the inner loop is fast.
+        Pre-computes embeddings for the ENTIRE dataframe at once.
         """
         logger.info(f"Pre-computing embeddings using {model_name}...")
         self.emb_service = EmbeddingService(model_name=model_name, max_length=64, batch_size=256)
-        # This will populate the disk cache in EmbeddingService
-        self.emb_service.embed(self.df[self.field_config.text].unique().tolist())
+
+        # 1. Extract all texts in order
+        all_texts = self.df[self.field_config.text].tolist()
+
+        # 2. Compute/Fetch embeddings for the whole list at once
+        #    This creates one large (N_rows, 768) matrix.
+        logger.info(f"Generating aligned embedding matrix for {len(all_texts)} rows...")
+        self.all_embeddings = self.emb_service.embed(all_texts)
+        logger.info("Full embedding matrix ready.")
 
     def run_grid(self, grid_config: dict):
         param_list = list(ParameterGrid(grid_config))
@@ -54,17 +63,15 @@ class GreedyTuner:
         best_params = None
 
         for i, params in enumerate(param_list):
-            # Check cache first
             param_key = json.dumps(params, sort_keys=True)
             if param_key in self.cache:
                 metrics = self.cache[param_key]
                 logger.info(f"[{i + 1}/{len(param_list)}] CACHED: F1={metrics['f1']:.4f} | {params}")
             else:
-                # Run Evaluation
                 metrics = self._evaluate_params(params)
                 self.cache[param_key] = metrics
                 logger.info(
-                    f"[{i + 1}/{len(param_list)}] RUN: F1={metrics['f1']:.4f} (P={metrics['precision']:.3f}, R={metrics['recall']:.3f}) | {params}")
+                    f"[{i + 1}/{len(param_list)}] RUN: F1={metrics['f1']:.4f} | {params}")
 
             if metrics['f1'] > best_f1:
                 best_f1 = metrics['f1']
@@ -76,12 +83,10 @@ class GreedyTuner:
         logger.info("=" * 50)
 
     def _evaluate_params(self, params) -> dict:
-        # Construct Configs from Params
         filter_config = FilterConfig(
-            # The minimum number of transactions required to form a valid group.
             min_txns_for_period=params.get('min_txns', 3),
-            # The maximum allowed "Jitter" (Standard Deviation) in the number of days between transactions.
-            date_std_threshold=params.get('date_std', 2.0)
+            date_variance_threshold=params.get('date_std', 2.0),
+            stability_metric=params.get('stability_metric', 'std')
         )
 
         analyzer = GreedyGroupAnalyzer(
@@ -95,17 +100,18 @@ class GreedyTuner:
         all_true = []
         all_pred = []
 
-        # Run on all accounts
-        # Note: For speed in tuning, you might want to sample accounts (e.g. first 200)
-        # accounts_to_run = self.accounts[:200]
         accounts_to_run = self.accounts
 
         for acc_id in accounts_to_run:
-            acc_df = self.df[self.df[self.field_config.accountId] == acc_id]
+            # OPTIMIZATION: Use Boolean Mask for both DF and Embeddings
+            mask = (self.df[self.field_config.accountId] == acc_id)
+
+            # 1. Slice DataFrame
+            acc_df = self.df[mask]
             if acc_df.empty: continue
 
-            # Get embeddings (Cached lookups)
-            embeddings = self.emb_service.embed(acc_df[self.field_config.text].tolist())
+            # 2. Slice Pre-computed Numpy Matrix (O(1) lookup vs O(N) hashing)
+            embeddings = self.all_embeddings[mask]
 
             # Analyze
             groups = analyzer.analyze_account(acc_df, embeddings)
@@ -117,14 +123,15 @@ class GreedyTuner:
             for grp in groups:
                 if grp.status == GroupStabilityStatus.STABLE:
                     # Find indices of these transaction IDs
-                    mask = np.isin(acc_ids, grp.transaction_ids)
-                    pred_labels[mask] = 1
+                    # numpy isin is faster than list comprehension
+                    txn_mask = np.isin(acc_ids, grp.transaction_ids)
+                    pred_labels[txn_mask] = 1
 
             all_true.extend(acc_df[self.field_config.label].values)
             all_pred.extend(pred_labels)
 
         return {
             'f1': f1_score(all_true, all_pred),
-            'precision': precision_score(all_true, all_pred),
-            'recall': recall_score(all_true, all_pred)
+            'precision': precision_score(all_true, all_pred, zero_division=0),
+            'recall': recall_score(all_true, all_pred, zero_division=0)
         }
