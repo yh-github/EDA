@@ -8,7 +8,7 @@ from pytorch_forecasting.metrics import CrossEntropy
 from pytorch_lightning.callbacks import EarlyStopping
 
 # --- Imports from your new files ---
-from config import FieldConfig
+from config import FieldConfig, ExperimentConfig
 from data import create_train_val_test_split  # Reuse your existing split logic
 # Setup Logging
 from log_utils import setup_logging
@@ -89,7 +89,9 @@ if __name__ == "__main__":
     full_df = full_df.dropna(subset=[field_config.date, field_config.amount, field_config.text])
 
     # Split using your existing logic (Account-aware)
-    train_df, val_df, _ = create_train_val_test_split(...)
+    train_df, val_df, _ = create_train_val_test_split(
+        test_size=0.2, val_size=0.2, full_df=full_df, random_state=ExperimentConfig().random_state
+    )
 
     # --- Prepare BOTH DataFrames ---
     logger.info("Preparing data for TFT (sorting, time_idx)...")
