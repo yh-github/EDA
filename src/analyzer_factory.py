@@ -1,32 +1,50 @@
-from config import FilterConfig, ClusteringStrategy
-from greedy_analyzer import GreedyGroupAnalyzer
-from group_analyzer import RecurringGroupAnalyzer
+import numpy as np
+import pandas as pd
+from config import FilterConfig
 
-# from pattern_finder import RecurringPatternExtractor (if you align the outputs)
 
-class UniversalAnalyzer:
+class StabilityValidator:
     """
-    A wrapper that delegates to the specific strategy defined in config.
+    Centralizes the logic for deciding if a group of transactions 
+    is 'recurring' based on Date and Amount variance.
     """
 
-    def __init__(self, filter_config: FilterConfig, field_config):
-        self.config = filter_config
-        self.fields = field_config
+    def __init__(self, config: FilterConfig):
+        self.config = config
 
-        if self.config.strategy == ClusteringStrategy.GREEDY:
-            self._impl = GreedyGroupAnalyzer(
-                filter_config, field_config,
-                sim_threshold=filter_config.greedy_sim_threshold,
-                # ... pass other greedy specific params
-            )
-        elif self.config.strategy == ClusteringStrategy.DBSCAN:
-            self._impl = RecurringGroupAnalyzer(
-                filter_config, field_config
-            )
-            # You would need to update GroupAnalyzer to accept eps from config inside __init__
+    def evaluate(self, dates: pd.Series, amounts: pd.Series) -> bool:
+        """Returns True if the group meets all stability criteria."""
+
+        # 1. Count Check
+        if len(dates) < self.config.min_txns_for_period:
+            return False
+
+        # 2. Amount Stability
+        if self.config.stability_metric == 'mad':
+            # Robust: Median Absolute Deviation
+            amt_median = np.median(amounts)
+            amt_var = np.median(np.abs(amounts - amt_median))
         else:
-            raise ValueError(f"Unknown strategy: {self.config.strategy}")
+            # Standard: Standard Deviation
+            amt_var = amounts.std()
 
-    def analyze_account(self, account_df, embeddings):
-        # Standardize interface
-        return self._impl.analyze_account(account_df, embeddings)
+        if amt_var > self.config.amount_variance_threshold:
+            return False
+
+        # 3. Date/Cycle Stability
+        # Calculate gaps between consecutive transactions
+        gaps = dates.sort_values().diff().dt.days.dropna()
+
+        if len(gaps) < (self.config.min_txns_for_period - 1):
+            return False
+
+        if self.config.stability_metric == 'mad':
+            gap_median = np.median(gaps)
+            gap_var = np.median(np.abs(gaps - gap_median))
+        else:
+            gap_var = gaps.std()
+
+        if gap_var > self.config.date_variance_threshold:
+            return False
+
+        return True

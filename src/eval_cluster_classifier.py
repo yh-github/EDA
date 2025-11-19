@@ -1,15 +1,15 @@
-import pandas as pd
-import numpy as np
+import logging
 from pathlib import Path
-from tqdm import tqdm
+
+import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
+from tqdm import tqdm
 
 # Imports
 from config import FieldConfig, FilterConfig, EmbModel
 from embedder import EmbeddingService
 from group_analyzer import RecurringGroupAnalyzer, GroupStabilityStatus
 from log_utils import setup_logging
-import logging
 
 # Setup
 setup_logging(Path('logs/'), "eval_clustering")
