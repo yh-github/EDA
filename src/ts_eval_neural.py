@@ -1,5 +1,7 @@
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import pandas as pd
 import torch
@@ -20,12 +22,18 @@ class NeuralAnalyzerAdapter:
     (Takes a DataFrame -> Returns a list of Dates)
     """
 
+    @dataclass
+    class Params:
+        jitter_tolerance: int = 1  # Allow +/- 1 day match
+
     def __init__(self, model_path, seq_len=180):
         self.field_config = FieldConfig()
         self.seq_len = seq_len
         self.model = SignalCleaner().to(DEVICE)
         self.model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         self.model.eval()
+        self.cfg = NeuralAnalyzerAdapter.Params()
+
 
     def predict_dates(self, df: pd.DataFrame):
         # 1. Prep Input (Same logic as training dataset)
