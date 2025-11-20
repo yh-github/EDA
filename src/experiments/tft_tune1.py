@@ -4,12 +4,10 @@ from pathlib import Path
 import lightning.pytorch as pl
 import optuna
 import pandas as pd
-import torch
 import torch.nn as nn
 import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-from pytorch_forecasting.metrics import CrossEntropy
 
 from config import FieldConfig
 from data import create_train_val_test_split
@@ -153,20 +151,38 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     return val_loss.item() if val_loss else float("inf")
 
 
+# ... (Keep all your existing imports and classes at the top) ...
+# [NEW] Add these imports if missing
+from config import EmbModel
+from embedder import EmbeddingService
+
 if __name__ == "__main__":
     logger.info("Loading data...")
     field_config = FieldConfig()
     full_df = pd.read_csv("data/rec_data2.csv").dropna(
         subset=[field_config.date, field_config.amount, field_config.text])
 
-    # Split
+    # 1. Split
     train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df, random_state=42)
 
-    # Prep
-    train_df_prepped = prepare_tft_data(train_df, field_config)
-    val_df_prepped = prepare_tft_data(val_df, field_config)
+    # --- [NEW] Generate Embeddings for TFT Features ---
+    # We need these for the PCA compression step we added to tft_data.py
+    logger.info("Generating text embeddings for TFT...")
+    emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=1024)
 
-    # Calc Weights
+    train_emb = emb_service.embed(train_df[field_config.text].tolist())
+    val_emb = emb_service.embed(val_df[field_config.text].tolist())
+
+    # --- [FIX] Unpack Tuple and Pass PCA Model ---
+    # Train: Fit PCA and return the model
+    train_df_prepped, pca_model = prepare_tft_data(train_df, field_config, embeddings=train_emb)
+
+    # Val: Use the fitted PCA model from training (don't refit!)
+    val_df_prepped, _ = prepare_tft_data(val_df, field_config, pca_model=pca_model, embeddings=val_emb)
+
+    # ------------------------------------------------
+
+    # Calc Weights (Now works because train_df_prepped is a DataFrame again)
     train_labels = train_df_prepped[field_config.label]
     n_pos = train_labels.sum()
     n_neg = len(train_labels) - n_pos
