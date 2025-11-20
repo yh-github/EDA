@@ -186,6 +186,11 @@ def train_learner(
     # 2. Build Dataset & Loader
     dataset = TimeSeriesDataset(df, field_config, seq_len=seq_len)
 
+    pos_weight_val = 30.0
+    pos_weight = torch.tensor([pos_weight_val]).to(DEVICE)
+
+    logger.info(f"Using Positive Weight: {pos_weight_val:.1f} to fix recall.")
+
     # Split Train/Val (80/20)
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
@@ -201,7 +206,8 @@ def train_learner(
     # Weighted BCE Loss?
     # Recurring days are rare (sparse). We might want to weight positive samples higher.
     # For now, standard BCELoss is a good baseline.
-    criterion = nn.BCELoss()
+    # criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     logger.info(f"Starting training on {DEVICE} for {epochs} epochs...")
 
