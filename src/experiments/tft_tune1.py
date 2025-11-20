@@ -48,15 +48,18 @@ def objective(trial, train_ds, train_loader, val_loader):
 
     # 3. Trainer
     early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
-    lr_logger = LearningRateMonitor()
+    # lr_logger = LearningRateMonitor()
 
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
         gradient_clip_val=gradient_clip_val,
-        callbacks=[early_stop_callback, lr_logger],
+        callbacks=[
+            early_stop_callback
+            # , lr_logger
+        ],
         enable_progress_bar=False,
-        logger=True
+        logger=False
     )
 
     # 4. Fit (Uses passed loaders)
@@ -71,7 +74,6 @@ def objective(trial, train_ds, train_loader, val_loader):
 
 
 if __name__ == "__main__":
-    # ... (Loading Code is the same as before) ...
     logger.info("Loading data...")
     field_config = FieldConfig()
     full_df = pd.read_csv("data/rec_data2.csv").dropna(
