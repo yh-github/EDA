@@ -27,22 +27,27 @@ N_TRIALS = 50
 STUDY_NAME = "tft_optimization_v1.3"
 
 
+class TFTMulticlassF1(torchmetrics.classification.MulticlassF1Score):
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        # TFT outputs (Batch, Time, Classes) -> (N, 1, C)
+        # TorchMetrics expects (Batch, Classes, Time) -> (N, C, 1)
+        if preds.ndim == 3 and preds.shape[1] == 1 and preds.shape[2] == self.num_classes:
+            preds = preds.permute(0, 2, 1)
+
+        super().update(preds, target)
+
+
 class TextLogCallback(Callback):
-    """Logs epoch metrics to text (perfect for background jobs)."""
-
     def on_validation_end(self, trainer, pl_module):
-        # Skip logging sanity check steps
-        if trainer.sanity_checking:
-            return
-
+        if trainer.sanity_checking: return
         metrics = trainer.callback_metrics
         epoch = trainer.current_epoch
 
-        # Extract float values safely
         loss = metrics.get("val_loss", 0.0)
         if isinstance(loss, torch.Tensor): loss = loss.item()
 
-        f1 = metrics.get("val_MulticlassF1Score", 0.0)
+        # Check for the new class name
+        f1 = metrics.get("val_TFTMulticlassF1", 0.0)
         if isinstance(f1, torch.Tensor): f1 = f1.item()
 
         logger.info(f"  Epoch {epoch:<2} | Val Loss: {loss:.4f} | Val F1: {f1:.4f}")
@@ -68,7 +73,7 @@ def objective(trial, train_ds, train_loader, val_loader):
         output_size=2,
         loss=CrossEntropy(),
         # [NEW] Add F1 Score here
-        logging_metrics=nn.ModuleList([torchmetrics.classification.MulticlassF1Score(num_classes=2)]),
+        logging_metrics=nn.ModuleList([TFTMulticlassF1(num_classes=2)]),
         log_interval=10,
         reduce_on_plateau_patience=4,
     )
