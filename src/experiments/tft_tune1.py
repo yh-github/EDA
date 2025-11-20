@@ -101,7 +101,7 @@ if __name__ == "__main__":
     logger.info(f"Starting Optuna Study: {STUDY_NAME}")
     study = optuna.create_study(
         study_name=STUDY_NAME,
-        storage=STORAGE_PATH,
+        # storage=STORAGE_PATH,
         load_if_exists=True,
         direction="minimize"
     )
