@@ -1,3 +1,4 @@
+scipy
 lightning
 joblib
 rapidfuzz==3.14.3
