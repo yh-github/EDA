@@ -18,8 +18,8 @@ logger = logging.getLogger("tft_tuner")
 
 MAX_EPOCHS = 30
 N_TRIALS = 50
-STUDY_NAME = "tft_optimization_v1"
-STORAGE_PATH = f"sqlite:///cache/{STUDY_NAME}.db"
+STUDY_NAME = "tft_optimization_v1.1"
+STORAGE_PATH = f"cache/optuna/{STUDY_NAME}.db"
 
 
 # --- FIX 1: Add arguments to the function signature ---
@@ -85,12 +85,26 @@ if __name__ == "__main__":
     train_ds = build_tft_dataset(train_df_prepped, field_config)
     val_ds = TimeSeriesDataSet.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)
 
-    BATCH_SIZE = 128
-    train_loader = train_ds.to_dataloader(train=True, batch_size=BATCH_SIZE, num_workers=4)
-    val_loader = val_ds.to_dataloader(train=False, batch_size=BATCH_SIZE * 2, num_workers=4)
+    BATCH_SIZE = 512  # 128 is too small for an A100
+
+    train_loader = train_ds.to_dataloader(
+        train=True,
+        batch_size=BATCH_SIZE,
+        num_workers=16
+    )
+    val_loader = val_ds.to_dataloader(
+        train=False,
+        batch_size=BATCH_SIZE * 2,
+        num_workers=16
+    )
 
     logger.info(f"Starting Optuna Study: {STUDY_NAME}")
-    study = optuna.create_study(study_name=STUDY_NAME, storage=STORAGE_PATH, load_if_exists=True, direction="minimize")
+    study = optuna.create_study(
+        study_name=STUDY_NAME,
+        storage=STORAGE_PATH,
+        load_if_exists=True,
+        direction="minimize"
+    )
 
     # --- FIX 2: Use lambda to inject data into the objective ---
     study.optimize(
