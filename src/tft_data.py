@@ -34,11 +34,17 @@ def prepare_tft_data(df: pd.DataFrame, field_config: FieldConfig,
 
     return df, pca_model
 
+
 def build_tft_dataset(train_df_prepped: pd.DataFrame, field_config: FieldConfig, max_prediction_length=1,
                       max_encoder_length=30):
     """
     Defines the TimeSeriesDataSet using the prepared training data.
     """
+
+    # --- FIX: Define the feature columns explicitly ---
+    # These match the columns created in prepare_tft_data
+    pca_cols = [f"text_pca_{i}" for i in range(16)]
+
     training = TimeSeriesDataSet(
         train_df_prepped,
         time_idx="time_idx",
@@ -53,27 +59,27 @@ def build_tft_dataset(train_df_prepped: pd.DataFrame, field_config: FieldConfig,
 
         # --- FEATURES ---
         static_categoricals=[field_config.accountId],
-        time_varying_unknown_reals=[field_config.amount],
+
+        # --- FIX: Add pca_cols to the inputs ---
+        # Previously, this was just [field_config.amount]
+        time_varying_unknown_reals=[field_config.amount] + pca_cols,
 
         # --- LAGS ---
         lags={
             field_config.amount: [1, 2, 3, 4, 5, 10]
         },
 
-        # --- SCALERS & ENCODERS (The Fixes) ---
-
-        # 1. Fix for 'Unknown category' error:
-        # Allow the encoder to handle unseen Account IDs (in Val/Test) by mapping them to a special 'NaN' token.
+        # --- SCALERS & ENCODERS ---
         categorical_encoders={
             field_config.accountId: NaNLabelEncoder(add_nan=True)
         },
 
-        # 2. Fix for sklearn feature name error:
         scalers={
-            field_config.amount: EncoderNormalizer(method="standard")
+            field_config.amount: EncoderNormalizer(method="standard"),
+            # Note: PCA columns are already somewhat normalized,
+            # but passing them to EncoderNormalizer is safe and standard practice for TFT.
         },
 
-        # 3. Fix for Classification Target:
         target_normalizer=NaNLabelEncoder(add_nan=False),
 
         add_relative_time_idx=True,
