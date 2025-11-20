@@ -25,6 +25,44 @@ MAX_EPOCHS = 30
 N_TRIALS = 50
 STUDY_NAME = "tft_optimization_v1.3"
 
+import torch
+import torch.nn.functional as F
+from pytorch_forecasting.metrics import CrossEntropy
+
+
+class WeightedCrossEntropy(CrossEntropy):
+    """
+    A custom CrossEntropy metric that accepts class weights.
+    """
+
+    def __init__(self, weight: list[float] | torch.Tensor = None, **kwargs):
+        # Init parent WITHOUT weight arg to avoid the ValueError
+        super().__init__(**kwargs)
+        self.weight = weight
+
+    def loss(self, y_pred, y_actual):
+        # y_pred: (Batch, Time, Classes) -> View as (Batch * Time, Classes)
+        # y_actual: (Batch, Time) -> View as (Batch * Time)
+
+        # Prepare weights on the correct device
+        if self.weight is not None:
+            if not isinstance(self.weight, torch.Tensor):
+                self.weight = torch.tensor(self.weight, device=y_pred.device, dtype=torch.float)
+            else:
+                self.weight = self.weight.to(y_pred.device)
+
+        # Calculate weighted Cross Entropy
+        # We use reduction='none' because TFT metrics expect the loss per-timepoint
+        loss_val = F.cross_entropy(
+            y_pred.view(-1, y_pred.size(-1)),
+            y_actual.view(-1),
+            weight=self.weight,
+            reduction="none"
+        )
+
+        # Reshape back to (Batch, Time) for TFT compatibility
+        return loss_val.view(y_actual.shape)
+
 
 # --- [FIX] Shape Adapter for F1 Score ---
 class TFTMulticlassF1(torchmetrics.classification.MulticlassF1Score):
@@ -87,7 +125,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         hidden_continuous_size=hidden_continuous_size,
         output_size=2,
         # Class Weights for Imbalance
-        loss=CrossEntropy(weight=[1.0, pos_weight]),
+        loss=WeightedCrossEntropy(weight=[1.0, pos_weight]),
         # Use our Fixed Metric
         logging_metrics=nn.ModuleList([TFTMulticlassF1(num_classes=2)]),
         log_interval=10,
