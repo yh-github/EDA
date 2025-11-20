@@ -62,7 +62,7 @@ class WeightedCrossEntropy(CrossEntropy):
         return loss_val.view(y_actual.shape)
 
 
-# --- [FIX] Shape Adapter for F1 Score ---
+# --- Shape Adapter for F1 Score ---
 class TFTMulticlassF1(torchmetrics.classification.MulticlassF1Score):
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         # TFT outputs (Batch, 1, Classes), Metric needs (Batch, Classes, 1)
@@ -73,10 +73,9 @@ class TFTMulticlassF1(torchmetrics.classification.MulticlassF1Score):
 
 class TextLogCallback(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
-        # Capture train loss at the end of the training epoch
         self.train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
 
-    def on_validation_end(self, trainer, pl_module):
+    def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.sanity_checking:
             return
 
@@ -87,24 +86,27 @@ class TextLogCallback(Callback):
         val_loss = metrics.get("val_loss", float("inf"))
         if isinstance(val_loss, torch.Tensor): val_loss = val_loss.item()
 
-        # 2. Get Train Loss (saved from previous hook)
+        # 2. Get Train Loss
         train_loss = getattr(self, "train_loss", 0.0)
         if isinstance(train_loss, torch.Tensor): train_loss = train_loss.item()
 
-        # 3. Robustly find F1 Score (Case-Insensitive Fix)
-        f1_keys = [k for k in metrics.keys() if "f1" in k.lower() and "val" in k.lower()]
+        # 3. Robustly Find the F1 Score
+        # We look for any validation key that is NOT 'val_loss'
+        # This catches 'val_TorchMetricWrapper', 'val_F1', etc.
+        all_keys = list(metrics.keys())
+        val_metric_keys = [k for k in all_keys if "val_" in k and "loss" not in k]
 
-        if f1_keys:
-            # Take the first match (usually only one)
-            val_f1 = metrics[f1_keys[0]]
+        if val_metric_keys:
+            # Take the first available metric (e.g., 'val_TorchMetricWrapper')
+            best_key = val_metric_keys[0]
+            val_f1 = metrics[best_key]
             if isinstance(val_f1, torch.Tensor): val_f1 = val_f1.item()
         else:
-            # Optional: Print available keys to debug if it still fails
-            # print(f"Available keys: {list(metrics.keys())}")
-            val_f1 = -666.0
+            raise Exception(f'missing key in {all_keys=}')
 
         logger.info(
-            f"  Epoch {epoch:<2} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val F1: {val_f1:.4f}")
+            f"  Epoch {epoch:<2} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val F1: {val_f1:.4f}"
+        )
 
 
 def objective(trial, train_ds, train_loader, val_loader, pos_weight):
