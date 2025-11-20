@@ -54,8 +54,8 @@ class NeuralAnalyzerAdapter:
             probs = self.model(input_tensor).cpu().numpy()[0, 0]
 
         # 3. Peak Detection (Probabilities -> Dates)
-        # Threshold: 0.5 (adjustable)
-        peaks, _ = find_peaks(probs, height=0.5, distance=5)
+        # Threshold: 0.2 (adjustable)
+        peaks, _ = find_peaks(probs, height=0.2, distance=5)
 
         # Convert day indices back to Real Dates
         predicted_dates = [start_date + pd.Timedelta(days=int(p)) for p in peaks]
