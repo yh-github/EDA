@@ -71,7 +71,6 @@ class TFTMulticlassF1(torchmetrics.classification.MulticlassF1Score):
         super().update(preds, target)
 
 
-# --- [FIX] Better Logging Callback ---
 class TextLogCallback(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         # Capture train loss at the end of the training epoch
@@ -92,13 +91,17 @@ class TextLogCallback(Callback):
         train_loss = getattr(self, "train_loss", 0.0)
         if isinstance(train_loss, torch.Tensor): train_loss = train_loss.item()
 
-        # 3. robustly find F1 Score (Key might vary)
-        f1_keys = [k for k in metrics.keys() if "F1" in k and "val" in k]
+        # 3. Robustly find F1 Score (Case-Insensitive Fix)
+        f1_keys = [k for k in metrics.keys() if "f1" in k.lower() and "val" in k.lower()]
+
         if f1_keys:
+            # Take the first match (usually only one)
             val_f1 = metrics[f1_keys[0]]
             if isinstance(val_f1, torch.Tensor): val_f1 = val_f1.item()
         else:
-            val_f1 = -1.0  # Debug signal: Metric not found
+            # Optional: Print available keys to debug if it still fails
+            # print(f"Available keys: {list(metrics.keys())}")
+            val_f1 = -666.0
 
         logger.info(
             f"  Epoch {epoch:<2} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val F1: {val_f1:.4f}")
