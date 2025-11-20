@@ -21,7 +21,7 @@ logger = logging.getLogger("tft_tuner")
 BATCH_SIZE = 1024
 MAX_EPOCHS = 30
 N_TRIALS = 50
-STUDY_NAME = "tft_optimization_v1.3"
+STUDY_NAME = "tft_optimization_v1.4"
 
 import torch
 import torch.nn.functional as F
