@@ -56,7 +56,7 @@ def objective(trial, train_ds, train_loader, val_loader):
         gradient_clip_val=gradient_clip_val,
         callbacks=[early_stop_callback, lr_logger],
         enable_progress_bar=False,
-        logger=False
+        logger=True
     )
 
     # 4. Fit (Uses passed loaders)
@@ -102,7 +102,7 @@ if __name__ == "__main__":
     study = optuna.create_study(
         study_name=STUDY_NAME,
         # storage=STORAGE_PATH,
-        load_if_exists=True,
+        # load_if_exists=True, # TODO: add storage
         direction="minimize"
     )
 
