@@ -51,12 +51,12 @@ class WeightedCrossEntropy(CrossEntropy):
         return loss_val.view(y_actual.shape)
 
 
-# --- Wrapper to fix Shape Mismatch for TorchMetrics ---
+# --- Adapters for TorchMetrics ---
+# We create distinct subclasses so PyTorch Lightning logs them with unique keys
+# e.g., "val_TFTF1", "val_TFTPrecision"
+
 class TFTMetricAdapter(torchmetrics.Metric):
-    """
-    Adapts TFT output (Batch, Time, Classes) to TorchMetrics input.
-    For prediction_length=1, we squeeze the time dimension.
-    """
+    """Base adapter to fix shape mismatch between TFT output and TorchMetrics."""
 
     def __init__(self, metric_cls, **kwargs):
         super().__init__()
@@ -64,12 +64,11 @@ class TFTMetricAdapter(torchmetrics.Metric):
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         # preds: (Batch, Prediction_Len=1, Classes) -> (Batch, Classes)
-        # target: (Batch, Prediction_Len=1) -> (Batch,)
         if preds.ndim == 3:
             preds = preds.squeeze(1)
+        # target: (Batch, Prediction_Len=1) -> (Batch,)
         if target.ndim == 2:
             target = target.squeeze(1)
-
         self.metric.update(preds, target)
 
     def compute(self):
@@ -79,9 +78,7 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# --- Distinct Classes for Logging Keys ---
-# We subclass so that __class__.__name__ is unique for each metric.
-# This prevents "val_TFTMetricAdapter" from overwriting itself.
+# Explicit subclasses for naming
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -110,38 +107,33 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # Find and log F1, Precision, Recall
-        # We look for our custom class names in the keys
+        # Scan for our custom metrics
         for k, v in metrics.items():
             if "val_" in k and "loss" not in k:
                 val = v.item() if isinstance(v, torch.Tensor) else v
 
-                # Map the messy key to a clean name
-                name = k
-                if "TFTF1" in k:
-                    name = "F1"
-                elif "TFTPrecision" in k:
-                    name = "Prec"
-                elif "TFTRecall" in k:
-                    name = "Rec"
-
+                # Clean up the name for display
+                name = k.replace("val_", "").replace("TFT", "")
                 msg_parts.append(f"{name}: {val:.4f}")
 
         logger.info(" | ".join(msg_parts))
 
 
 def objective(trial, train_ds, train_loader, val_loader, pos_weight):
-    # --- Hyperparameters (Tuned for Stability) ---
+    # --- Hyperparameters ---
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
     dropout = trial.suggest_float("dropout", 0.2, 0.5)
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics with Unique Classes ---
-    f1 = TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted")
-    prec = TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted")
-    rec = TFTRecall(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
+    # --- Define Metrics ---
+    # We instantiate our specific subclasses here
+    metrics_list = nn.ModuleList([
+        TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted"),
+        TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted"),
+        TFTRecall(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
+    ])
 
     tft = TemporalFusionTransformer.from_dataset(
         train_ds,
@@ -152,8 +144,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         hidden_continuous_size=hidden_size,
         output_size=2,
         loss=WeightedCrossEntropy(weight=[1.0, pos_weight]),
-        # Register all metrics here
-        logging_metrics=nn.ModuleList([f1, prec, rec]),
+        logging_metrics=metrics_list,
         log_interval=10,
         reduce_on_plateau_patience=4,
     )
@@ -176,18 +167,12 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     # --- Retrieve Best Model Metrics ---
     val_results = trainer.validate(model=tft, dataloaders=val_loader, verbose=False)[0]
 
-    for k, v in val_results.items():
-        if "val_" in k:
-            clean_k = k.replace("val_", "")
-            if "TFTF1" in clean_k:
-                clean_k = "F1"
-            elif "TFTPrecision" in clean_k:
-                clean_k = "Precision"
-            elif "TFTRecall" in clean_k:
-                clean_k = "Recall"
-
-            trial.set_user_attr(clean_k, v)
-            logger.info(f"  [Trial Final] {clean_k}: {v:.4f}")
+    # Capture the specific metrics we care about
+    for key in ["val_TFTF1", "val_TFTPrecision", "val_TFTRecall"]:
+        if key in val_results:
+            clean_name = key.replace("val_TFT", "")  # e.g., F1
+            trial.set_user_attr(clean_name, val_results[key])
+            logger.info(f"  [Trial Final] {clean_name}: {val_results[key]:.4f}")
 
     return val_results["val_loss"]
 
@@ -201,7 +186,8 @@ if __name__ == "__main__":
     # 1. Split
     exp_params = ExperimentConfig()
     set_global_seed(exp_params.random_state)
-    train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df, random_state=exp_params.random_state)
+    train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df,
+                                                      random_state=exp_params.random_state)
 
     # 2. Embedder
     logger.info("Initializing Embedder...")
