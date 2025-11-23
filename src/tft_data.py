@@ -19,14 +19,14 @@ def prepare_tft_data(
 ) -> tuple[pd.DataFrame, PCA, HybridFeatureProcessor, FeatureMetadata]:
     """
     Prepares data for TFT by:
-    1. Filtering for Outgoing (Positive) transactions.
+    1. Filtering for Outgoing (Positive) or Incoming (Negative) transactions.
     2. Sorting by Account/Date (CRITICAL to do this before embedding alignment).
     3. Generating/Compressing Text Embeddings.
     4. Running HybridFeatureProcessor for Date/Amount features.
     """
     df = df.copy()
 
-    # Filter: Outgoing Transactions Only (> 0) Incoming (< 0) or both (== 0)
+    # 1. Filter based on direction
     # Using explicit copy to avoid SettingWithCopy warnings
     if filter_direction > 0:
         df = df[df[field_config.amount] > 0].copy()
@@ -57,6 +57,13 @@ def prepare_tft_data(
     # Merge features back into main DF
     # We use index join as both are reset
     df = pd.concat([df, features_df], axis=1)
+
+    # --- FIX: Cast Categoricals to String ---
+    # PyTorch Forecasting requires categoricals to be strings to learn embeddings properly
+    if meta is not None:
+        for cat_col in meta.categorical_features.keys():
+            if cat_col in df.columns:
+                df[cat_col] = df[cat_col].astype(str)
 
     # 5. Text Embeddings & PCA
     # We generate embeddings AFTER sorting to ensure alignment

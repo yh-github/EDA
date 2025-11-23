@@ -171,7 +171,7 @@ if __name__ == "__main__":
     n_pos = train_labels.sum()
     n_neg = len(train_labels) - n_pos
     pos_weight = float(n_neg / max(n_pos, 1))
-    logger.info(f"Data Filtered to Outgoing. New Class Weight: {pos_weight:.2f}")
+    logger.info(f"Data Filtered. New Class Weight: {pos_weight:.2f}")
 
     # 7. Build Datasets
     # Pass metadata so it knows which columns are reals/categoricals
