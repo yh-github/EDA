@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-from pytorch_forecasting.metrics import CrossEntropy
+from pytorch_forecasting.metrics import CrossEntropy, TorchMetricWrapper
 
 from config import FieldConfig, EmbModel, ExperimentConfig
 from data import create_train_val_test_split
@@ -51,12 +51,12 @@ class WeightedCrossEntropy(CrossEntropy):
         return loss_val.view(y_actual.shape)
 
 
-# --- Adapters for TorchMetrics ---
-# We create distinct subclasses so PyTorch Lightning logs them with unique keys
-# e.g., "val_TFTF1", "val_TFTPrecision"
-
+# --- Wrapper to fix Shape Mismatch for TorchMetrics ---
 class TFTMetricAdapter(torchmetrics.Metric):
-    """Base adapter to fix shape mismatch between TFT output and TorchMetrics."""
+    """
+    Adapts TFT output (Batch, Time, Classes) to TorchMetrics input.
+    For prediction_length=1, we squeeze the time dimension.
+    """
 
     def __init__(self, metric_cls, **kwargs):
         super().__init__()
@@ -64,11 +64,12 @@ class TFTMetricAdapter(torchmetrics.Metric):
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         # preds: (Batch, Prediction_Len=1, Classes) -> (Batch, Classes)
+        # target: (Batch, Prediction_Len=1) -> (Batch,)
         if preds.ndim == 3:
             preds = preds.squeeze(1)
-        # target: (Batch, Prediction_Len=1) -> (Batch,)
         if target.ndim == 2:
             target = target.squeeze(1)
+
         self.metric.update(preds, target)
 
     def compute(self):
@@ -78,7 +79,7 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# Explicit subclasses for naming
+# Explicit subclasses for naming so PyTorch Lightning logs them correctly
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -111,8 +112,7 @@ class TextLogCallback(Callback):
         for k, v in metrics.items():
             if "val_" in k and "loss" not in k:
                 val = v.item() if isinstance(v, torch.Tensor) else v
-
-                # Clean up the name for display
+                # Clean up name
                 name = k.replace("val_", "").replace("TFT", "")
                 msg_parts.append(f"{name}: {val:.4f}")
 
@@ -128,7 +128,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
     # --- Define Metrics ---
-    # We instantiate our specific subclasses here
+    # Using explicit subclasses for clean logging keys
     metrics_list = nn.ModuleList([
         TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted"),
         TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted"),
@@ -149,6 +149,8 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
+    # Note: We still monitor val_loss for EarlyStopping stability,
+    # as F1 can be jumpy/plateaued in early epochs.
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
@@ -167,14 +169,21 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     # --- Retrieve Best Model Metrics ---
     val_results = trainer.validate(model=tft, dataloaders=val_loader, verbose=False)[0]
 
-    # Capture the specific metrics we care about
+    target_f1 = 0.0
+
+    # Log specific keys
     for key in ["val_TFTF1", "val_TFTPrecision", "val_TFTRecall"]:
         if key in val_results:
-            clean_name = key.replace("val_TFT", "")  # e.g., F1
-            trial.set_user_attr(clean_name, val_results[key])
-            logger.info(f"  [Trial Final] {clean_name}: {val_results[key]:.4f}")
+            clean_name = key.replace("val_TFT", "")
+            val = val_results[key]
+            trial.set_user_attr(clean_name, val)
+            logger.info(f"  [Trial Final] {clean_name}: {val:.4f}")
 
-    return val_results["val_loss"]
+            if clean_name == "F1":
+                target_f1 = val
+
+    # !!! OPTIMIZE FOR F1 NOW !!!
+    return target_f1
 
 
 if __name__ == "__main__":
@@ -234,7 +243,10 @@ if __name__ == "__main__":
 
     # 8. Run
     logger.info(f"Starting Study: {STUDY_NAME}")
-    study = optuna.create_study(study_name=STUDY_NAME, direction="minimize")
+
+    # !!! CHANGED DIRECTION TO MAXIMIZE (F1) !!!
+    study = optuna.create_study(study_name=STUDY_NAME, direction="maximize")
+
     study.optimize(
         lambda trial: objective(trial, train_ds, train_loader, val_loader, pos_weight),
         n_trials=N_TRIALS
@@ -242,7 +254,7 @@ if __name__ == "__main__":
 
     logger.info("=" * 50)
     logger.info("BEST TRIAL RESULTS")
-    logger.info(f"Value (Loss): {study.best_value:.4f}")
+    logger.info(f"Value (F1): {study.best_value:.4f}")
     logger.info(f"Params: {study.best_params}")
     logger.info(f"Metrics: {study.best_trial.user_attrs}")
     logger.info("=" * 50)
