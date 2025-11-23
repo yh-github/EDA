@@ -3,6 +3,7 @@ from pathlib import Path
 import lightning.pytorch as pl
 import optuna
 from optuna.samplers import TPESampler
+from optuna.integration import PyTorchLightningPruningCallback
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -22,10 +23,13 @@ from embedder import EmbeddingService
 setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")
 
-# CONFIG
+# --- Performance Fix: Enable Tensor Cores for A100 ---
+# 'medium' enables TF32, which is much faster on A100/H100 GPUs
 torch.set_float32_matmul_precision('medium')
+
+# CONFIG
 MAX_ENCODER_LEN = 500
-BATCH_SIZE = 512
+BATCH_SIZE = 2048  # Increased for A100 (80GB)
 MAX_EPOCHS = 20
 N_TRIALS = 30
 STUDY_NAME = "tft_optimization_outgoing"
@@ -84,7 +88,7 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# --- Explicit Subclasses for Naming (Optional but kept for structure) ---
+# --- Explicit Subclasses for Naming ---
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -116,7 +120,6 @@ class TextLogCallback(Callback):
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
         # --- FIX: Specifically look for our named metrics ---
-        # We explicitly look for keys that contain our metric names
         targets = ["F1", "Precision", "Recall"]
 
         for t in targets:
@@ -139,7 +142,6 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
     # --- Define Metrics with Explicit Names ---
-    # Passing name="F1" ensures the logger uses "F1" instead of "TorchMetricWrapper"
     metrics_list = nn.ModuleList([
         TFTF1(torchmetrics.classification.MulticlassF1Score, name="F1", num_classes=2, average="weighted"),
         TFTPrecision(torchmetrics.classification.MulticlassPrecision, name="Precision", num_classes=2,
@@ -165,13 +167,20 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
+    # Pruning callback: Kills unpromising trials early
+    pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
+
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
+
+        # Mixed Precision for A100 speedup (2x-3x faster)
+        precision="bf16-mixed",
+
         gradient_clip_val=gradient_clip_val,
-        callbacks=[early_stop, text_logger],
+        callbacks=[early_stop, text_logger, pruning_callback],
         enable_progress_bar=False,
-        logger=False,  # We use our own TextLogger
+        logger=False,
         enable_checkpointing=True,
         deterministic=False
     )
@@ -184,9 +193,6 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     target_f1 = 0.0
 
     # Explicitly look for the named keys in the final results
-    # The trainer usually prefixes them with "val_" or "validate_"
-
-    # helper to find value fuzzy matching key
     def get_val(key_fragment):
         for k, v in val_results.items():
             if key_fragment in k:
@@ -259,17 +265,24 @@ if __name__ == "__main__":
     train_ds = build_tft_dataset(train_df_prepped, field_config, meta, max_encoder_length=MAX_ENCODER_LEN)
     val_ds = TimeSeriesDataSet.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)
 
-    train_loader = train_ds.to_dataloader(train=True, batch_size=BATCH_SIZE, num_workers=4)
-    val_loader = val_ds.to_dataloader(train=False, batch_size=BATCH_SIZE, num_workers=4)
+    # Optimized Data Loaders for A100
+    train_loader = train_ds.to_dataloader(train=True, batch_size=BATCH_SIZE, num_workers=12, pin_memory=True)
+    val_loader = val_ds.to_dataloader(train=False, batch_size=BATCH_SIZE, num_workers=12, pin_memory=True)
 
     # 8. Run
     logger.info(f"Starting Study: {STUDY_NAME}")
 
-    # Seed the sampler for Optuna reproducibility
     sampler = TPESampler(seed=exp_params.random_state)
 
-    # Optimize for F1 (Maximize)
-    study = optuna.create_study(study_name=STUDY_NAME, direction="maximize", sampler=sampler)
+    # Pruner to kill bad trials early (Median Pruner is robust)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+
+    study = optuna.create_study(
+        study_name=STUDY_NAME,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner
+    )
 
     study.optimize(
         lambda trial: objective(trial, train_ds, train_loader, val_loader, pos_weight),
