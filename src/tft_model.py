@@ -1,4 +1,3 @@
-import pytorch_lightning as pl
 from pytorch_forecasting.models.temporal_fusion_transformer import TemporalFusionTransformer
 from pytorch_forecasting.metrics import CrossEntropy
 from config import ExperimentConfig

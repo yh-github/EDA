@@ -14,6 +14,10 @@ from data import create_train_val_test_split
 from log_utils import setup_logging
 from tft_data import build_tft_dataset, prepare_tft_data
 
+from config import EmbModel
+from embedder import EmbeddingService
+
+
 setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")
 
@@ -154,12 +158,6 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     val_loss = trainer.callback_metrics.get("val_loss")
     return val_loss.item() if val_loss else float("inf")
-
-
-# ... (Keep all your existing imports and classes at the top) ...
-# [NEW] Add these imports if missing
-from config import EmbModel
-from embedder import EmbeddingService
 
 if __name__ == "__main__":
     logger.info("Loading data...")
