@@ -79,6 +79,18 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
+# --- Distinct Classes for Logging Keys ---
+# We subclass so that __class__.__name__ is unique for each metric.
+# This prevents "val_TFTMetricAdapter" from overwriting itself.
+class TFTF1(TFTMetricAdapter): pass
+
+
+class TFTPrecision(TFTMetricAdapter): pass
+
+
+class TFTRecall(TFTMetricAdapter): pass
+
+
 class TextLogCallback(Callback):
     """Logs validation metrics to console in a readable format."""
 
@@ -98,12 +110,21 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # Find and log other metrics (F1, Precision, Recall)
+        # Find and log F1, Precision, Recall
+        # We look for our custom class names in the keys
         for k, v in metrics.items():
             if "val_" in k and "loss" not in k:
                 val = v.item() if isinstance(v, torch.Tensor) else v
-                # Shorten names: val_MulticlassF1Score -> F1
-                name = k.replace("val_Multiclass", "").replace("Score", "")
+
+                # Map the messy key to a clean name
+                name = k
+                if "TFTF1" in k:
+                    name = "F1"
+                elif "TFTPrecision" in k:
+                    name = "Prec"
+                elif "TFTRecall" in k:
+                    name = "Rec"
+
                 msg_parts.append(f"{name}: {val:.4f}")
 
         logger.info(" | ".join(msg_parts))
@@ -111,22 +132,16 @@ class TextLogCallback(Callback):
 
 def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     # --- Hyperparameters (Tuned for Stability) ---
-    # Lower LR range to prevent immediate divergence
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-
     hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
-
-    # Higher dropout to combat overfitting to "Magic Numbers"
     dropout = trial.suggest_float("dropout", 0.2, 0.5)
-
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics ---
-    # We use the Adapter to handle TFT shapes correctly
-    f1 = TFTMetricAdapter(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted")
-    prec = TFTMetricAdapter(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted")
-    rec = TFTMetricAdapter(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
+    # --- Define Metrics with Unique Classes ---
+    f1 = TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted")
+    prec = TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted")
+    rec = TFTRecall(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
 
     tft = TemporalFusionTransformer.from_dataset(
         train_ds,
@@ -137,7 +152,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         hidden_continuous_size=hidden_size,
         output_size=2,
         loss=WeightedCrossEntropy(weight=[1.0, pos_weight]),
-        # Register metrics
+        # Register all metrics here
         logging_metrics=nn.ModuleList([f1, prec, rec]),
         log_interval=10,
         reduce_on_plateau_patience=4,
@@ -153,19 +168,24 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         callbacks=[early_stop, text_logger],
         enable_progress_bar=False,
         logger=False,
-        enable_checkpointing=True  # Essential for retrieving the best model
+        enable_checkpointing=True
     )
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     # --- Retrieve Best Model Metrics ---
-    # Trainer restores best weights automatically after fit if checkpointing=True
     val_results = trainer.validate(model=tft, dataloaders=val_loader, verbose=False)[0]
 
-    # Log detailed metrics to Optuna User Attributes
     for k, v in val_results.items():
         if "val_" in k:
-            clean_k = k.replace("val_Multiclass", "").replace("Score", "").replace("val_", "")
+            clean_k = k.replace("val_", "")
+            if "TFTF1" in clean_k:
+                clean_k = "F1"
+            elif "TFTPrecision" in clean_k:
+                clean_k = "Precision"
+            elif "TFTRecall" in clean_k:
+                clean_k = "Recall"
+
             trial.set_user_attr(clean_k, v)
             logger.info(f"  [Trial Final] {clean_k}: {v:.4f}")
 
