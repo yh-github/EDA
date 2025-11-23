@@ -157,7 +157,9 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
-    # Enable deterministic mode for reproducibility
+    # --- FIX: Disable deterministic mode ---
+    # TFT uses 'upsample_linear1d' which has no deterministic CUDA implementation.
+    # Setting this to False allows training to proceed, even if slight variance occurs.
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
@@ -166,7 +168,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         enable_progress_bar=False,
         logger=False,
         enable_checkpointing=True,
-        deterministic=True
+        deterministic=False
     )
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
