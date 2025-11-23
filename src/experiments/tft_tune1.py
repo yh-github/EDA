@@ -33,7 +33,7 @@ logger = logging.getLogger("tft_tuner")
 torch.set_float32_matmul_precision('medium')
 
 # --- CONFIG ---
-MAX_ENCODER_LEN = 500
+MAX_ENCODER_LEN = 150
 BATCH_SIZE = 2048
 MAX_EPOCHS = 20
 N_TRIALS = 30
