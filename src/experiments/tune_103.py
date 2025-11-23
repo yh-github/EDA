@@ -1,6 +1,6 @@
-from hyper_tuner import HyperTuner
-from config import EmbModel
-from classifier_transformer import TransformerHyperParams
+from glob.hyper_tuner import HyperTuner
+from common.config import EmbModel
+from glob.classifier_transformer import TransformerHyperParams
 
 structured_grid_config = {
     'exp_params': {

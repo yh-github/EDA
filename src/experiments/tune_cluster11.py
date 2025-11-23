@@ -1,8 +1,8 @@
 from pathlib import Path
-from clustering_exp import ClusteringExperiment
-from hyb_emb_service import HybridEmbeddingService
-from log_utils import setup_logging
-from config import EmbModel
+from grouping.clustering_exp import ClusteringExperiment
+from common.hyb_emb_service import HybridEmbeddingService
+from common.log_utils import setup_logging
+from common.config import EmbModel
 
 setup_logging(Path('logs/'), "tune_compare")
 

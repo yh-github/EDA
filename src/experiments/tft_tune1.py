@@ -12,19 +12,18 @@ from optuna.samplers import TPESampler
 from optuna.integration import PyTorchLightningPruningCallback
 import pandas as pd
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
 
-from config import FieldConfig, EmbModel, ExperimentConfig
-from data import create_train_val_test_split
-from log_utils import setup_logging
-from tft_data import build_tft_dataset, prepare_tft_data
-from feature_processor import FeatProcParams
-from embedder import EmbeddingService
+from common.config import FieldConfig, EmbModel, ExperimentConfig
+from common.data import create_train_val_test_split
+from common.log_utils import setup_logging
+from tft.tft_data import build_tft_dataset, prepare_tft_data
+from common.feature_processor import FeatProcParams
+from common.embedder import EmbeddingService
 
 setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")

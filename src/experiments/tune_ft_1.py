@@ -1,5 +1,5 @@
-from hyper_tuner import HyperTuner
-from config import EmbModel
+from glob.hyper_tuner import HyperTuner
+from common.config import EmbModel
 
 structured_grid_config = {
     'exp_params': {

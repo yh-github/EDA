@@ -1,7 +1,7 @@
 from pathlib import Path
-from log_utils import setup_logging
-from greedy_tuner import GreedyTuner
-from config import EmbModel
+from common.log_utils import setup_logging
+from grouping.greedy_tuner import GreedyTuner
+from common.config import EmbModel
 
 # Setup
 setup_logging(Path('logs/'), "tune_greedy")
