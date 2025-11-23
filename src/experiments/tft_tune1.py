@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-
 import lightning.pytorch as pl
 import optuna
 import pandas as pd
@@ -12,8 +11,9 @@ from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
 
-from config import FieldConfig, EmbModel
+from config import FieldConfig, EmbModel, ExperimentConfig
 from data import create_train_val_test_split
+from exp_utils import set_global_seed
 from log_utils import setup_logging
 from tft_data import build_tft_dataset, prepare_tft_data
 from feature_processor import FeatProcParams
@@ -199,7 +199,9 @@ if __name__ == "__main__":
         subset=[field_config.date, field_config.amount, field_config.text])
 
     # 1. Split
-    train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df, random_state=42)
+    exp_params = ExperimentConfig()
+    set_global_seed(exp_params.random_state)
+    train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df, random_state=exp_params.random_state)
 
     # 2. Embedder
     logger.info("Initializing Embedder...")
