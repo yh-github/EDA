@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+
 import lightning.pytorch as pl
 import optuna
 import pandas as pd
@@ -10,6 +11,7 @@ import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
+
 from config import FieldConfig, EmbModel
 from data import create_train_val_test_split
 from log_utils import setup_logging
@@ -51,16 +53,23 @@ class WeightedCrossEntropy(CrossEntropy):
 
 # --- Wrapper to fix Shape Mismatch for TorchMetrics ---
 class TFTMetricAdapter(torchmetrics.Metric):
-    """Adapts TFT output (B, Time, C) to TorchMetrics input (B, C, Time)."""
+    """
+    Adapts TFT output (Batch, Time, Classes) to TorchMetrics input.
+    For prediction_length=1, we squeeze the time dimension.
+    """
 
     def __init__(self, metric_cls, **kwargs):
         super().__init__()
         self.metric = metric_cls(**kwargs)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        # Permute from (Batch, Time, Classes) -> (Batch, Classes, Time)
-        if preds.ndim == 3 and preds.shape[1] == 1:
-            preds = preds.permute(0, 2, 1)
+        # preds: (Batch, Prediction_Len=1, Classes) -> (Batch, Classes)
+        # target: (Batch, Prediction_Len=1) -> (Batch,)
+        if preds.ndim == 3:
+            preds = preds.squeeze(1)
+        if target.ndim == 2:
+            target = target.squeeze(1)
+
         self.metric.update(preds, target)
 
     def compute(self):
@@ -71,6 +80,8 @@ class TFTMetricAdapter(torchmetrics.Metric):
 
 
 class TextLogCallback(Callback):
+    """Logs validation metrics to console in a readable format."""
+
     def on_train_epoch_end(self, trainer, pl_module):
         self.train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
 
@@ -85,14 +96,13 @@ class TextLogCallback(Callback):
         train_loss = getattr(self, "train_loss", 0.0)
         if isinstance(train_loss, torch.Tensor): train_loss = train_loss.item()
 
-        # Log all validation metrics
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # Find F1, Precision, Recall keys dynamically
+        # Find and log other metrics (F1, Precision, Recall)
         for k, v in metrics.items():
             if "val_" in k and "loss" not in k:
                 val = v.item() if isinstance(v, torch.Tensor) else v
-                # Shorten names for cleaner logs
+                # Shorten names: val_MulticlassF1Score -> F1
                 name = k.replace("val_Multiclass", "").replace("Score", "")
                 msg_parts.append(f"{name}: {val:.4f}")
 
@@ -100,15 +110,20 @@ class TextLogCallback(Callback):
 
 
 def objective(trial, train_ds, train_loader, val_loader, pos_weight):
-    # Hyperparameters
-    learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
-    hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
-    dropout = trial.suggest_float("dropout", 0.1, 0.4)
-    attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
-    gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.01, 1.0)
+    # --- Hyperparameters (Tuned for Stability) ---
+    # Lower LR range to prevent immediate divergence
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
 
-    # --- Define Metrics with Adapter ---
-    # We use the Adapter pattern to cleanly handle the shape permuting
+    hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
+
+    # Higher dropout to combat overfitting to "Magic Numbers"
+    dropout = trial.suggest_float("dropout", 0.2, 0.5)
+
+    attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
+    gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
+
+    # --- Define Metrics ---
+    # We use the Adapter to handle TFT shapes correctly
     f1 = TFTMetricAdapter(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted")
     prec = TFTMetricAdapter(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted")
     rec = TFTMetricAdapter(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
@@ -122,7 +137,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         hidden_continuous_size=hidden_size,
         output_size=2,
         loss=WeightedCrossEntropy(weight=[1.0, pos_weight]),
-        # Register all metrics here
+        # Register metrics
         logging_metrics=nn.ModuleList([f1, prec, rec]),
         log_interval=10,
         reduce_on_plateau_patience=4,
@@ -138,21 +153,18 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         callbacks=[early_stop, text_logger],
         enable_progress_bar=False,
         logger=False,
-        enable_checkpointing=True  # Required for loading best model
+        enable_checkpointing=True  # Essential for retrieving the best model
     )
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
-    # --- CRITICAL FIX: Get Best Model Metrics ---
-    # The trainer automatically restores the best model if checkpointing is on.
-    # We run validation one last time to get the EXACT metrics of that best model.
+    # --- Retrieve Best Model Metrics ---
+    # Trainer restores best weights automatically after fit if checkpointing=True
     val_results = trainer.validate(model=tft, dataloaders=val_loader, verbose=False)[0]
 
-    # Log to Optuna User Attributes (so they show up in the dashboard/CSV)
-    # Keys will be like 'val_loss', 'val_MulticlassF1Score', etc.
+    # Log detailed metrics to Optuna User Attributes
     for k, v in val_results.items():
         if "val_" in k:
-            # Clean key name: val_MulticlassF1Score -> F1
             clean_k = k.replace("val_Multiclass", "").replace("Score", "").replace("val_", "")
             trial.set_user_attr(clean_k, v)
             logger.info(f"  [Trial Final] {clean_k}: {v:.4f}")
@@ -175,11 +187,13 @@ if __name__ == "__main__":
 
     # 3. Params
     feat_params = FeatProcParams(
+        use_is_positive=False,
+        use_categorical_dates=True,
         use_cyclical_dates=True,
         use_continuous_amount=True,
-        use_categorical_amount=True,
-        k_top=20,
-        n_bins=20
+        use_categorical_amount=False,
+        k_top=0,
+        n_bins=0
     )
 
     # 4. Prep Train
