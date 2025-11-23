@@ -1,5 +1,11 @@
 import logging
+import warnings
 from pathlib import Path
+
+# --- 0. Suppress Annoying Warnings ---
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*DataFrame.std.*")
+warnings.filterwarnings("ignore", message=".*behavior of DataFrame.std with axis=None is deprecated.*")
+
 import lightning.pytorch as pl
 import optuna
 from optuna.samplers import TPESampler
@@ -23,13 +29,13 @@ from embedder import EmbeddingService
 setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")
 
-# --- Performance Fix: Enable Tensor Cores for A100 ---
-# 'medium' enables TF32, which is much faster on A100/H100 GPUs
+# --- 1. A100 Speedup: Enable Tensor Cores ---
+# 'medium' enables TF32 (TensorFloat-32), huge speedup on A100
 torch.set_float32_matmul_precision('medium')
 
-# CONFIG
+# --- CONFIG ---
 MAX_ENCODER_LEN = 500
-BATCH_SIZE = 2048  # Increased for A100 (80GB)
+BATCH_SIZE = 2048  # Increased to fill A100 80GB Memory
 MAX_EPOCHS = 20
 N_TRIALS = 30
 STUDY_NAME = "tft_optimization_outgoing"
@@ -57,28 +63,24 @@ class WeightedCrossEntropy(CrossEntropy):
         return loss_val.view(y_actual.shape)
 
 
-# --- Wrapper to fix Shape Mismatch for TorchMetrics ---
+# --- Metric Adapter with Explicit Naming ---
 class TFTMetricAdapter(torchmetrics.Metric):
     """
-    Adapts TFT output (Batch, Time, Classes) to TorchMetrics input.
-    For prediction_length=1, we squeeze the time dimension.
+    Adapts TFT output shapes and forces a specific name for logging.
     """
 
     def __init__(self, metric_cls, name=None, **kwargs):
         super().__init__()
-        # Explicitly set the name for PyTorch Lightning logger
         if name:
-            self.name = name
+            self.name = name  # Critical for clean logging
         self.metric = metric_cls(**kwargs)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
-        # preds: (Batch, Prediction_Len=1, Classes) -> (Batch, Classes)
-        # target: (Batch, Prediction_Len=1) -> (Batch,)
+        # Squeeze time dimension if present (Batch, 1, Classes) -> (Batch, Classes)
         if preds.ndim == 3:
             preds = preds.squeeze(1)
         if target.ndim == 2:
             target = target.squeeze(1)
-
         self.metric.update(preds, target)
 
     def compute(self):
@@ -88,7 +90,7 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# --- Explicit Subclasses for Naming ---
+# Define named subclasses to be extra safe with Lightning's registry
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -99,18 +101,19 @@ class TFTRecall(TFTMetricAdapter): pass
 
 
 class TextLogCallback(Callback):
-    """Logs validation metrics to console in a readable format."""
+    """Logs specific metrics (F1, P, R) to console every epoch."""
 
     def on_train_epoch_end(self, trainer, pl_module):
-        # Store train loss for the validation step print
+        # Save train loss to print it alongside validation metrics later
         self.train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.sanity_checking: return
+
         metrics = trainer.callback_metrics
         epoch = trainer.current_epoch
 
-        # Get Standard Losses
+        # Handle tensor conversion for basic losses
         val_loss = metrics.get("val_loss", float("inf"))
         if isinstance(val_loss, torch.Tensor): val_loss = val_loss.item()
 
@@ -119,11 +122,13 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # --- FIX: Specifically look for our named metrics ---
+        # --- Search for our specific metrics ---
+        # We look for keys containing "F1", "Precision", or "Recall"
+        # that are NOT the loss itself.
         targets = ["F1", "Precision", "Recall"]
 
         for t in targets:
-            # Find key that contains the target string (e.g. "val_F1")
+            # Find matching key in metrics dict (e.g. "val_F1")
             found_key = next((k for k in metrics.keys() if t in k and "val" in k), None)
             if found_key:
                 val = metrics[found_key]
@@ -134,14 +139,15 @@ class TextLogCallback(Callback):
 
 
 def objective(trial, train_ds, train_loader, val_loader, pos_weight):
-    # --- Hyperparameters ---
+    # --- Tunable Hyperparameters ---
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
     dropout = trial.suggest_float("dropout", 0.2, 0.5)
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics with Explicit Names ---
+    # --- Metrics Setup ---
+    # explicitly passing name="F1" etc.
     metrics_list = nn.ModuleList([
         TFTF1(torchmetrics.classification.MulticlassF1Score, name="F1", num_classes=2, average="weighted"),
         TFTPrecision(torchmetrics.classification.MulticlassPrecision, name="Precision", num_classes=2,
@@ -163,18 +169,18 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
-    # Monitor val_loss for early stopping
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
-    # Pruning callback: Kills unpromising trials early
+    # --- Optuna Pruning ---
+    # Kills trials that are performing poorly compared to others
     pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
 
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
 
-        # Mixed Precision for A100 speedup (2x-3x faster)
+        # --- 2. A100 Speedup: BF16 Mixed Precision ---
         precision="bf16-mixed",
 
         gradient_clip_val=gradient_clip_val,
@@ -187,15 +193,13 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
-    # --- Retrieve Best Model Metrics ---
+    # --- Result Extraction ---
     val_results = trainer.validate(model=tft, dataloaders=val_loader, verbose=False)[0]
 
-    target_f1 = 0.0
-
-    # Explicitly look for the named keys in the final results
-    def get_val(key_fragment):
+    # Helper to safely find values in the result dictionary
+    def get_val(fragment):
         for k, v in val_results.items():
-            if key_fragment in k:
+            if fragment in k:
                 return v
         return 0.0
 
@@ -205,6 +209,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
 
+    # Save extra metrics to Optuna for analysis later
     trial.set_user_attr("F1", target_f1)
     trial.set_user_attr("Precision", prec)
     trial.set_user_attr("Recall", rec)
@@ -218,18 +223,16 @@ if __name__ == "__main__":
     full_df = pd.read_csv("data/rec_data2.csv").dropna(
         subset=[field_config.date, field_config.amount, field_config.text])
 
-    # 1. Split & Seed
     exp_params = ExperimentConfig()
     pl.seed_everything(exp_params.random_state, workers=True)
 
     train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df,
                                                       random_state=exp_params.random_state)
 
-    # 2. Embedder
     logger.info("Initializing Embedder...")
     emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
 
-    # 3. Params
+    # Params
     feat_params = FeatProcParams(
         use_is_positive=False,
         use_categorical_dates=True,
@@ -240,41 +243,41 @@ if __name__ == "__main__":
         n_bins=0
     )
 
-    # 4. Prep Train
-    logger.info("Preparing Train Data...")
+    logger.info("Preparing Data...")
+    # Prepare Train
     train_df_prepped, pca_model, processor, meta = prepare_tft_data(
         train_df, field_config, feat_params=feat_params,
         embedding_service=emb_service, fit_processor=True
     )
-
-    # 5. Prep Val
-    logger.info("Preparing Val Data...")
+    # Prepare Val
     val_df_prepped, _, _, _ = prepare_tft_data(
         val_df, field_config, embedding_service=emb_service,
         pca_model=pca_model, processor=processor, fit_processor=False
     )
 
-    # 6. Weights
+    # Calculate Class Weights
     train_labels = train_df_prepped[field_config.label]
     n_pos = train_labels.sum()
     n_neg = len(train_labels) - n_pos
     pos_weight = float(n_neg / max(n_pos, 1))
     logger.info(f"Class Weight: {pos_weight:.2f}")
 
-    # 7. Datasets
+    # Datasets
     train_ds = build_tft_dataset(train_df_prepped, field_config, meta, max_encoder_length=MAX_ENCODER_LEN)
     val_ds = TimeSeriesDataSet.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)
 
-    # Optimized Data Loaders for A100
+    # --- 3. A100 Speedup: Optimized Data Loaders ---
+    # High num_workers to feed the hungry GPU
+    # Pin memory for faster CPU->GPU transfer
     train_loader = train_ds.to_dataloader(train=True, batch_size=BATCH_SIZE, num_workers=12, pin_memory=True)
     val_loader = val_ds.to_dataloader(train=False, batch_size=BATCH_SIZE, num_workers=12, pin_memory=True)
 
-    # 8. Run
     logger.info(f"Starting Study: {STUDY_NAME}")
 
     sampler = TPESampler(seed=exp_params.random_state)
 
-    # Pruner to kill bad trials early (Median Pruner is robust)
+    # Pruner config: Startup=5 means don't kill anything in the first 5 trials.
+    # Warmup=5 means within a trial, let it run 5 epochs before judging it.
     pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
 
     study = optuna.create_study(
