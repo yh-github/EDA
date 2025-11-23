@@ -14,7 +14,6 @@ from pytorch_forecasting.metrics import CrossEntropy
 
 from config import FieldConfig, EmbModel, ExperimentConfig
 from data import create_train_val_test_split
-from exp_utils import set_global_seed
 from log_utils import setup_logging
 from tft_data import build_tft_dataset, prepare_tft_data
 from feature_processor import FeatProcParams
@@ -24,6 +23,7 @@ setup_logging(Path("logs/"), "tft_tuning")
 logger = logging.getLogger("tft_tuner")
 
 # CONFIG
+MAX_ENCODER_LEN = 500
 BATCH_SIZE = 512
 MAX_EPOCHS = 20
 N_TRIALS = 30
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     logger.info(f"Class Weight: {pos_weight:.2f}")
 
     # 7. Datasets
-    train_ds = build_tft_dataset(train_df_prepped, field_config, meta)
+    train_ds = build_tft_dataset(train_df_prepped, field_config, meta, max_encoder_length=MAX_ENCODER_LEN)
     val_ds = TimeSeriesDataSet.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)
 
     train_loader = train_ds.to_dataloader(train=True, batch_size=BATCH_SIZE, num_workers=4)
