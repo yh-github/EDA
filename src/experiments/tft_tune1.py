@@ -59,8 +59,11 @@ class TFTMetricAdapter(torchmetrics.Metric):
     For prediction_length=1, we squeeze the time dimension.
     """
 
-    def __init__(self, metric_cls, **kwargs):
+    def __init__(self, metric_cls, name=None, **kwargs):
         super().__init__()
+        # Explicitly set the name for PyTorch Lightning logger
+        if name:
+            self.name = name
         self.metric = metric_cls(**kwargs)
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
@@ -80,9 +83,7 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# --- Explicit Subclasses for Naming ---
-# We use these to try and force unique names, but the Callback below
-# is now robust enough to find them even if this naming scheme fails.
+# --- Explicit Subclasses for Naming (Optional but kept for structure) ---
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -96,6 +97,7 @@ class TextLogCallback(Callback):
     """Logs validation metrics to console in a readable format."""
 
     def on_train_epoch_end(self, trainer, pl_module):
+        # Store train loss for the validation step print
         self.train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
 
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -112,17 +114,17 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # --- FIX: Broad Scanning for Metrics ---
-        # Instead of looking for specific keys like "TFTF1", we grab ANYTHING starting with "val_"
-        # that isn't the loss itself. This guarantees we see what is being logged.
-        for k, v in metrics.items():
-            if k.startswith("val_") and k != "val_loss":
-                val = v.item() if isinstance(v, torch.Tensor) else v
+        # --- FIX: Specifically look for our named metrics ---
+        # We explicitly look for keys that contain our metric names
+        targets = ["F1", "Precision", "Recall"]
 
-                # Clean up the name for readability
-                # e.g. "val_TFTF1" -> "TFTF1", "val_MulticlassF1Score" -> "MulticlassF1Score"
-                clean_name = k.replace("val_", "")
-                msg_parts.append(f"{clean_name}: {val:.4f}")
+        for t in targets:
+            # Find key that contains the target string (e.g. "val_F1")
+            found_key = next((k for k in metrics.keys() if t in k and "val" in k), None)
+            if found_key:
+                val = metrics[found_key]
+                if isinstance(val, torch.Tensor): val = val.item()
+                msg_parts.append(f"{t}: {val:.4f}")
 
         logger.info(" | ".join(msg_parts))
 
@@ -135,11 +137,13 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics ---
+    # --- Define Metrics with Explicit Names ---
+    # Passing name="F1" ensures the logger uses "F1" instead of "TorchMetricWrapper"
     metrics_list = nn.ModuleList([
-        TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted"),
-        TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted"),
-        TFTRecall(torchmetrics.classification.MulticlassRecall, num_classes=2, average="weighted")
+        TFTF1(torchmetrics.classification.MulticlassF1Score, name="F1", num_classes=2, average="weighted"),
+        TFTPrecision(torchmetrics.classification.MulticlassPrecision, name="Precision", num_classes=2,
+                     average="weighted"),
+        TFTRecall(torchmetrics.classification.MulticlassRecall, name="Recall", num_classes=2, average="weighted")
     ])
 
     tft = TemporalFusionTransformer.from_dataset(
@@ -156,18 +160,17 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
-    # Monitor val_loss for early stopping (smoother than F1)
+    # Monitor val_loss for early stopping
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
-    # Disable deterministic mode to avoid the "upsample_linear1d" crash
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
         gradient_clip_val=gradient_clip_val,
         callbacks=[early_stop, text_logger],
         enable_progress_bar=False,
-        logger=False,
+        logger=False,  # We use our own TextLogger
         enable_checkpointing=True,
         deterministic=False
     )
@@ -179,19 +182,26 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     target_f1 = 0.0
 
-    # Scan for F1 in the final results
-    for k, v in val_results.items():
-        # Look for F1 in the key name (case-insensitive)
-        if "f1" in k.lower():
-            target_f1 = v
-            logger.info(f"  [Trial Final] F1 found in key '{k}': {v:.4f}")
-            trial.set_user_attr("F1", v)
-        elif "prec" in k.lower():
-            trial.set_user_attr("Precision", v)
-        elif "rec" in k.lower():
-            trial.set_user_attr("Recall", v)
+    # Explicitly look for the named keys in the final results
+    # The trainer usually prefixes them with "val_" or "validate_"
 
-    # Return F1 so Optuna maximizes it
+    # helper to find value fuzzy matching key
+    def get_val(key_fragment):
+        for k, v in val_results.items():
+            if key_fragment in k:
+                return v
+        return 0.0
+
+    target_f1 = get_val("F1")
+    prec = get_val("Precision")
+    rec = get_val("Recall")
+
+    logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+
+    trial.set_user_attr("F1", target_f1)
+    trial.set_user_attr("Precision", prec)
+    trial.set_user_attr("Recall", rec)
+
     return target_f1
 
 
