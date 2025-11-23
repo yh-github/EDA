@@ -81,8 +81,8 @@ class TFTMetricAdapter(torchmetrics.Metric):
 
 
 # --- Explicit Subclasses for Naming ---
-# PyTorch Lightning logs metrics using their class name.
-# By creating these subclasses, we force the logs to use keys like "val_TFTF1".
+# We use these to try and force unique names, but the Callback below
+# is now robust enough to find them even if this naming scheme fails.
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -103,6 +103,7 @@ class TextLogCallback(Callback):
         metrics = trainer.callback_metrics
         epoch = trainer.current_epoch
 
+        # Get Standard Losses
         val_loss = metrics.get("val_loss", float("inf"))
         if isinstance(val_loss, torch.Tensor): val_loss = val_loss.item()
 
@@ -111,14 +112,16 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # Scan for our specific metric names
-        target_keys = ["TFTF1", "TFTPrecision", "TFTRecall"]
+        # --- FIX: Broad Scanning for Metrics ---
+        # Instead of looking for specific keys like "TFTF1", we grab ANYTHING starting with "val_"
+        # that isn't the loss itself. This guarantees we see what is being logged.
         for k, v in metrics.items():
-            # Check if any of our target keys are in the metric name (e.g., "val_TFTF1")
-            if any(t in k for t in target_keys):
+            if k.startswith("val_") and k != "val_loss":
                 val = v.item() if isinstance(v, torch.Tensor) else v
-                # Clean name: val_TFTF1 -> F1
-                clean_name = k.replace("val_", "").replace("TFT", "")
+
+                # Clean up the name for readability
+                # e.g. "val_TFTF1" -> "TFTF1", "val_MulticlassF1Score" -> "MulticlassF1Score"
+                clean_name = k.replace("val_", "")
                 msg_parts.append(f"{clean_name}: {val:.4f}")
 
         logger.info(" | ".join(msg_parts))
@@ -132,7 +135,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics using Subclasses ---
+    # --- Define Metrics ---
     metrics_list = nn.ModuleList([
         TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted"),
         TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted"),
@@ -153,13 +156,11 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
-    # Monitor val_loss for early stopping (it's smoother than F1)
+    # Monitor val_loss for early stopping (smoother than F1)
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
-    # --- FIX: Disable deterministic mode ---
-    # TFT uses 'upsample_linear1d' which has no deterministic CUDA implementation.
-    # Setting this to False allows training to proceed, even if slight variance occurs.
+    # Disable deterministic mode to avoid the "upsample_linear1d" crash
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
@@ -178,16 +179,17 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     target_f1 = 0.0
 
-    # Log params to Optuna
-    for key in val_results:
-        if "TFT" in key:
-            clean_name = key.replace("val_TFT", "")
-            val = val_results[key]
-            trial.set_user_attr(clean_name, val)
-            logger.info(f"  [Trial Final] {clean_name}: {val:.4f}")
-
-            if clean_name == "F1":
-                target_f1 = val
+    # Scan for F1 in the final results
+    for k, v in val_results.items():
+        # Look for F1 in the key name (case-insensitive)
+        if "f1" in k.lower():
+            target_f1 = v
+            logger.info(f"  [Trial Final] F1 found in key '{k}': {v:.4f}")
+            trial.set_user_attr("F1", v)
+        elif "prec" in k.lower():
+            trial.set_user_attr("Precision", v)
+        elif "rec" in k.lower():
+            trial.set_user_attr("Recall", v)
 
     # Return F1 so Optuna maximizes it
     return target_f1
@@ -201,7 +203,6 @@ if __name__ == "__main__":
 
     # 1. Split & Seed
     exp_params = ExperimentConfig()
-    # Use Lightning's seeder which covers workers
     pl.seed_everything(exp_params.random_state, workers=True)
 
     train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df,
