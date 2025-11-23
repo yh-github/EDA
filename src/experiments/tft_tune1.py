@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 import lightning.pytorch as pl
 import optuna
+from optuna.samplers import TPESampler  # Import Sampler for seeding
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -149,11 +150,13 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
-    # Note: We still monitor val_loss for EarlyStopping stability,
-    # as F1 can be jumpy/plateaued in early epochs.
+    # Note: We still monitor val_loss for EarlyStopping stability
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
+    # --- FIX 2: Enable Deterministic Mode in Trainer ---
+    # This forces PyTorch to use deterministic algorithms (throwing errors if not possible)
+    # and handles CUDA benchmarking consistency.
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
@@ -161,7 +164,8 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         callbacks=[early_stop, text_logger],
         enable_progress_bar=False,
         logger=False,
-        enable_checkpointing=True
+        enable_checkpointing=True,
+        deterministic=True  # <--- CRITICAL FOR CONSISTENCY
     )
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
@@ -182,7 +186,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
             if clean_name == "F1":
                 target_f1 = val
 
-    # !!! OPTIMIZE FOR F1 NOW !!!
+    # Return F1 for optimization
     return target_f1
 
 
@@ -194,7 +198,11 @@ if __name__ == "__main__":
 
     # 1. Split
     exp_params = ExperimentConfig()
-    set_global_seed(exp_params.random_state)
+
+    # --- FIX 3: Use Lightning's Seeding ---
+    # pl.seed_everything handles python, numpy, pytorch, AND worker_init_fn logic better
+    pl.seed_everything(exp_params.random_state, workers=True)
+
     train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df,
                                                       random_state=exp_params.random_state)
 
@@ -244,8 +252,11 @@ if __name__ == "__main__":
     # 8. Run
     logger.info(f"Starting Study: {STUDY_NAME}")
 
-    # !!! CHANGED DIRECTION TO MAXIMIZE (F1) !!!
-    study = optuna.create_study(study_name=STUDY_NAME, direction="maximize")
+    # --- FIX 4: Seed Optuna Sampler ---
+    # Without this, the parameters picked by Optuna will be random every time.
+    sampler = TPESampler(seed=exp_params.random_state)
+
+    study = optuna.create_study(study_name=STUDY_NAME, direction="maximize", sampler=sampler)
 
     study.optimize(
         lambda trial: objective(trial, train_ds, train_loader, val_loader, pos_weight),
