@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 import lightning.pytorch as pl
 import optuna
-from optuna.samplers import TPESampler  # Import Sampler for seeding
+from optuna.samplers import TPESampler
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-from pytorch_forecasting.metrics import CrossEntropy, TorchMetricWrapper
+from pytorch_forecasting.metrics import CrossEntropy
 
 from config import FieldConfig, EmbModel, ExperimentConfig
 from data import create_train_val_test_split
@@ -80,7 +80,9 @@ class TFTMetricAdapter(torchmetrics.Metric):
         self.metric.reset()
 
 
-# Explicit subclasses for naming so PyTorch Lightning logs them correctly
+# --- Explicit Subclasses for Naming ---
+# PyTorch Lightning logs metrics using their class name.
+# By creating these subclasses, we force the logs to use keys like "val_TFTF1".
 class TFTF1(TFTMetricAdapter): pass
 
 
@@ -109,13 +111,15 @@ class TextLogCallback(Callback):
 
         msg_parts = [f"Epoch {epoch:<2}", f"Train Loss: {train_loss:.4f}", f"Val Loss: {val_loss:.4f}"]
 
-        # Scan for our custom metrics
+        # Scan for our specific metric names
+        target_keys = ["TFTF1", "TFTPrecision", "TFTRecall"]
         for k, v in metrics.items():
-            if "val_" in k and "loss" not in k:
+            # Check if any of our target keys are in the metric name (e.g., "val_TFTF1")
+            if any(t in k for t in target_keys):
                 val = v.item() if isinstance(v, torch.Tensor) else v
-                # Clean up name
-                name = k.replace("val_", "").replace("TFT", "")
-                msg_parts.append(f"{name}: {val:.4f}")
+                # Clean name: val_TFTF1 -> F1
+                clean_name = k.replace("val_", "").replace("TFT", "")
+                msg_parts.append(f"{clean_name}: {val:.4f}")
 
         logger.info(" | ".join(msg_parts))
 
@@ -128,8 +132,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
     attention_head_size = trial.suggest_categorical("attention_head_size", [2, 4])
     gradient_clip_val = trial.suggest_float("gradient_clip_val", 0.1, 1.0)
 
-    # --- Define Metrics ---
-    # Using explicit subclasses for clean logging keys
+    # --- Define Metrics using Subclasses ---
     metrics_list = nn.ModuleList([
         TFTF1(torchmetrics.classification.MulticlassF1Score, num_classes=2, average="weighted"),
         TFTPrecision(torchmetrics.classification.MulticlassPrecision, num_classes=2, average="weighted"),
@@ -150,13 +153,11 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         reduce_on_plateau_patience=4,
     )
 
-    # Note: We still monitor val_loss for EarlyStopping stability
+    # Monitor val_loss for early stopping (it's smoother than F1)
     early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
     text_logger = TextLogCallback()
 
-    # --- FIX 2: Enable Deterministic Mode in Trainer ---
-    # This forces PyTorch to use deterministic algorithms (throwing errors if not possible)
-    # and handles CUDA benchmarking consistency.
+    # Enable deterministic mode for reproducibility
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator="auto",
@@ -165,7 +166,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
         enable_progress_bar=False,
         logger=False,
         enable_checkpointing=True,
-        deterministic=True  # <--- CRITICAL FOR CONSISTENCY
+        deterministic=True
     )
 
     trainer.fit(model=tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
@@ -175,9 +176,9 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
 
     target_f1 = 0.0
 
-    # Log specific keys
-    for key in ["val_TFTF1", "val_TFTPrecision", "val_TFTRecall"]:
-        if key in val_results:
+    # Log params to Optuna
+    for key in val_results:
+        if "TFT" in key:
             clean_name = key.replace("val_TFT", "")
             val = val_results[key]
             trial.set_user_attr(clean_name, val)
@@ -186,7 +187,7 @@ def objective(trial, train_ds, train_loader, val_loader, pos_weight):
             if clean_name == "F1":
                 target_f1 = val
 
-    # Return F1 for optimization
+    # Return F1 so Optuna maximizes it
     return target_f1
 
 
@@ -196,11 +197,9 @@ if __name__ == "__main__":
     full_df = pd.read_csv("data/rec_data2.csv").dropna(
         subset=[field_config.date, field_config.amount, field_config.text])
 
-    # 1. Split
+    # 1. Split & Seed
     exp_params = ExperimentConfig()
-
-    # --- FIX 3: Use Lightning's Seeding ---
-    # pl.seed_everything handles python, numpy, pytorch, AND worker_init_fn logic better
+    # Use Lightning's seeder which covers workers
     pl.seed_everything(exp_params.random_state, workers=True)
 
     train_df, val_df, _ = create_train_val_test_split(test_size=0.2, val_size=0.2, full_df=full_df,
@@ -252,10 +251,10 @@ if __name__ == "__main__":
     # 8. Run
     logger.info(f"Starting Study: {STUDY_NAME}")
 
-    # --- FIX 4: Seed Optuna Sampler ---
-    # Without this, the parameters picked by Optuna will be random every time.
+    # Seed the sampler for Optuna reproducibility
     sampler = TPESampler(seed=exp_params.random_state)
 
+    # Optimize for F1 (Maximize)
     study = optuna.create_study(study_name=STUDY_NAME, direction="maximize", sampler=sampler)
 
     study.optimize(
