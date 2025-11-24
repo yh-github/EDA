@@ -1,6 +1,6 @@
 [project]
 name = "EDA"
-version = "0.1.2"
+version = "0.1.3"
 authors = [
 	{ name="Yoav Haimovitch", email="yoav.haimovitch@personetics.com" },
 ]
@@ -16,5 +16,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = [ "src" ]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
 asyncio_mode="auto"
 asyncio_default_fixture_loop_scope = "function"
