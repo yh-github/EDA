@@ -36,11 +36,11 @@ class FeatProcParams:
     use_categorical_dates: bool = True
 
     use_continuous_amount: bool = True
-    use_is_positive: bool = True
+    use_is_positive: bool = False
 
-    use_categorical_amount: bool = True
-    k_top: int = 500
-    n_bins: int = 100
+    use_categorical_amount: bool = False
+    k_top: int = 20
+    n_bins: int = 20
 
 
     def is_nop(self) -> bool:

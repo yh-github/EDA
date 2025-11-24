@@ -30,7 +30,7 @@ HYPER_PARAMS = {
 }
 MAX_ENCODER_LENGTH = 64
 # Define where to cache the model
-MODEL_CACHE_PATH = "cache/tft_models/analysis_model_v1.pt"
+MODEL_CACHE_PATH = "cache/tft_models/analysis_model_v1.1.pt"
 
 
 def train_and_analyze():
