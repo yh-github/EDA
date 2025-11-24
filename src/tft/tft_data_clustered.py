@@ -97,6 +97,8 @@ def prepare_clustered_tft_data(
         processor: HybridFeatureProcessor = None,
         fit_processor: bool = False
 ) -> tuple[pd.DataFrame, PCA, HybridFeatureProcessor, FeatureMetadata]:
+    n_components = 16
+
     df = df.copy()
 
     # 1. Run Amount Clustering (Physical Binning)
@@ -130,19 +132,41 @@ def prepare_clustered_tft_data(
             if cat_col in df.columns:
                 df[cat_col] = df[cat_col].astype(str)
 
+
     # 7. Text Embeddings & PCA
     if embedding_service is not None:
         texts = df[field_config.text].tolist()
         embeddings = embedding_service.embed(texts)
 
+        # KEY: Use existing PCA if provided (Inference Mode), else Fit (Training Mode)
         if pca_model is None:
-            pca_model = PCA(n_components=16)
+            pca_model = PCA(n_components=n_components)
             compressed = pca_model.fit_transform(embeddings)
         else:
             compressed = pca_model.transform(embeddings)
 
+        # Add PCA features to DataFrame
+        pca_col_names = []
         for i in range(16):
-            df[f"text_pca_{i}"] = compressed[:, i]
+            col_name = f"text_pca_{i}"
+            df[col_name] = compressed[:, i]
+            pca_col_names.append(col_name)
+
+        # --- NEW: Semantic User Profiling ---
+        # "What does this user usually buy?"
+        # We calculate the mean of each PCA component per account and broadcast it as a static feature
+        print("Calculating User Semantic Profiles...")
+
+        # We use a temp dataframe to avoid fragmentation warnings
+        user_profile = df.groupby(field_config.accountId)[pca_col_names].transform('mean')
+
+        # Rename and merge
+        for col in pca_col_names:
+            df[f"static_{col}_mean"] = user_profile[col]
+
+            # Update metadata so TFT knows these are static reals
+            if meta is not None:
+                meta.static_real_cols.append(f"static_{col}_mean")
 
     return df, pca_model, processor, meta
 

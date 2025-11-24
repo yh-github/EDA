@@ -42,6 +42,7 @@ class FeatProcParams:
     k_top: int = 20
     n_bins: int = 20
 
+    use_behavioral_features: bool = False
 
     def is_nop(self) -> bool:
         return all(
@@ -84,6 +85,7 @@ class HybridFeatureProcessor:
                  use_continuous_amount: bool,
                  use_categorical_amount: bool,
                  use_is_positive: bool,
+                 use_behavioral_features: bool,
                  fields_config: FieldConfig):
         """
         Initialize the processor.
@@ -109,6 +111,7 @@ class HybridFeatureProcessor:
         self.use_continuous_amount = use_continuous_amount
         self.use_categorical_amount = use_categorical_amount
         self.use_is_positive = use_is_positive
+        self.use_behavioral_features = use_behavioral_features
 
         # These will be "learned" during .fit()
         self.top_k_amounts: set[float] = set()
@@ -302,8 +305,65 @@ class HybridFeatureProcessor:
                     "Processor has not been fitted, but 'use_categorical_amount' is True. Call .fit() first.")
             features['amount_token_id'] = df[amount_col].apply(self._tokenize_amount)
 
+        # --- 3. Behavioral Features (Refactored) ---
+        if self.use_behavioral_features:
+            behavioral_features = self._generate_behavioral_features(df)
+            # Merge behavioral features into the main dataframe
+            features = pd.concat([features, behavioral_features], axis=1)
+
         logger.info("Transform complete.")
         return features
+
+    def _generate_behavioral_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculates static statistical profiles for each account.
+        Returns a DataFrame with the same index as df, containing broadcasted stats.
+        """
+        acc_col = self.fields_config.accountId
+        amt_col = self.fields_config.amount
+        date_col = self.fields_config.date
+
+        # Output DataFrame
+        beh_df = pd.DataFrame(index=df.index)
+
+        # Create a temporary DataFrame for aggregation
+        temp = pd.DataFrame({
+            'acc': df[acc_col],
+            'amt': df[amt_col],
+            'dt': pd.to_datetime(df[date_col])
+        })
+
+        # --- A. Frequency Stats ---
+        # Calculate "Active Duration" in Days per account
+        range_per_acc = temp.groupby('acc')['dt'].transform(lambda x: (x.max() - x.min()).days + 1)
+        count_per_acc = temp.groupby('acc')['amt'].transform('count')
+
+        # Transactions per Day (Avoid division by zero/short ranges)
+        beh_df['acc_stat_txn_freq'] = count_per_acc / range_per_acc.clip(lower=1)
+
+        # --- B. Basic Amount Stats (Log Space) ---
+        log_amt = np.log(np.abs(temp['amt']) + 1)
+        beh_df['acc_stat_amount_mean'] = log_amt.groupby(temp['acc']).transform('mean')
+        beh_df['acc_stat_amount_std'] = log_amt.groupby(temp['acc']).transform('std').fillna(0)
+
+        # --- C. Advanced Distribution Stats (Raw Space) ---
+        # 1. Robust Centrality & Extremes
+        beh_df['acc_stat_amount_max'] = temp.groupby('acc')['amt'].transform('max')
+        beh_df['acc_stat_amount_median'] = temp.groupby('acc')['amt'].transform('median')
+
+        # 2. Dispersion / IQR
+        # Note: using lambda for quantiles in transform can be slow on massive data,
+        # but it is the most direct way to broadcast.
+        beh_df['acc_stat_amount_q25'] = temp.groupby('acc')['amt'].transform(lambda x: x.quantile(0.25))
+        beh_df['acc_stat_amount_q75'] = temp.groupby('acc')['amt'].transform(lambda x: x.quantile(0.75))
+        beh_df['acc_stat_amount_iqr'] = beh_df['acc_stat_amount_q75'] - beh_df['acc_stat_amount_q25']
+
+        # 3. "Spikiness" Ratio (Max / Median)
+        # Avoid division by zero if median is 0 (e.g. free tier / zero balance checks)
+        median_safe = beh_df['acc_stat_amount_median'].replace(0, 1.0)
+        beh_df['acc_stat_spike_ratio'] = beh_df['acc_stat_amount_max'] / median_safe
+
+        return beh_df
 
     def _tokenize_amount(self, amount: float) -> int:
         """Helper function to find the correct token ID for an amount."""
