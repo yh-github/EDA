@@ -1,4 +1,5 @@
 import logging
+import os
 import warnings
 from pathlib import Path
 from typing import Callable, Dict, Any
@@ -55,6 +56,7 @@ class TFTTuningExperiment:
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         warnings.filterwarnings("ignore", category=FutureWarning)
         torch.set_float32_matmul_precision('medium')
 

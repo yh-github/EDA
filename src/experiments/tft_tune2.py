@@ -3,7 +3,7 @@ from tft.tft_data_clustered import build_clustered_tft_dataset, prepare_clustere
 
 # --- CONFIG ---
 MAX_ENCODER_LEN = 64
-BATCH_SIZE = 4096
+BATCH_SIZE = 2048
 MAX_EPOCHS = 20
 N_TRIALS = 30
 STUDY_NAME = "tft_amt_clusters_v1"
