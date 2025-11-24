@@ -76,43 +76,67 @@ def train_and_analyze():
     logger.info(f"Training (or loading from {MODEL_CACHE_PATH})...")
     trainer, tft = runner.train_single(HYPER_PARAMS, model_path=MODEL_CACHE_PATH)
 
-    # --- Analysis ---
-    logger.info("Analyzing Feature Importance...")
+    # --- Analysis 1: Feature Importance (Subset) ---
+    logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
-    # Get predictions (TFT predict handles device automatically usually)
-    # We use the trainer's data loader directly
-    prediction_output = tft.predict(val_loader, mode="raw", return_x=True)
+    # We manually fetch one batch to calculate interpretation.
+    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
+    raw_subset_output = None
+    for batch in val_loader:
+        # Move batch to device
+        batch = [x.to(tft.device) for x in batch]
+        with torch.no_grad():
+            # Direct forward pass acts like mode="raw" for a single batch
+            raw_subset_output = tft(batch[0])
+        break  # Only need one batch for importance structure
 
-    if isinstance(prediction_output, tuple) and len(prediction_output) == 3:
-        raw_predictions, x, _ = prediction_output
-    elif isinstance(prediction_output, tuple) and len(prediction_output) == 2:
-        raw_predictions, x = prediction_output
-    else:
-        raise ValueError("Unexpected output format from tft.predict")
+    if raw_subset_output:
+        interpretation = tft.interpret_output(raw_subset_output, reduction="sum")
 
-    # Note: Feature importance calculation is slow on full dataset
-    # If caching model, this might still be the bottleneck.
-    interpretation = tft.interpret_output(raw_predictions, reduction="sum")
+        def print_importance(name, importance_tensor, feature_names):
+            imp = importance_tensor.cpu().numpy()
+            imp = imp / imp.sum() * 100
+            indices = np.argsort(imp)[::-1]
+            print(f"\n--- {name} Feature Importance ---")
+            for idx in indices:
+                if imp[idx] < 0.1: continue
+                print(f"{feature_names[idx]:<30} : {imp[idx]:.1f}%")
 
-    def print_importance(name, importance_tensor, feature_names):
-        imp = importance_tensor.cpu().numpy()
-        imp = imp / imp.sum() * 100
-        indices = np.argsort(imp)[::-1]
-        print(f"\n--- {name} Feature Importance ---")
-        for idx in indices:
-            if imp[idx] < 0.1: continue
-            print(f"{feature_names[idx]:<30} : {imp[idx]:.1f}%")
+        print_importance("Static", interpretation["static_variables"], tft.static_variables)
+        print_importance("Encoder", interpretation["encoder_variables"], tft.encoder_variables)
+        print_importance("Decoder", interpretation["decoder_variables"], tft.decoder_variables)
 
-    print_importance("Static", interpretation["static_variables"], tft.static_variables)
-    print_importance("Encoder", interpretation["encoder_variables"], tft.encoder_variables)
-    print_importance("Decoder", interpretation["decoder_variables"], tft.decoder_variables)
-
-    # --- Worst Accounts ---
+    # --- Analysis 2: Worst Accounts (Full Set) ---
     logger.info("Identifying Worst Performing Accounts...")
-    probs = torch.softmax(raw_predictions.prediction, dim=-1)
+
+    # Use mode="prediction" which returns fixed-shape probabilities [N, Time, Classes]
+    # This is safe to concatenate across batches.
+    prediction_output = tft.predict(val_loader, mode="prediction", return_x=True)
+
+    if isinstance(prediction_output, tuple):
+        y_prob_all, x = prediction_output
+    else:
+        y_prob_all = prediction_output
+        x = None  # Should not happen with return_x=True
+
+    # y_prob_all is [Batch, Prediction_Len, Classes] (e.g. [N, 1, 2])
+    # OR [Batch, Prediction_Len] if binary and simplified?
+    # Usually for output_size=2 it is [N, 1, 2].
+
+    # Ensure probabilities are normalized (softmax) if model output logits
+    # mode="prediction" usually handles the output transform (Softmax) automatically for classification
+    # Check shape:
+    if y_prob_all.ndim == 3 and y_prob_all.shape[-1] == 2:
+        # It's likely [Prob_Class0, Prob_Class1]
+        y_prob_rec = y_prob_all[:, 0, 1].cpu().numpy()
+    elif y_prob_all.ndim == 2:
+        # Could be [Batch, 1] ?
+        y_prob_rec = y_prob_all[:, 0].cpu().numpy()
+    else:
+        logger.warning(f"Unexpected prediction shape: {y_prob_all.shape}")
+        y_prob_rec = np.zeros(len(y_prob_all))
 
     y_true = x['decoder_target'][:, 0].cpu().numpy()
-    y_prob_rec = probs[:, 0, 1].cpu().numpy()
 
     # Reconstruct Group IDs
     group_id_encoder = tft.dataset.categorical_encoders['global_group_id']
@@ -121,9 +145,12 @@ def train_and_analyze():
 
     # Calculate Losses
     sample_losses = []
+    # Clip to avoid log(0)
+    y_prob_rec = np.clip(y_prob_rec, 1e-7, 1 - 1e-7)
+
     for t, p in zip(y_true, y_prob_rec):
-        p = np.clip(p, 1e-7, 1 - 1e-7)
-        sample_losses.append(- (t * np.log(p) + (1 - t) * np.log(1 - p)))
+        loss_val = - (t * np.log(p) + (1 - t) * np.log(1 - p))
+        sample_losses.append(loss_val)
 
     pred_df = pd.DataFrame({
         "global_group_id": decoded_groups,
