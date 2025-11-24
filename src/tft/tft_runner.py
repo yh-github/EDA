@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import lightning.pytorch as pl
 import optuna
 import torch
@@ -33,11 +34,6 @@ class WeightedCrossEntropy(CrossEntropy):
 
 
 class ManualMetricCallback(Callback):
-    """
-    Manually collects predictions and targets to compute F1, Precision, Recall
-    at the end of every validation epoch.
-    """
-
     def __init__(self):
         super().__init__()
         self.val_preds = []
@@ -67,7 +63,6 @@ class ManualMetricCallback(Callback):
         all_preds = torch.cat(self.val_preds)
         all_targets = torch.cat(self.val_targets)
 
-        # Calculate metrics
         f1 = torchmetrics.functional.classification.multiclass_f1_score(
             all_preds, all_targets, num_classes=2, average="weighted"
         )
@@ -109,7 +104,6 @@ class TFTRunner:
     def _create_model(self, params):
         loss_fn = params.get("loss")
         if loss_fn is None:
-            # Default to WeightedCrossEntropy if pos_weight is provided, else standard CrossEntropy
             if self.pos_weight is not None:
                 loss_fn = WeightedCrossEntropy(weight=[1.0, self.pos_weight])
             else:
@@ -129,7 +123,6 @@ class TFTRunner:
         )
 
     def objective(self, trial, custom_search_space=None):
-        # Default search space
         params = {
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
             "hidden_size": trial.suggest_categorical("hidden_size", [64, 128]),
@@ -138,7 +131,6 @@ class TFTRunner:
             "gradient_clip_val": trial.suggest_float("gradient_clip_val", 0.1, 1.0),
         }
 
-        # Override or extend with custom search space if provided
         if custom_search_space:
             for key, value in custom_search_space.items():
                 if callable(value):
@@ -167,15 +159,7 @@ class TFTRunner:
         trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
 
         target_f1 = metric_callback.last_f1
-        prec = metric_callback.last_prec
-        rec = metric_callback.last_rec
-
-        logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
-
         trial.set_user_attr("F1", target_f1)
-        trial.set_user_attr("Precision", prec)
-        trial.set_user_attr("Recall", rec)
-
         return target_f1
 
     def run_tuning(self, study_name, n_trials, random_state, search_space=None):
@@ -192,10 +176,27 @@ class TFTRunner:
         study.optimize(lambda trial: self.objective(trial, search_space), n_trials=n_trials)
         return study
 
-    def train_single(self, params):
-        """Runs a single training loop without Optuna overhead."""
+    def train_single(self, params, model_path: str | Path = None):
+        """
+        Runs a single training loop.
+        Checkpoints: If model_path exists, loads it. Else trains and saves.
+        """
         tft = self._create_model(params)
 
+        # 1. Check Cache
+        if model_path:
+            path_obj = Path(model_path)
+            if path_obj.exists():
+                logger.info(f"Found checkpoint at {path_obj}. Loading...")
+                state_dict = torch.load(path_obj)
+                tft.load_state_dict(state_dict)
+                tft.eval()  # Set to eval mode
+
+                # Return a trainer for consistency, but no fit performed
+                trainer = pl.Trainer(accelerator="auto", logger=False, enable_checkpointing=False, max_epochs=0)
+                return trainer, tft
+
+        # 2. Train
         early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
         metric_callback = ManualMetricCallback()
 
@@ -211,4 +212,11 @@ class TFTRunner:
         )
 
         trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
+
+        # 3. Save
+        if model_path:
+            logger.info(f"Saving model to {model_path}...")
+            Path(model_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(tft.state_dict(), model_path)
+
         return trainer, tft
