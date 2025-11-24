@@ -84,7 +84,8 @@ class ManualMetricCallback(Callback):
         self.last_rec = rec.item()
 
         # Log to trainer so ModelCheckpoint can see it if needed
-        self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        # Changed logger=True to logger=False to avoid warning since Trainer has no logger
+        self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=False)
 
         train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
         val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
@@ -136,22 +137,28 @@ class TFTRunner:
         )
 
     def objective(self, trial, custom_search_space=None, best_model_save_path=None):
-        # Default search space
-        params = {
-            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
-            "hidden_size": trial.suggest_categorical("hidden_size", [64, 128]),
-            "dropout": trial.suggest_float("dropout", 0.2, 0.5),
-            "attention_head_size": trial.suggest_categorical("attention_head_size", [2, 4]),
-            "gradient_clip_val": trial.suggest_float("gradient_clip_val", 0.1, 1.0),
-        }
+        custom_search_space = custom_search_space or {}
 
-        # Override or extend with custom search space if provided
-        if custom_search_space:
-            for key, value in custom_search_space.items():
-                if callable(value):
-                    params[key] = value(trial)
-                else:
-                    params[key] = value
+        # Helper: get from custom space (executing lambda) or use default lambda
+        # This ensures we don't define the default param if a custom one exists
+        def suggest(name, default_fn):
+            if name in custom_search_space:
+                val = custom_search_space[name]
+                return val(trial) if callable(val) else val
+            return default_fn()
+
+        # Define params using helper to avoid duplicate suggestions
+        params = {}
+        params["learning_rate"] = suggest("learning_rate", lambda: trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True))
+        params["hidden_size"] = suggest("hidden_size", lambda: trial.suggest_categorical("hidden_size", [64, 128]))
+        params["dropout"] = suggest("dropout", lambda: trial.suggest_float("dropout", 0.2, 0.5))
+        params["attention_head_size"] = suggest("attention_head_size", lambda: trial.suggest_categorical("attention_head_size", [2, 4]))
+        params["gradient_clip_val"] = suggest("gradient_clip_val", lambda: trial.suggest_float("gradient_clip_val", 0.1, 1.0))
+
+        # Add any remaining custom params (that weren't in defaults)
+        for key, value in custom_search_space.items():
+            if key not in params:
+                params[key] = value(trial) if callable(value) else value
 
         tft = self._create_model(params)
 
