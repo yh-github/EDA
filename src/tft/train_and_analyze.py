@@ -52,7 +52,6 @@ def train_and_analyze():
         use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
     )
 
-
     # Prepare Data
     train_prepped, pca_model, processor, meta = prepare_clustered_tft_data(
         train_df, field_config, feat_params, emb_service, fit_processor=True
@@ -80,6 +79,7 @@ def train_and_analyze():
     logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
     # We manually fetch one batch to calculate interpretation.
+    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
     raw_subset_output = None
     for x, y in val_loader:
         # Move input dictionary to device
@@ -113,16 +113,12 @@ def train_and_analyze():
     # This is safe to concatenate across batches.
     prediction_output = tft.predict(val_loader, mode="prediction", return_x=True)
 
-    # FIX: Robustly handle tuple unpacking by indexing
+    # Handle variable return tuple length
     if isinstance(prediction_output, tuple):
-        # We only need the first two elements (Predictions, Inputs)
-        # The tuple might have 2, 3, or 5 elements depending on the library version
         y_prob_all = prediction_output[0]
         x = prediction_output[1]
     else:
         raise ValueError("Expected tuple output from predict(return_x=True)")
-
-    # y_prob_all is [Batch, Prediction_Len, Classes] (e.g. [N, 1, 2])
 
     # Check shape:
     if y_prob_all.ndim == 3 and y_prob_all.shape[-1] == 2:
@@ -137,8 +133,10 @@ def train_and_analyze():
 
     y_true = x['decoder_target'][:, 0].cpu().numpy()
 
-    # Reconstruct Group IDs
-    group_id_encoder = tft.dataset.categorical_encoders['global_group_id']
+    # --- FIX IS HERE ---
+    # Use train_ds instead of tft.dataset
+    group_id_encoder = train_ds.categorical_encoders['global_group_id']
+
     batch_group_codes = x['decoder_cat'][:, 0, 0].cpu()
     decoded_groups = group_id_encoder.inverse_transform(batch_group_codes)
 
