@@ -79,6 +79,8 @@ def train_and_analyze():
     # --- Analysis 1: Feature Importance (Subset) ---
     logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
+    # We manually fetch one batch to calculate interpretation.
+    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
     raw_subset_output = None
     for x, y in val_loader:
         # Move input dictionary to device
@@ -86,7 +88,6 @@ def train_and_analyze():
 
         with torch.no_grad():
             # Direct forward pass acts like mode="raw" for a single batch
-            # Output contains 'prediction', 'encoder_attention', 'decoder_attention', etc.
             raw_subset_output = tft(x)
         break  # Only need one batch for importance structure
 
@@ -113,18 +114,20 @@ def train_and_analyze():
     # This is safe to concatenate across batches.
     prediction_output = tft.predict(val_loader, mode="prediction", return_x=True)
 
+    # FIX: Handle variable return tuple length (Output, X) or (Output, X, Index)
     if isinstance(prediction_output, tuple):
-        y_prob_all, x = prediction_output
+        if len(prediction_output) == 3:
+            y_prob_all, x, _ = prediction_output
+        elif len(prediction_output) == 2:
+            y_prob_all, x = prediction_output
+        else:
+            raise ValueError(f"Unexpected tuple length from predict: {len(prediction_output)}")
     else:
-        y_prob_all = prediction_output
-        x = None  # Should not happen with return_x=True
+        # Should not happen with return_x=True
+        raise ValueError("Expected tuple output from predict(return_x=True)")
 
     # y_prob_all is [Batch, Prediction_Len, Classes] (e.g. [N, 1, 2])
-    # OR [Batch, Prediction_Len] if binary and simplified?
-    # Usually for output_size=2 it is [N, 1, 2].
 
-    # Ensure probabilities are normalized (softmax) if model output logits
-    # mode="prediction" usually handles the output transform (Softmax) automatically for classification
     # Check shape:
     if y_prob_all.ndim == 3 and y_prob_all.shape[-1] == 2:
         # It's likely [Prob_Class0, Prob_Class1]
