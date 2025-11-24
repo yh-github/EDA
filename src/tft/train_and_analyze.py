@@ -79,15 +79,15 @@ def train_and_analyze():
     # --- Analysis 1: Feature Importance (Subset) ---
     logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
-    # We manually fetch one batch to calculate interpretation.
-    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
     raw_subset_output = None
-    for batch in val_loader:
-        # Move batch to device
-        batch = [x.to(tft.device) for x in batch]
+    for x, y in val_loader:
+        # Move input dictionary to device
+        x = {k: v.to(tft.device) for k, v in x.items()}
+
         with torch.no_grad():
             # Direct forward pass acts like mode="raw" for a single batch
-            raw_subset_output = tft(batch[0])
+            # Output contains 'prediction', 'encoder_attention', 'decoder_attention', etc.
+            raw_subset_output = tft(x)
         break  # Only need one batch for importance structure
 
     if raw_subset_output:
