@@ -24,6 +24,8 @@ def prepare_tft_data(
     3. Generating/Compressing Text Embeddings.
     4. Running HybridFeatureProcessor for Date/Amount features.
     """
+    pca_components = 16
+
     df = df.copy()
 
     # 1. Filter based on direction
@@ -73,7 +75,7 @@ def prepare_tft_data(
         embeddings = embedding_service.embed(texts)
 
         if pca_model is None:
-            pca_model = PCA(n_components=16)
+            pca_model = PCA(n_components=pca_components)
             compressed = pca_model.fit_transform(embeddings)
         else:
             compressed = pca_model.transform(embeddings)

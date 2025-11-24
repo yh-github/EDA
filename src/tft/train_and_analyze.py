@@ -89,7 +89,7 @@ def train_and_analyze():
     )
 
     trainer = pl.Trainer(
-        max_epochs=10,  # Enough for analysis; increase for production
+        max_epochs=3,  # Enough for analysis; increase for production
         accelerator="auto",
         gradient_clip_val=0.84, # TODO: extern into a parameter
         enable_checkpointing=False,
@@ -101,7 +101,16 @@ def train_and_analyze():
     logger.info("Analyzing Feature Importance...")
 
     # interpret_output returns a dict with 'attention' and 'static_variables', 'encoder_variables', etc.
-    raw_predictions, x = tft.predict(val_loader, mode="raw", return_x=True)
+    # FIX: Handle variable return length (sometimes returns index automatically)
+    prediction_output = tft.predict(val_loader, mode="raw", return_x=True)
+
+    if isinstance(prediction_output, tuple) and len(prediction_output) == 3:
+        raw_predictions, x, _ = prediction_output
+    elif isinstance(prediction_output, tuple) and len(prediction_output) == 2:
+        raw_predictions, x = prediction_output
+    else:
+        raise ValueError(f"Unexpected output from tft.predict: {type(prediction_output)}")
+
     interpretation = tft.interpret_output(raw_predictions, reduction="sum")
 
     # Helper to normalize and print importance
