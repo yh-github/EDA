@@ -50,9 +50,13 @@ def train_and_analyze():
     # Initialize Services
     emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
     feat_params = FeatProcParams(
+        use_is_positive=False,
+        use_categorical_dates=True,
         use_cyclical_dates=True,
         use_continuous_amount=True,
-        use_categorical_amount=False  # Clustered approach handles amount grouping natively
+        use_categorical_amount=False,
+        k_top=0,
+        n_bins=0
     )
 
     # Prepare Clustered Data (Grouping by Amount Similarity)
