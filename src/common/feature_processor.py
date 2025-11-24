@@ -1,9 +1,11 @@
 import logging
 from collections import Counter
 from dataclasses import dataclass, field, fields, replace
-from typing import Self, Any
+from typing import Self
+
 import numpy as np
 import pandas as pd
+
 from common.config import TWO_PI, FieldConfig
 from common.data import FeatureSet
 

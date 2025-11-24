@@ -1,10 +1,8 @@
-import pytest
-import pandas as pd
 import torch
+
+from common.data import FeatureSet, TransactionDataset
 from common.feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureHyperParams
 from glob.classifier import HybridModel
-from common.data import FeatureSet, TransactionDataset
-from common.config import EmbModel
 
 
 # Reusing fixtures from conftest.py implicitly

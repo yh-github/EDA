@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any, Callable
 import lightning.pytorch as pl
 import optuna
 import torch
@@ -7,23 +8,26 @@ import torch.nn.functional as F
 import torchmetrics
 from lightning.pytorch.callbacks import EarlyStopping, Callback
 from optuna.integration import PyTorchLightningPruningCallback
-from pytorch_forecasting import TemporalFusionTransformer
+from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
+from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
 
 
 class WeightedCrossEntropy(CrossEntropy):
-    def __init__(self, weight: list[float] | torch.Tensor = None, **kwargs):
+    def __init__(self, weight: list[float] | torch.Tensor | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.weight = weight
+        self.weight: list[float] | torch.Tensor | None = weight
 
-    def loss(self, y_pred, y_actual):
+    def loss(self, y_pred: torch.Tensor, y_actual: torch.Tensor) -> torch.Tensor:
         if self.weight is not None:
             if not isinstance(self.weight, torch.Tensor):
+                # Ensure device matches prediction tensor
                 self.weight = torch.tensor(self.weight, device=y_pred.device, dtype=torch.float)
             else:
                 self.weight = self.weight.to(y_pred.device)
+
         loss_val = F.cross_entropy(
             y_pred.view(-1, y_pred.size(-1)),
             y_actual.view(-1),
@@ -39,15 +43,23 @@ class ManualMetricCallback(Callback):
     at the end of every validation epoch.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.val_preds = []
-        self.val_targets = []
-        self.last_f1 = 0.0
-        self.last_prec = 0.0
-        self.last_rec = 0.0
+        self.val_preds: list[torch.Tensor] = []
+        self.val_targets: list[torch.Tensor] = []
+        self.last_f1: float = 0.0
+        self.last_prec: float = 0.0
+        self.last_rec: float = 0.0
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+    def on_validation_batch_end(
+            self,
+            trainer: pl.Trainer,
+            pl_module: pl.LightningModule,
+            outputs: Any,
+            batch: Any,
+            batch_idx: int,
+            dataloader_idx: int = 0
+    ) -> None:
         x, y = batch
         with torch.no_grad():
             out = pl_module(x)
@@ -61,7 +73,7 @@ class ManualMetricCallback(Callback):
         self.val_preds.append(preds.detach().cpu())
         self.val_targets.append(targets.detach().cpu())
 
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         if not self.val_preds:
             return
 
@@ -104,17 +116,24 @@ class ManualMetricCallback(Callback):
 
 
 class TFTRunner:
-    def __init__(self, train_ds, train_loader, val_loader, pos_weight=None, max_epochs=20):
-        self.train_ds = train_ds
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.pos_weight = pos_weight
-        self.max_epochs = max_epochs
+    def __init__(
+            self,
+            train_ds: TimeSeriesDataSet,
+            train_loader: DataLoader,
+            val_loader: DataLoader,
+            pos_weight: float | None = None,
+            max_epochs: int = 20
+    ) -> None:
+        self.train_ds: TimeSeriesDataSet = train_ds
+        self.train_loader: DataLoader = train_loader
+        self.val_loader: DataLoader = val_loader
+        self.pos_weight: float | None = pos_weight
+        self.max_epochs: int = max_epochs
 
         # Track best performance across tuning
-        self.best_tuning_f1 = -1.0
+        self.best_tuning_f1: float = -1.0
 
-    def _create_model(self, params):
+    def _create_model(self, params: dict[str, Any]) -> TemporalFusionTransformer:
         loss_fn = params.get("loss")
         if loss_fn is None:
             # Default to WeightedCrossEntropy if pos_weight is provided, else standard CrossEntropy
@@ -136,24 +155,32 @@ class TFTRunner:
             reduce_on_plateau_patience=4,
         )
 
-    def objective(self, trial, custom_search_space=None, best_model_save_path=None):
+    def objective(
+            self,
+            trial: optuna.Trial,
+            custom_search_space: dict[str, Any] | None = None,
+            best_model_save_path: str | Path | None = None
+    ) -> float:
         custom_search_space = custom_search_space or {}
 
         # Helper: get from custom space (executing lambda) or use default lambda
         # This ensures we don't define the default param if a custom one exists
-        def suggest(name, default_fn):
+        def suggest(name: str, default_fn: Callable[[], Any]) -> Any:
             if name in custom_search_space:
                 val = custom_search_space[name]
                 return val(trial) if callable(val) else val
             return default_fn()
 
         # Define params using helper to avoid duplicate suggestions
-        params = {}
-        params["learning_rate"] = suggest("learning_rate", lambda: trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True))
+        params: dict[str, Any] = {}
+        params["learning_rate"] = suggest("learning_rate",
+                                          lambda: trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True))
         params["hidden_size"] = suggest("hidden_size", lambda: trial.suggest_categorical("hidden_size", [64, 128]))
         params["dropout"] = suggest("dropout", lambda: trial.suggest_float("dropout", 0.2, 0.5))
-        params["attention_head_size"] = suggest("attention_head_size", lambda: trial.suggest_categorical("attention_head_size", [2, 4]))
-        params["gradient_clip_val"] = suggest("gradient_clip_val", lambda: trial.suggest_float("gradient_clip_val", 0.1, 1.0))
+        params["attention_head_size"] = suggest("attention_head_size",
+                                                lambda: trial.suggest_categorical("attention_head_size", [2, 4]))
+        params["gradient_clip_val"] = suggest("gradient_clip_val",
+                                              lambda: trial.suggest_float("gradient_clip_val", 0.1, 1.0))
 
         # Add any remaining custom params (that weren't in defaults)
         for key, value in custom_search_space.items():
@@ -180,9 +207,9 @@ class TFTRunner:
 
         trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
 
-        target_f1 = metric_callback.last_f1
-        prec = metric_callback.last_prec
-        rec = metric_callback.last_rec
+        target_f1: float = metric_callback.last_f1
+        prec: float = metric_callback.last_prec
+        rec: float = metric_callback.last_rec
 
         logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
 
@@ -201,7 +228,14 @@ class TFTRunner:
 
         return target_f1
 
-    def run_tuning(self, study_name, n_trials, random_state, search_space=None, best_model_save_path=None):
+    def run_tuning(
+            self,
+            study_name: str,
+            n_trials: int,
+            random_state: int,
+            search_space: dict[str, Any] | None = None,
+            best_model_save_path: str | Path | None = None
+    ) -> optuna.Study:
         sampler = optuna.samplers.TPESampler(seed=random_state)
         pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
 
@@ -218,7 +252,11 @@ class TFTRunner:
         )
         return study
 
-    def train_single(self, params, model_path: str | Path = None):
+    def train_single(
+            self,
+            params: dict[str, Any],
+            model_path: str | Path | None = None
+    ) -> tuple[pl.Trainer, TemporalFusionTransformer]:
         """
         Runs a single training loop.
         Checkpoints: If model_path exists, loads it. Else trains and saves.
