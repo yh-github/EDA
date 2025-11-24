@@ -8,7 +8,6 @@ import torch
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
 
-# --- Project Imports ---
 from common.config import FieldConfig, EmbModel, ExperimentConfig
 from common.data import create_train_val_test_split
 from common.embedder import EmbeddingService
@@ -28,7 +27,7 @@ HYPER_PARAMS = {
     "attention_head_size": 2,
     "dropout": 0.2,
     "hidden_continuous_size": 128,
-    "output_size": 2,  # Binary Classification
+    "output_size": 2,  # Binary
     "max_encoder_length": 64
 }
 
