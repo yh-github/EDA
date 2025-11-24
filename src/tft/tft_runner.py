@@ -34,6 +34,11 @@ class WeightedCrossEntropy(CrossEntropy):
 
 
 class ManualMetricCallback(Callback):
+    """
+    Manually collects predictions and targets to compute F1, Precision, Recall
+    at the end of every validation epoch.
+    """
+
     def __init__(self):
         super().__init__()
         self.val_preds = []
@@ -63,6 +68,7 @@ class ManualMetricCallback(Callback):
         all_preds = torch.cat(self.val_preds)
         all_targets = torch.cat(self.val_targets)
 
+        # Calculate metrics
         f1 = torchmetrics.functional.classification.multiclass_f1_score(
             all_preds, all_targets, num_classes=2, average="weighted"
         )
@@ -76,6 +82,9 @@ class ManualMetricCallback(Callback):
         self.last_f1 = f1.item()
         self.last_prec = prec.item()
         self.last_rec = rec.item()
+
+        # Log to trainer so ModelCheckpoint can see it if needed
+        self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
         train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
         val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
@@ -101,9 +110,13 @@ class TFTRunner:
         self.pos_weight = pos_weight
         self.max_epochs = max_epochs
 
+        # Track best performance across tuning
+        self.best_tuning_f1 = -1.0
+
     def _create_model(self, params):
         loss_fn = params.get("loss")
         if loss_fn is None:
+            # Default to WeightedCrossEntropy if pos_weight is provided, else standard CrossEntropy
             if self.pos_weight is not None:
                 loss_fn = WeightedCrossEntropy(weight=[1.0, self.pos_weight])
             else:
@@ -122,7 +135,8 @@ class TFTRunner:
             reduce_on_plateau_patience=4,
         )
 
-    def objective(self, trial, custom_search_space=None):
+    def objective(self, trial, custom_search_space=None, best_model_save_path=None):
+        # Default search space
         params = {
             "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
             "hidden_size": trial.suggest_categorical("hidden_size", [64, 128]),
@@ -131,6 +145,7 @@ class TFTRunner:
             "gradient_clip_val": trial.suggest_float("gradient_clip_val", 0.1, 1.0),
         }
 
+        # Override or extend with custom search space if provided
         if custom_search_space:
             for key, value in custom_search_space.items():
                 if callable(value):
@@ -150,7 +165,7 @@ class TFTRunner:
             precision="bf16-mixed",
             gradient_clip_val=params.get("gradient_clip_val", 0.1),
             callbacks=[early_stop, metric_callback, pruning_callback],
-            enable_progress_bar=False,
+            enable_progress_bar=False,  # No progress bar for logs
             logger=False,
             enable_checkpointing=True,
             deterministic=False
@@ -159,10 +174,27 @@ class TFTRunner:
         trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
 
         target_f1 = metric_callback.last_f1
+        prec = metric_callback.last_prec
+        rec = metric_callback.last_rec
+
+        logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+
         trial.set_user_attr("F1", target_f1)
+        trial.set_user_attr("Precision", prec)
+        trial.set_user_attr("Recall", rec)
+
+        # --- Save Best Model Logic ---
+        if target_f1 > self.best_tuning_f1:
+            self.best_tuning_f1 = target_f1
+            if best_model_save_path:
+                logger.info(f"New best F1 ({target_f1:.4f})! Saving model to {best_model_save_path}")
+                save_path = Path(best_model_save_path)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(tft.state_dict(), save_path)
+
         return target_f1
 
-    def run_tuning(self, study_name, n_trials, random_state, search_space=None):
+    def run_tuning(self, study_name, n_trials, random_state, search_space=None, best_model_save_path=None):
         sampler = optuna.samplers.TPESampler(seed=random_state)
         pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
 
@@ -173,7 +205,10 @@ class TFTRunner:
             pruner=pruner
         )
 
-        study.optimize(lambda trial: self.objective(trial, search_space), n_trials=n_trials)
+        study.optimize(
+            lambda trial: self.objective(trial, search_space, best_model_save_path),
+            n_trials=n_trials
+        )
         return study
 
     def train_single(self, params, model_path: str | Path = None):
@@ -190,9 +225,9 @@ class TFTRunner:
                 logger.info(f"Found checkpoint at {path_obj}. Loading...")
                 state_dict = torch.load(path_obj)
                 tft.load_state_dict(state_dict)
-                tft.eval()  # Set to eval mode
+                tft.eval()
 
-                # Return a trainer for consistency, but no fit performed
+                # Return a trainer for consistency (e.g. for predict), but no fit performed
                 trainer = pl.Trainer(accelerator="auto", logger=False, enable_checkpointing=False, max_epochs=0)
                 return trainer, tft
 
