@@ -29,8 +29,7 @@ HYPER_PARAMS = {
     "gradient_clip_val": 0.84
 }
 MAX_ENCODER_LENGTH = 64
-# Define where to cache the model
-MODEL_CACHE_PATH = "cache/tft_models/analysis_model_v1.1.pt"
+MODEL_CACHE_PATH = "cache/tft_models/analysis_model_v1.pt"
 
 
 def train_and_analyze():
@@ -47,9 +46,16 @@ def train_and_analyze():
     )
 
     emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
+
+    # Correct Feature Params
     feat_params = FeatProcParams(
-        use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
-        use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
+        use_is_positive=False,
+        use_categorical_dates=True,
+        use_cyclical_dates=True,
+        use_continuous_amount=True,
+        use_categorical_amount=False,
+        k_top=0,
+        n_bins=0
     )
 
     # Prepare Data
@@ -78,54 +84,116 @@ def train_and_analyze():
     # --- Analysis 1: Feature Importance (Subset) ---
     logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
-    # We manually fetch one batch to calculate interpretation.
-    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
     raw_subset_output = None
     for x, y in val_loader:
-        # Move input dictionary to device
         x = {k: v.to(tft.device) for k, v in x.items()}
-
         with torch.no_grad():
-            # Direct forward pass acts like mode="raw" for a single batch
             raw_subset_output = tft(x)
-        break  # Only need one batch for importance structure
+        break
 
     if raw_subset_output:
         interpretation = tft.interpret_output(raw_subset_output, reduction="sum")
 
-        def print_importance(name, importance_tensor, feature_names):
-            imp = importance_tensor.cpu().numpy()
-            imp = imp / imp.sum() * 100
-            indices = np.argsort(imp)[::-1]
-            print(f"\n--- {name} Feature Importance ---")
-            for idx in indices:
-                if imp[idx] < 0.1: continue
-                print(f"{feature_names[idx]:<30} : {imp[idx]:.1f}%")
+        # --- UNIFIED FEATURE IMPORTANCE ---
+        print("\n" + "=" * 50)
+        print("GLOBAL FEATURE IMPORTANCE (All Types Combined)")
+        print("=" * 50)
 
-        print_importance("Static", interpretation["static_variables"], tft.static_variables)
-        print_importance("Encoder", interpretation["encoder_variables"], tft.encoder_variables)
-        print_importance("Decoder", interpretation["decoder_variables"], tft.decoder_variables)
+        all_importances = {}
+
+        # Helper to collect and prefix features
+        def collect_imp(var_names, imp_tensor, prefix):
+            if imp_tensor is None or len(var_names) == 0: return
+            # Normalize tensor to sum to 1 first? Or assume raw scores are comparable?
+            # TFT raw scores are attention weights, usually summing to batch_size * time steps.
+            # We'll use the raw values to compare across categories.
+            vals = imp_tensor.cpu().numpy()
+            for name, val in zip(var_names, vals):
+                all_importances[f"[{prefix}] {name}"] = val
+
+        collect_imp(tft.static_variables, interpretation.get("static_variables"), "Static")
+        collect_imp(tft.encoder_variables, interpretation.get("encoder_variables"), "Encoder")
+        collect_imp(tft.decoder_variables, interpretation.get("decoder_variables"), "Decoder")
+
+        # Normalize Global Sum to 100%
+        total_weight = sum(all_importances.values())
+        sorted_imp = sorted(all_importances.items(), key=lambda x: x[1], reverse=True)
+
+        top_features_clean = []  # For Part 2
+
+        for name, val in sorted_imp[:25]:  # Top 25
+            pct = (val / total_weight) * 100
+            print(f"{name:<40} : {pct:.1f}%")
+
+            # Clean name for inspection (remove [Prefix] )
+            clean = name.split("] ")[1]
+            if clean not in top_features_clean:
+                top_features_clean.append(clean)
+
+        # --- VALUE INSPECTION ---
+        print("\n" + "=" * 50)
+        print("DEEP DIVE: What values drive these features?")
+        print("=" * 50)
+
+        for feat in top_features_clean[:5]:  # Inspect Top 5
+            print(f"\n>>> Feature: {feat}")
+
+            if feat == "encoder_length":
+                print("  (Analysis: Comparing History Length vs Recurrence Label)")
+                # Group by the series ID to get sequence lengths
+                # 'time_idx' max value is a good proxy for length in this setup
+                grp_stats = val_prepped.groupby('global_group_id').agg({
+                    'time_idx': 'count',
+                    field_config.label: 'last'  # Label is constant per group in this setup
+                })
+
+                recurring_len = grp_stats[grp_stats[field_config.label] == 1]['time_idx'].mean()
+                non_recurring_len = grp_stats[grp_stats[field_config.label] == 0]['time_idx'].mean()
+
+                print(f"  Avg History Length (Recurring)    : {recurring_len:.1f} steps")
+                print(f"  Avg History Length (Non-Recurring): {non_recurring_len:.1f} steps")
+                print("  -> Longer history = Higher confidence?")
+
+            elif "text_pca_" in feat:
+                print("  (Analysis: Finding texts with extreme PCA values)")
+                # Sort dataframe by this PCA component
+                sorted_df = val_prepped.sort_values(feat, ascending=False)
+
+                print(f"  [High Values] Typical Texts:")
+                for txt in sorted_df[field_config.text].unique()[:4]:
+                    print(f"    - {txt}")
+
+                print(f"  [Low Values] Typical Texts:")
+                for txt in sorted_df[field_config.text].unique()[-4:]:
+                    print(f"    - {txt}")
+
+            elif feat == "accountId":
+                print("  (Analysis: User ID embedding - Specific to individual users, skipping list)")
+
+            elif feat == "day_of_week_id":
+                print("  (Analysis: Distribution by Day of Week)")
+                # 0=Mon, 6=Sun
+                dist = val_prepped.groupby(feat)[field_config.label].mean()
+                print("  Recurring Probability by Day (0=Mon):")
+                print(dist.to_string())
+
+            else:
+                print("  (No specific drill-down implemented for this feature type)")
 
     # --- Analysis 2: Worst Accounts (Full Set) ---
-    logger.info("Identifying Worst Performing Accounts...")
+    logger.info("\nIdentifying Worst Performing Accounts...")
 
-    # Use mode="prediction" which returns fixed-shape probabilities [N, Time, Classes]
-    # This is safe to concatenate across batches.
     prediction_output = tft.predict(val_loader, mode="prediction", return_x=True)
 
-    # Handle variable return tuple length
     if isinstance(prediction_output, tuple):
         y_prob_all = prediction_output[0]
         x = prediction_output[1]
     else:
         raise ValueError("Expected tuple output from predict(return_x=True)")
 
-    # Check shape:
     if y_prob_all.ndim == 3 and y_prob_all.shape[-1] == 2:
-        # It's likely [Prob_Class0, Prob_Class1]
         y_prob_rec = y_prob_all[:, 0, 1].cpu().numpy()
     elif y_prob_all.ndim == 2:
-        # Could be [Batch, 1] ?
         y_prob_rec = y_prob_all[:, 0].cpu().numpy()
     else:
         logger.warning(f"Unexpected prediction shape: {y_prob_all.shape}")
@@ -133,16 +201,11 @@ def train_and_analyze():
 
     y_true = x['decoder_target'][:, 0].cpu().numpy()
 
-    # --- FIX IS HERE ---
-    # Use train_ds instead of tft.dataset
     group_id_encoder = train_ds.categorical_encoders['global_group_id']
-
     batch_group_codes = x['decoder_cat'][:, 0, 0].cpu()
     decoded_groups = group_id_encoder.inverse_transform(batch_group_codes)
 
-    # Calculate Losses
     sample_losses = []
-    # Clip to avoid log(0)
     y_prob_rec = np.clip(y_prob_rec, 1e-7, 1 - 1e-7)
 
     for t, p in zip(y_true, y_prob_rec):
@@ -171,8 +234,6 @@ def train_and_analyze():
         print(f"\n>>> Account: {acc_id} (Avg Loss: {account_stats.loc[acc_id, 'avg_loss']:.4f})")
         acc_preds = pred_df[pred_df['accountId'] == acc_id]
         acc_raw = val_prepped[val_prepped['accountId'] == acc_id].copy()
-
-        # Optim: Sort once
         acc_raw = acc_raw.sort_values(['global_group_id', field_config.date])
         raw_groups = acc_raw.groupby('global_group_id')
 
