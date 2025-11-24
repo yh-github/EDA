@@ -3,7 +3,6 @@ import numpy as np
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import NaNLabelEncoder, EncoderNormalizer
 from sklearn.decomposition import PCA
-
 from common.config import FieldConfig
 from common.embedder import EmbeddingService
 from common.feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata

@@ -1,8 +1,10 @@
+from warnings import deprecated
 from pytorch_forecasting.models.temporal_fusion_transformer import TemporalFusionTransformer
 from pytorch_forecasting.metrics import CrossEntropy
 from common.config import ExperimentConfig
 
 
+@deprecated
 def create_tft_model(training_dataset, exp_config: ExperimentConfig):
     tft = TemporalFusionTransformer.from_dataset(
         training_dataset,
