@@ -48,10 +48,10 @@ def train_and_analyze():
 
     emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
     feat_params = FeatProcParams(
-        use_cyclical_dates=True,
-        use_continuous_amount=True,
-        use_categorical_amount=False
+        use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
+        use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
     )
+
 
     # Prepare Data
     train_prepped, pca_model, processor, meta = prepare_clustered_tft_data(
