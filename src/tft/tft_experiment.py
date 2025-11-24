@@ -1,5 +1,4 @@
 import logging
-import os
 import warnings
 from pathlib import Path
 from typing import Callable, Dict, Any
@@ -56,7 +55,6 @@ class TFTTuningExperiment:
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         warnings.filterwarnings("ignore", category=FutureWarning)
         torch.set_float32_matmul_precision('medium')
 
@@ -119,8 +117,13 @@ class TFTTuningExperiment:
 
         # Run Tuning
         runner = TFTRunner(
-            train_ds, train_loader, val_loader,
-            pos_weight=pos_weight, max_epochs=self.max_epochs
+            train_ds,
+            train_loader,
+            val_loader,
+            # --- FIX: Pass the validation DataFrame explicitly ---
+            val_df=val_df_prepped,
+            pos_weight=pos_weight,
+            max_epochs=self.max_epochs
         )
 
         logger.info(f"Starting Study: {self.study_name}")
