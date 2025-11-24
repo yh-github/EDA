@@ -80,7 +80,6 @@ def train_and_analyze():
     logger.info("Analyzing Feature Importance (using subset to avoid shape mismatches)...")
 
     # We manually fetch one batch to calculate interpretation.
-    # This avoids the "Not all dimensions are equal" error caused by stacking variable-length attention matrices.
     raw_subset_output = None
     for x, y in val_loader:
         # Move input dictionary to device
@@ -114,16 +113,13 @@ def train_and_analyze():
     # This is safe to concatenate across batches.
     prediction_output = tft.predict(val_loader, mode="prediction", return_x=True)
 
-    # FIX: Handle variable return tuple length (Output, X) or (Output, X, Index)
+    # FIX: Robustly handle tuple unpacking by indexing
     if isinstance(prediction_output, tuple):
-        if len(prediction_output) == 3:
-            y_prob_all, x, _ = prediction_output
-        elif len(prediction_output) == 2:
-            y_prob_all, x = prediction_output
-        else:
-            raise ValueError(f"Unexpected tuple length from predict: {len(prediction_output)}")
+        # We only need the first two elements (Predictions, Inputs)
+        # The tuple might have 2, 3, or 5 elements depending on the library version
+        y_prob_all = prediction_output[0]
+        x = prediction_output[1]
     else:
-        # Should not happen with return_x=True
         raise ValueError("Expected tuple output from predict(return_x=True)")
 
     # y_prob_all is [Batch, Prediction_Len, Classes] (e.g. [N, 1, 2])
