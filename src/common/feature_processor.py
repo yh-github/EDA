@@ -29,6 +29,8 @@ class FeatureMetadata:
     # It maps a feature name (e.g., 'cents_id') to its config
     categorical_features: dict[str, CategoricalFeatureConfig] = field(default_factory=dict)
 
+    static_real_cols: list[str] = field(default_factory=list)
+
 @dataclass
 class FeatProcParams:
     use_cyclical_dates: bool = True
@@ -233,6 +235,19 @@ class HybridFeatureProcessor:
             )
 
             logger.info(f"Fit complete. Found {len(self.top_k_amounts)} magic numbers.")
+
+            if self.use_behavioral_features:
+                meta.static_real_cols = [
+                    'acc_stat_txn_freq',
+                    'acc_stat_amount_mean',
+                    'acc_stat_amount_std',
+                    'acc_stat_amount_max',
+                    'acc_stat_amount_median',
+                    'acc_stat_amount_q25',
+                    'acc_stat_amount_q75',
+                    'acc_stat_amount_iqr',
+                    'acc_stat_spike_ratio'
+                ]
 
         return meta
 
