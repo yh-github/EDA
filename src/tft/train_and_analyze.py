@@ -16,6 +16,8 @@ from tft.tft_runner import TFTRunner
 setup_logging(Path("logs/"), "analysis_run")
 logger = logging.getLogger("analysis")
 
+max_epochs = 2
+
 # --- Configuration ---
 HYPER_PARAMS = {
     "learning_rate": 0.0001,
@@ -69,7 +71,7 @@ def train_and_analyze():
     val_loader = val_ds.to_dataloader(train=False, batch_size=128, num_workers=4)
 
     # --- Train or Load Model ---
-    runner = TFTRunner(train_ds, train_loader, val_loader, max_epochs=3)
+    runner = TFTRunner(train_ds, train_loader, val_loader, max_epochs=max_epochs)
 
     logger.info(f"Training (or loading from {MODEL_CACHE_PATH})...")
     trainer, tft = runner.train_single(HYPER_PARAMS, model_path=MODEL_CACHE_PATH)
