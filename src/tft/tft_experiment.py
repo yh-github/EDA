@@ -41,7 +41,8 @@ class TFTTuningExperiment:
             build_dataset_fn: Callable = build_tft_dataset,
             data_path: str = "data/rec_data2.csv",
             log_dir: str = "logs/",
-            use_aggregation: bool = False
+            use_aggregation: bool = False,
+            feat_params: FeatProcParams|None = None,
     ):
         self.study_name = study_name
         self.best_model_path = best_model_path
@@ -56,6 +57,10 @@ class TFTTuningExperiment:
         self.data_path = data_path
         self.log_dir = Path(log_dir)
         self.use_aggregation = use_aggregation
+        self.feat_params = feat_params or FeatProcParams(
+            use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
+            use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
+        )
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
@@ -81,10 +86,7 @@ class TFTTuningExperiment:
         emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
 
         # Common feature params used by both experiments
-        feat_params = FeatProcParams(
-            use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
-            use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
-        )
+        feat_params = self.feat_params
 
         logger.info("Preparing Data...")
         # Use injected prepare function (Standard or Clustered)
