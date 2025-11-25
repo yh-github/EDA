@@ -184,7 +184,7 @@ class TFTRunner:
             # Pass the validation DF here!
             val_df: pd.DataFrame | None = None,
             pos_weight: float | None = None,
-            max_epochs: int = 20
+            max_epochs: int = 10
     ) -> None:
         self.train_ds = train_ds
         self.train_loader = train_loader
@@ -194,8 +194,11 @@ class TFTRunner:
         self.max_epochs = max_epochs
         self.best_tuning_f1: float = -1.0
 
+        # TODO parameters
+        self.patience = 3
+        self.reduce_on_plateau_patience = 2 # < patience
+
     def _create_model(self, params: dict[str, Any]) -> TemporalFusionTransformer:
-        # ... (Same as before) ...
         loss_fn = params.get("loss")
         if loss_fn is None:
             if self.pos_weight is not None:
@@ -213,7 +216,7 @@ class TFTRunner:
             output_size=params.get("output_size", 2),
             loss=loss_fn,
             log_interval=10,
-            reduce_on_plateau_patience=4,
+            reduce_on_plateau_patience=self.reduce_on_plateau_patience,
         )
 
     def _cleanup_memory(self):
@@ -246,9 +249,8 @@ class TFTRunner:
         try:
             tft = self._create_model(params)
 
-            early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
+            early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
 
-            # Use the new Aggregated Callback
             metric_callback = AggregatedMetricCallback(validation_df=self.val_df)
 
             pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
@@ -345,7 +347,7 @@ class TFTRunner:
                 trainer = pl.Trainer(accelerator="auto", logger=False, enable_checkpointing=False, max_epochs=0)
                 return trainer, tft
 
-        early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=5, verbose=False, mode="min")
+        early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
         metric_callback = AggregatedMetricCallback(validation_df=self.val_df)
 
         trainer = pl.Trainer(

@@ -152,21 +152,20 @@ def prepare_clustered_tft_data(
             df[col_name] = compressed[:, i]
             pca_col_names.append(col_name)
 
-        # --- NEW: Semantic User Profiling ---
-        # "What does this user usually buy?"
-        # We calculate the mean of each PCA component per account and broadcast it as a static feature
-        print("Calculating User Semantic Profiles...")
+        # --- Semantic User Profiling ---
+        if processor.params.use_behavioral_features:
+            print("Calculating User Semantic Profiles...")
 
-        # We use a temp dataframe to avoid fragmentation warnings
-        user_profile = df.groupby(field_config.accountId)[pca_col_names].transform('mean')
+            # We use a temp dataframe to avoid fragmentation warnings
+            user_profile = df.groupby(field_config.accountId)[pca_col_names].transform('mean')
 
-        # Rename and merge
-        for col in pca_col_names:
-            df[f"static_{col}_mean"] = user_profile[col]
+            # Rename and merge
+            for col in pca_col_names:
+                df[f"static_{col}_mean"] = user_profile[col]
 
-            # Update metadata so TFT knows these are static reals
-            if meta is not None:
-                meta.static_real_cols.append(f"static_{col}_mean")
+                # Update metadata so TFT knows these are static reals
+                if meta is not None:
+                    meta.static_real_cols.append(f"static_{col}_mean")
 
     return df, pca_model, processor, meta
 
@@ -211,7 +210,7 @@ def build_clustered_tft_dataset(
         min_prediction_length=1,
         max_prediction_length=1,
 
-        static_categoricals=[field_config.accountId],
+        # static_categoricals=[field_config.accountId],
 
         time_varying_known_reals=known_reals,
         time_varying_known_categoricals=known_categoricals,

@@ -139,12 +139,12 @@ def build_tft_dataset(
         target=field_config.label,
         group_ids=[field_config.accountId],
 
-        min_encoder_length=10,
+        min_encoder_length=3,
         max_encoder_length=max_encoder_length,
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
 
-        static_categoricals=[field_config.accountId],
+        # static_categoricals=[field_config.accountId],
 
         # Everything is "Known" at the time of transaction for classification purposes
         time_varying_known_reals=known_reals,

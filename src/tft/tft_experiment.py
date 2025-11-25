@@ -9,13 +9,12 @@ import torch
 
 from common.config import FieldConfig, EmbModel, ExperimentConfig
 from common.data import create_train_val_test_split
-from common.log_utils import setup_logging
-from common.feature_processor import FeatProcParams
 from common.embedder import EmbeddingService
-from tft.tft_runner import TFTRunner
-
+from common.feature_processor import FeatProcParams
+from common.log_utils import setup_logging
 # Default imports for the standard pipeline
 from tft.tft_data import prepare_tft_data, build_tft_dataset
+from tft.tft_runner import TFTRunner
 
 logger = logging.getLogger("tft_experiment")
 
@@ -32,8 +31,8 @@ class TFTTuningExperiment:
             best_model_path: str,
             max_encoder_len: int = 150,
             batch_size: int = 2048,
-            max_epochs: int = 20,
-            n_trials: int = 30,
+            max_epochs: int = 10,
+            n_trials: int = 20,
             search_space: Dict[str, Any] | None = None,
             # dependency injection for data pipeline strategies
             prepare_data_fn: Callable = prepare_tft_data,
@@ -107,20 +106,27 @@ class TFTTuningExperiment:
         # Val DS must always be derived from Train DS to share scalers/encoders
         val_ds = train_ds.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)
 
+        def create_loader(is_train:bool):
+            _ds = train_ds if is_train else val_ds
+            return _ds.to_dataloader(
+                train=is_train,
+                batch_size=self.batch_size,
+                num_workers=4,
+                # DataLoader parameters
+                pin_memory=True,
+                persistent_workers=True
+            )
+
         # Create Loaders
-        train_loader = train_ds.to_dataloader(
-            train=True, batch_size=self.batch_size, num_workers=12, pin_memory=True
-        )
-        val_loader = val_ds.to_dataloader(
-            train=False, batch_size=self.batch_size, num_workers=12, pin_memory=True
-        )
+        train_loader = create_loader(True)
+        val_loader = create_loader(False)
 
         # Run Tuning
         runner = TFTRunner(
             train_ds,
             train_loader,
             val_loader,
-            # --- FIX: Pass the validation DataFrame explicitly ---
+            # --- Pass the validation DataFrame explicitly ---
             val_df=val_df_prepped,
             pos_weight=pos_weight,
             max_epochs=self.max_epochs
