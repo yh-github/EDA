@@ -134,6 +134,8 @@ def evaluate_refined():
         fit_processor=True
     )
 
+    test_df_prepped[field_config.date] = pd.to_datetime(test_df_prepped[field_config.date])
+
     # Build Template
     dummy_ds = build_tft_dataset(
         test_df_prepped,
