@@ -44,6 +44,7 @@ class EmbModel(StrEnum):
     MiniLM_L12 = 'sentence-transformers/all-MiniLM-L12-v2'
     MPNET = 'sentence-transformers/all-mpnet-base-v2'
     FT_MPNET1 = './ft_models/fine_tuned_mpnet/'
+    BERT_TRAN = "kuro-08/bert-transaction-categorization"
 
 
 class ClusteringStrategy(StrEnum):
