@@ -107,7 +107,7 @@ class BaseMetricsCallback(Callback):
             best_threshold = 1.0
 
         # Log for Optuna/Lightning
-        # self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=False)
+        self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=False)
 
         train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
         val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
