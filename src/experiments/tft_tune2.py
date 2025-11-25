@@ -25,6 +25,7 @@ if __name__ == "__main__":
         search_space=search_space,
         # Inject Clustered Strategies
         prepare_data_fn=prepare_clustered_tft_data,
-        build_dataset_fn=build_clustered_tft_dataset
+        build_dataset_fn=build_clustered_tft_dataset,
+        use_aggregation=True
     )
     experiment.run()

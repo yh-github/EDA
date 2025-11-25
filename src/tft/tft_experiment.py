@@ -33,12 +33,13 @@ class TFTTuningExperiment:
             batch_size: int = 2048,
             max_epochs: int = 10,
             n_trials: int = 20,
-            search_space: Dict[str, Any] | None = None,
+            search_space: dict[str, Any] | None = None,
             # dependency injection for data pipeline strategies
             prepare_data_fn: Callable = prepare_tft_data,
             build_dataset_fn: Callable = build_tft_dataset,
             data_path: str = "data/rec_data2.csv",
-            log_dir: str = "logs/"
+            log_dir: str = "logs/",
+            use_aggregation: bool = False
     ):
         self.study_name = study_name
         self.best_model_path = best_model_path
@@ -51,6 +52,7 @@ class TFTTuningExperiment:
         self.build_dataset_fn = build_dataset_fn
         self.data_path = data_path
         self.log_dir = Path(log_dir)
+        self.use_aggregation = use_aggregation
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
@@ -127,7 +129,7 @@ class TFTTuningExperiment:
             train_loader,
             val_loader,
             # --- Pass the validation DataFrame explicitly ---
-            val_df=val_df_prepped,
+            val_df=val_df_prepped if self.use_aggregation else None,
             pos_weight=pos_weight,
             max_epochs=self.max_epochs
         )

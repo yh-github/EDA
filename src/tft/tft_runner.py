@@ -101,6 +101,11 @@ class AggregatedMetricCallback(Callback):
         all_probs = torch.cat(self.val_preds).numpy()
         all_targets = torch.cat(self.val_targets).numpy()
 
+        # Cleanup
+        self.val_preds = []
+        self.val_targets = []
+
+
         # If we don't have the original DF, we can't aggregate, so fall back to raw metrics
         if self.validation_df is None:
             logger.warning(
@@ -140,9 +145,6 @@ class AggregatedMetricCallback(Callback):
         # 4. Compute Metrics on UNIQUE Transactions
         self._compute_and_log(final_probs, final_targets, trainer)
 
-        # Cleanup
-        self.val_preds = []
-        self.val_targets = []
 
     def _compute_and_log(self, probs: torch.Tensor | np.ndarray, targets: torch.Tensor | np.ndarray,
                          trainer: pl.Trainer):
