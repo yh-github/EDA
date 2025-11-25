@@ -89,6 +89,22 @@ class BaseMetricsCallback(Callback):
         self.last_prec = prec.item()
         self.last_rec = rec.item()
 
+        precisions, recalls, thresholds = binary_precision_recall_curve(probs, targets)
+
+        # Calculate F1 for all thresholds
+        # Added epsilon to avoid division by zero
+        f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-6)
+
+        # Find max
+        best_idx = torch.argmax(f1_scores)
+        best_f1 = f1_scores[best_idx].item()
+
+        # Handle edge case where best_idx is the last element (which has no corresponding threshold)
+        if best_idx < len(thresholds):
+            best_threshold = thresholds[best_idx].item()
+        else:
+            best_threshold = 1.0
+
         # Log for Optuna/Lightning
         self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=False)
 
@@ -101,7 +117,8 @@ class BaseMetricsCallback(Callback):
         logger.info(
             f"Epoch {trainer.current_epoch:<2} | "
             f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"F1 ({prefix}): {self.last_f1:.4f} | Prec: {self.last_prec:.4f} | Rec: {self.last_rec:.4f}"
+            f"F1 (0.5): {self.last_f1:.4f} | "
+            f"Best F1: {best_f1:.4f} (@ {best_threshold:.4f})"
         )
 
 

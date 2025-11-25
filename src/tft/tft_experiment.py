@@ -101,7 +101,7 @@ class TFTTuningExperiment:
         train_labels = train_df_prepped[field_config.label]
         n_pos = train_labels.sum()
         n_neg = len(train_labels) - n_pos
-        pos_weight = None #math.sqrt(float(n_neg / max(n_pos, 1)))
+        pos_weight = math.sqrt(float(n_neg / max(n_pos, 1)))
         logger.info(f"Class Weight: {pos_weight}")
 
         # Build Datasets using injected build function
