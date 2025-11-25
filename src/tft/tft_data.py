@@ -148,7 +148,7 @@ def build_tft_dataset(
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
 
-        # static_categoricals=[field_config.accountId],
+        static_categoricals=[field_config.accountId],
         categorical_encoders={
             field_config.accountId: NaNLabelEncoder(add_nan=True),
             # Add encoders for processor categoricals (amount tokens, etc)
