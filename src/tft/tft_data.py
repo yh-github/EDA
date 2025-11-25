@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import NaNLabelEncoder, EncoderNormalizer
@@ -134,6 +136,7 @@ def build_tft_dataset(
         scalers[col] = EncoderNormalizer(method="standard")
 
     # --- 4. Build Dataset ---
+    logging.info(f'{min_encoder_length=} {max_encoder_length=}')
     training = TimeSeriesDataSet(
         train_df_prepped,
         time_idx="time_idx",
@@ -146,6 +149,11 @@ def build_tft_dataset(
         max_prediction_length=max_prediction_length,
 
         # static_categoricals=[field_config.accountId],
+        categorical_encoders={
+            field_config.accountId: NaNLabelEncoder(add_nan=True),
+            # Add encoders for processor categoricals (amount tokens, etc)
+            **{k: NaNLabelEncoder(add_nan=True) for k in known_categoricals}
+        },
 
         # Everything is "Known" at the time of transaction for classification purposes
         time_varying_known_reals=known_reals,
@@ -156,11 +164,6 @@ def build_tft_dataset(
         time_varying_unknown_reals=[],
         time_varying_unknown_categoricals=[],
 
-        categorical_encoders={
-            field_config.accountId: NaNLabelEncoder(add_nan=True),
-            # Add encoders for processor categoricals (amount tokens, etc)
-            **{k: NaNLabelEncoder(add_nan=True) for k in known_categoricals}
-        },
 
         scalers=scalers,
         target_normalizer=NaNLabelEncoder(add_nan=False),  # Binary classification
