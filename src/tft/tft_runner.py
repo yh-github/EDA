@@ -256,3 +256,45 @@ class TFTRunner:
 
         self._cleanup_memory()
         return trainer, tft
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path: str | Path, dataset: TimeSeriesDataSet) -> TemporalFusionTransformer:
+        """
+        Loads a TFT model from a custom checkpoint file created by _save_checkpoint.
+        Reconstructs the model structure using the provided dataset and saved hyperparameters.
+        """
+        path = Path(checkpoint_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found at {path}")
+
+        logger.info(f"Loading custom checkpoint from {path}...")
+        # Load payload (state_dict + hparams)
+        payload = torch.load(path, map_location=torch.device("cpu"))
+
+        hparams = payload.get("hyper_parameters", {})
+        state_dict = payload.get("state_dict", {})
+
+        if not hparams or not state_dict:
+            raise ValueError("Checkpoint file is missing 'hyper_parameters' or 'state_dict'.")
+
+        # Reconstruct Model
+        # We use standard CrossEntropy for evaluation/loading unless strictly needed
+        tft = TemporalFusionTransformer.from_dataset(
+            dataset,
+            learning_rate=hparams.get("learning_rate", 1e-3),
+            hidden_size=hparams.get("hidden_size", 128),
+            attention_head_size=hparams.get("attention_head_size", 4),
+            dropout=hparams.get("dropout", 0.1),
+            hidden_continuous_size=hparams.get("hidden_continuous_size", hparams.get("hidden_size", 128)),
+            output_size=hparams.get("output_size", 2),
+            loss=CrossEntropy(),
+            log_interval=10,
+            reduce_on_plateau_patience=4,
+        )
+
+        # Load Weights
+        tft.load_state_dict(state_dict)
+        tft.eval()
+
+        logger.info("Model weights loaded successfully.")
+        return tft
