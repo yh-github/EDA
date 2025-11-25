@@ -1,24 +1,24 @@
-import logging
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
 import torch
-from pytorch_forecasting import TimeSeriesDataSet
+import logging
+import pandas as pd
+import numpy as np
+from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support
+from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 
-from common.config import FieldConfig
-from common.data import create_train_val_test_split
-from common.feature_processor import FeatProcParams
-from common.log_utils import setup_logging
-from tft.group import TFTGroupExtractor
+from common.config import FieldConfig, EmbModel
 from tft.tft_data import prepare_tft_data, build_tft_dataset
-from tft.tft_runner import TFTRunner  # <--- Import TFTRunner
+from common.data import create_train_val_test_split
+from tft.group import TFTGroupExtractor
+from common.log_utils import setup_logging
+from tft.tft_runner import TFTRunner
+from common.feature_processor import FeatProcParams
+from common.embedder import EmbeddingService
 
 setup_logging(Path("logs/"), "eval_refined")
 logger = logging.getLogger(__name__)
 
-# UPDATE THIS TO YOUR MODEL PATH
+# UPDATE THIS TO YOUR ACTUAL CHECKPOINT PATH
 CHECKPOINT_PATH = "cache/tft_models/best_tune1.1_model.pt"
 
 
@@ -45,23 +45,28 @@ def evaluate_refined():
         n_bins=0
     )
 
-    # Prepare Data with fit_processor=True to regenerate metadata/vocab
+    # --- FIX 1: Initialize Embedder ---
+    emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=256)
+
+    # --- FIX 2: Pass Embedder to generate PCA columns ---
+    # We use fit_processor=True to regenerate metadata/vocab since it wasn't saved.
+    # This ensures columns like 'text_pca_0' exist.
     test_df_prepped, _, _, meta = prepare_tft_data(
         test_df,
         field_config,
         feat_params=feat_params,
+        embedding_service=emb_service,
         fit_processor=True
     )
 
-    # 2. Build Dataset Structure (Empty, just for model initialization)
-    # Note: Encoder length should match training or be sufficient for test data
-    # We use a safe default here or match training config (e.g. 10 to 64)
+    # 2. Build Dataset Template (Schema)
+    # This object tells the model how many inputs (features/classes) to expect.
     dummy_ds = build_tft_dataset(
         test_df_prepped,
         field_config,
         meta,
-        min_encoder_length=5,
-        max_encoder_length=64
+        min_encoder_length=10,  # Match training config
+        max_encoder_length=150  # Match training config
     )
 
     # 3. Load Model using custom loader
@@ -70,11 +75,13 @@ def evaluate_refined():
         return
 
     # Use TFTRunner to load the custom checkpoint format
+    # We pass 'dummy_ds' so the model knows the input shapes
     tft = TFTRunner.load_from_checkpoint(CHECKPOINT_PATH, dataset=dummy_ds)
     logger.info("Model loaded successfully via TFTRunner.")
 
     # 4. Create Test Loader
-    test_ds = TimeSeriesDataSet.from_dataset(tft.dataset, test_df_prepped, predict=True, stop_randomization=True)
+    # --- FIX 3: Use dummy_ds as the template, NOT tft.dataset ---
+    test_ds = TimeSeriesDataSet.from_dataset(dummy_ds, test_df_prepped, predict=True, stop_randomization=True)
     test_loader = test_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
 
     # 5. Raw Predictions
@@ -104,18 +111,15 @@ def evaluate_refined():
         is_rec = (g.confidence > 0.65)
         if is_rec:
             # Rule: Must have a plausible cycle (approx weekly or monthly)
+            # Cycle > 35 is too long, < 6 is too frequent
             valid_cycle = (6 <= g.cycle_days <= 35)
             if not valid_cycle:
                 is_rec = False
         group_decisions[g.group_id] = 1 if is_rec else 0
 
     # Map back to transactions
-    group_encoder = tft.dataset.categorical_encoders[field_config.accountId]  # Standard uses accountId as group
-    # Note: If using clustered data, this would be 'global_group_id'.
-    # Since prepare_tft_data (standard) uses accountId as group_ids, we stick to that.
-
-    # Check what group key was used in build_tft_dataset.
-    # Standard build_tft_dataset uses group_ids=[field_config.accountId]
+    # Standard pipeline uses accountId as the group identifier
+    group_encoder = dummy_ds.categorical_encoders[field_config.accountId]
 
     batch_group_codes = x['decoder_cat'][:, 0, 0].cpu()
     batch_group_ids = group_encoder.inverse_transform(batch_group_codes)
@@ -134,6 +138,16 @@ def evaluate_refined():
     logger.info(f"Precision: {p_ref:.4f} | Recall: {r_ref:.4f} | F1: {f1_ref:.4f}")
     logger.info("=" * 40)
     logger.info(f"CHANGE: P: {p_ref - p_raw:+.4f} | R: {r_ref - r_raw:+.4f} | F1: {f1_ref - f1_raw:+.4f}")
+
+    # 8. Inspect Improvements
+    saved_fp_indices = np.where((y_pred_raw == 1) & (y_pred_refined == 0) & (y_true == 0))[0]
+    if len(saved_fp_indices) > 0:
+        logger.info(f"\nCaught {len(saved_fp_indices)} False Positives! Examples:")
+
+        # Show specific groups we rejected
+        filtered_groups = [g for g in groups if g.confidence > 0.65 and group_decisions[g.group_id] == 0]
+        for g in filtered_groups[:5]:
+            logger.info(f"  - Rejected '{g.description}' (Conf: {g.confidence:.2f}, Cycle: {g.cycle_days:.1f} days)")
 
 
 if __name__ == "__main__":
