@@ -6,7 +6,7 @@ BATCH_SIZE = 2048
 MAX_EPOCHS = 20
 N_TRIALS = 30
 STUDY_NAME = "tft_optimization_outgoing"
-BEST_MODEL_PATH = "cache/tft_models/best_tune1_model.pt"
+BEST_MODEL_PATH = "cache/tft_models/best_tune1.1_model.pt"
 
 if __name__ == "__main__":
     experiment = TFTTuningExperiment(
