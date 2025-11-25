@@ -86,7 +86,10 @@ def evaluate_refined():
 
     # 5. Raw Predictions
     logger.info("Running raw predictions...")
-    raw_predictions, x = tft.predict(test_loader, mode="raw", return_x=True)
+
+    prediction_output = tft.predict(test_loader, mode="raw", return_x=True)
+    raw_predictions = prediction_output[0]
+    x = prediction_output[1]
 
     y_prob = torch.softmax(raw_predictions['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
     y_true = x["decoder_target"][:, 0].cpu().numpy()
