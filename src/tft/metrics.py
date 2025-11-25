@@ -6,6 +6,7 @@ import pandas as pd
 import torch
 import torchmetrics
 from lightning.pytorch.callbacks import Callback
+from torchmetrics.functional.classification import binary_precision_recall_curve
 
 logger = logging.getLogger(__name__)
 
