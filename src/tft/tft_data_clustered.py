@@ -171,10 +171,11 @@ def prepare_clustered_tft_data(
 
 
 def build_clustered_tft_dataset(
-        train_df_prepped: pd.DataFrame,
-        field_config: FieldConfig,
-        feature_metadata: FeatureMetadata,
-        max_encoder_length: int = 64
+    train_df_prepped: pd.DataFrame,
+    field_config: FieldConfig,
+    feature_metadata: FeatureMetadata,
+    min_encoder_length: int,
+    max_encoder_length: int = 64
 ):
     """
     Builds dataset using 'global_group_id' (Amount Bin) as the series identifier.
@@ -205,7 +206,7 @@ def build_clustered_tft_dataset(
         # The Bin ID is the "Series"
         group_ids=["global_group_id"],
 
-        min_encoder_length=3,
+        min_encoder_length=min_encoder_length,
         max_encoder_length=max_encoder_length,
         min_prediction_length=1,
         max_prediction_length=1,

@@ -87,11 +87,12 @@ def prepare_tft_data(
 
 
 def build_tft_dataset(
-       train_df_prepped: pd.DataFrame,
-       field_config: FieldConfig,
-       feature_metadata: FeatureMetadata,
-       max_encoder_length:int,
-       max_prediction_length=1,
+    train_df_prepped: pd.DataFrame,
+    field_config: FieldConfig,
+    feature_metadata: FeatureMetadata,
+    min_encoder_length:int,
+    max_encoder_length:int,
+    max_prediction_length=1,
 ):
     """
     Defines the TimeSeriesDataSet using metadata from HybridFeatureProcessor.
@@ -139,7 +140,7 @@ def build_tft_dataset(
         target=field_config.label,
         group_ids=[field_config.accountId],
 
-        min_encoder_length=3,
+        min_encoder_length=min_encoder_length,
         max_encoder_length=max_encoder_length,
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,

@@ -29,6 +29,7 @@ class TFTTuningExperiment:
             self,
             study_name: str,
             best_model_path: str,
+            min_encoder_len: int = 5,
             max_encoder_len: int = 150,
             batch_size: int = 2048,
             max_epochs: int = 10,
@@ -43,6 +44,7 @@ class TFTTuningExperiment:
     ):
         self.study_name = study_name
         self.best_model_path = best_model_path
+        self.min_encoder_len = min_encoder_len
         self.max_encoder_len = max_encoder_len
         self.batch_size = batch_size
         self.max_epochs = max_epochs
@@ -103,7 +105,11 @@ class TFTTuningExperiment:
 
         # Build Datasets using injected build function
         train_ds = self.build_dataset_fn(
-            train_df_prepped, field_config, meta, max_encoder_length=self.max_encoder_len
+            train_df_prepped,
+            field_config,
+            meta,
+            min_encoder_length=self.min_encoder_len,
+            max_encoder_length=self.max_encoder_len
         )
         # Val DS must always be derived from Train DS to share scalers/encoders
         val_ds = train_ds.from_dataset(train_ds, val_df_prepped, predict=True, stop_randomization=True)

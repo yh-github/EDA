@@ -1,11 +1,14 @@
 from typing import Any
-
 import torch
 import numpy as np
 import random
 import logging
+import sys
 
 logger = logging.getLogger(__name__)
+
+def get_cli_args() -> dict[int, str]:
+    return {i:v for i,v in enumerate(sys.argv)}
 
 def set_global_seed(seed: int):
     """
