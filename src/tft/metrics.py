@@ -118,8 +118,8 @@ class BaseMetricsCallback(Callback):
         logger.info(
             f"Epoch {trainer.current_epoch:<2} | "
             f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"F1 (0.5): {self.last_f1:.4f} | "
-            f"Best F1: {best_f1:.4f} (@ {best_threshold:.4f})"
+            f"F1 (0.5): {self.last_f1:.4f} | Prec: {self.last_prec:.4f} | Rec: {self.last_rec:.4f} | "
+            f"Best F1 ({best_threshold:.4f}): {best_f1:.4f}"
         )
 
 
