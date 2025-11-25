@@ -283,9 +283,7 @@ class TFTRunner:
                 self.best_tuning_f1 = target_f1
                 if best_model_save_path:
                     logger.info(f"New best F1 ({target_f1:.4f})! Saving model to {best_model_save_path}")
-                    save_path = Path(best_model_save_path)
-                    save_path.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save(tft.state_dict(), save_path)
+                    self._save_checkpoint(tft, params, best_model_save_path)
 
             return target_f1
 
@@ -328,6 +326,18 @@ class TFTRunner:
         )
         return study
 
+    @staticmethod
+    def _save_checkpoint(model: TemporalFusionTransformer, params: dict, path: str | Path):
+        """Saves model weights AND configuration in one file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "state_dict": model.state_dict(),
+            "hyper_parameters": params
+        }
+        torch.save(payload, path)
+
+
     def train_single(
             self,
             params: dict[str, Any],
@@ -365,8 +375,9 @@ class TFTRunner:
 
         if model_path:
             logger.info(f"Saving model to {model_path}...")
-            Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-            torch.save(tft.state_dict(), model_path)
+            self._save_checkpoint(tft, params, model_path)
+            # Path(model_path).parent.mkdir(parents=True, exist_ok=True)
+            # torch.save(tft.state_dict(), model_path)
 
         self._cleanup_memory()
         return trainer, tft
