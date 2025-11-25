@@ -1,20 +1,19 @@
-import logging
 import gc
+import logging
 from pathlib import Path
 from typing import Any, Callable
-
 import lightning.pytorch as pl
 import optuna
+import pandas as pd
 import torch
 import torch.nn.functional as F
-import torchmetrics
-import pandas as pd
-import numpy as np
-from lightning.pytorch.callbacks import EarlyStopping, Callback
+from lightning.pytorch.callbacks import EarlyStopping
 from optuna.integration import PyTorchLightningPruningCallback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
 from torch.utils.data import DataLoader
+
+from tft.metrics import RawMetricsCallback, AggregatedMetricsCallback, BaseMetricsCallback
 
 logger = logging.getLogger(__name__)
 
@@ -38,144 +37,6 @@ class WeightedCrossEntropy(CrossEntropy):
             reduction="none"
         )
         return loss_val.view(y_actual.shape)
-
-
-class AggregatedMetricCallback(Callback):
-    """
-    Collects predictions on overlapping/expanded data, aggregates them by
-    Transaction ID (or unique grouping key), and THEN computes metrics.
-
-    This ensures we don't double-count transactions that appear in multiple bins.
-    """
-
-    def __init__(self, validation_df: pd.DataFrame | None = None, id_col: str = "id") -> None:
-        """
-        Args:
-            validation_df: The DataFrame used to create the validation set.
-                           Must contain the `id_col` to map predictions back to unique txns.
-            id_col: The column name representing the unique transaction ID.
-        """
-        super().__init__()
-        self.val_preds: list[torch.Tensor] = []
-        self.val_targets: list[torch.Tensor] = []
-        self.validation_df = validation_df
-        self.id_col = id_col
-
-        self.last_f1: float = 0.0
-        self.last_prec: float = 0.0
-        self.last_rec: float = 0.0
-
-    def on_validation_batch_end(
-            self,
-            trainer: pl.Trainer,
-            pl_module: pl.LightningModule,
-            outputs: Any,
-            batch: Any,
-            batch_idx: int,
-            dataloader_idx: int = 0
-    ) -> None:
-        x, y = batch
-        with torch.no_grad():
-            out = pl_module(x)
-            preds = out['prediction']
-
-            # Extract probability of class 1 (Recurring)
-            # Shape: [Batch, Prediction Length (1), Classes (2)]
-            if preds.ndim == 3:
-                probs = torch.softmax(preds, dim=-1)[:, 0, 1]
-            else:
-                probs = torch.sigmoid(preds)  # Fallback if binary output
-
-            targets = y[0]
-            if targets.ndim == 2:
-                targets = targets.squeeze(1)
-
-        self.val_preds.append(probs.detach().cpu())
-        self.val_targets.append(targets.detach().cpu())
-
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        if not self.val_preds:
-            return
-
-        # 1. Concatenate all raw predictions (Expanded Space)
-        all_probs = torch.cat(self.val_preds).numpy()
-        all_targets = torch.cat(self.val_targets).numpy()
-
-        # Cleanup
-        self.val_preds = []
-        self.val_targets = []
-
-
-        # If we don't have the original DF, we can't aggregate, so fall back to raw metrics
-        if self.validation_df is None:
-            logger.warning(
-                "No validation_df provided to callback. Metrics will be calculated on EXPANDED data (inaccurate).")
-            self._compute_and_log(all_probs, all_targets, trainer)
-            return
-
-        # 2. Map predictions back to Transaction IDs
-        # The validation loader iterates sequentially. We assume the order matches `validation_df`.
-        # CRITICAL: This assumes `validation_df` was passed in the exact same sort order as the DataSet.
-        if len(all_probs) != len(self.validation_df):
-            # This happens if DataLoader drops the last batch or similar.
-            # Ideally, use proper indexing from `x` in `on_validation_batch_end` if available.
-            logger.warning(
-                f"Shape mismatch: Preds {len(all_probs)} vs DF {len(self.validation_df)}. Skipping aggregation.")
-            self._compute_and_log(all_probs, all_targets, trainer)
-            return
-
-        # Create a temp DF for aggregation
-        temp_df = pd.DataFrame({
-            'id': self.validation_df[self.id_col].values,
-            'prob': all_probs,
-            'target': all_targets
-        })
-
-        # 3. Resolution Strategy: MAX Probability
-        # If a txn is in multiple bins, we take the highest confidence that it IS recurring.
-        # Alternatively, you could take MEAN.
-        aggregated = temp_df.groupby('id').agg({
-            'prob': 'max',
-            'target': 'first'  # Target should be same across duplicates
-        })
-
-        final_probs = torch.tensor(aggregated['prob'].values)
-        final_targets = torch.tensor(aggregated['target'].values).long()
-
-        # 4. Compute Metrics on UNIQUE Transactions
-        self._compute_and_log(final_probs, final_targets, trainer)
-
-
-    def _compute_and_log(self, probs: torch.Tensor | np.ndarray, targets: torch.Tensor | np.ndarray,
-                         trainer: pl.Trainer):
-        if isinstance(probs, np.ndarray): probs = torch.from_numpy(probs)
-        if isinstance(targets, np.ndarray): targets = torch.from_numpy(targets).long()
-
-        # Convert probs to labels for F1/Prec/Rec
-        preds_labels = (probs > 0.5).long()
-
-        f1 = torchmetrics.functional.classification.binary_f1_score(preds_labels, targets)
-        prec = torchmetrics.functional.classification.binary_precision(preds_labels, targets)
-        rec = torchmetrics.functional.classification.binary_recall(preds_labels, targets)
-
-        self.last_f1 = f1.item()
-        self.last_prec = prec.item()
-        self.last_rec = rec.item()
-
-        self.log("val_f1", f1, on_step=False, on_epoch=True, prog_bar=False, logger=False)
-
-        train_loss = trainer.callback_metrics.get("train_loss", float("inf"))
-        val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
-
-        if isinstance(train_loss, torch.Tensor): train_loss = train_loss.item()
-        if isinstance(val_loss, torch.Tensor): val_loss = val_loss.item()
-
-        logger.info(
-            f"Epoch {trainer.current_epoch:<2} | "
-            f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"F1 (Agg): {self.last_f1:.4f} | Prec: {self.last_prec:.4f} | Rec: {self.last_rec:.4f}"
-        )
-
 
 class TFTRunner:
     def __init__(
@@ -202,6 +63,16 @@ class TFTRunner:
         self.patience = 3
         self.reduce_on_plateau_patience = 2 # < patience
 
+    def _get_metrics_callback(self) -> BaseMetricsCallback:
+        """Factory method to select the correct metrics callback."""
+        if self.use_aggregation and self.val_df is not None:
+            return AggregatedMetricsCallback(validation_df=self.val_df)
+
+        if self.use_aggregation and self.val_df is None:
+            logger.warning("use_aggregation=True but val_df is None. Using RawMetricsCallback.")
+
+        return RawMetricsCallback()
+
     def _create_model(self, params: dict[str, Any]) -> TemporalFusionTransformer:
         loss_fn = params.get("loss")
         if loss_fn is None:
@@ -223,7 +94,8 @@ class TFTRunner:
             reduce_on_plateau_patience=self.reduce_on_plateau_patience,
         )
 
-    def _cleanup_memory(self):
+    @staticmethod
+    def _cleanup_memory():
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -231,7 +103,6 @@ class TFTRunner:
                   best_model_save_path: str | Path | None = None) -> float:
         self._cleanup_memory()
 
-        # ... (Param suggestion code same as before) ...
         custom_search_space = custom_search_space or {}
 
         def suggest(name: str, default_fn: Callable[[], Any]) -> Any:
@@ -255,7 +126,7 @@ class TFTRunner:
 
             early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
 
-            metric_callback = AggregatedMetricCallback(validation_df=self.val_df)
+            metric_callback = self._get_metrics_callback()
 
             pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
 
@@ -362,7 +233,7 @@ class TFTRunner:
                 return trainer, tft
 
         early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
-        metric_callback = AggregatedMetricCallback(validation_df=self.val_df)
+        metric_callback = self._get_metrics_callback()
 
         trainer = pl.Trainer(
             max_epochs=self.max_epochs,
