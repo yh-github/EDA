@@ -131,7 +131,8 @@ class TFTTuningExperiment:
             # --- Pass the validation DataFrame explicitly ---
             val_df=val_df_prepped if self.use_aggregation else None,
             pos_weight=pos_weight,
-            max_epochs=self.max_epochs
+            max_epochs=self.max_epochs,
+            use_aggregation=self.use_aggregation
         )
 
         logger.info(f"Starting Study: {self.study_name}")

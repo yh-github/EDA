@@ -186,7 +186,8 @@ class TFTRunner:
             # Pass the validation DF here!
             val_df: pd.DataFrame | None = None,
             pos_weight: float | None = None,
-            max_epochs: int = 10
+            max_epochs: int = 10,
+            use_aggregation: bool = True
     ) -> None:
         self.train_ds = train_ds
         self.train_loader = train_loader
@@ -195,6 +196,7 @@ class TFTRunner:
         self.pos_weight = pos_weight
         self.max_epochs = max_epochs
         self.best_tuning_f1: float = -1.0
+        self.use_aggregation = use_aggregation
 
         # TODO parameters
         self.patience = 3
