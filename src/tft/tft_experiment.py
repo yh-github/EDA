@@ -119,7 +119,7 @@ class TFTTuningExperiment:
             return _ds.to_dataloader(
                 train=is_train,
                 batch_size=self.batch_size,
-                num_workers=4,
+                num_workers=10,
                 # DataLoader parameters
                 pin_memory=True,
                 persistent_workers=True
