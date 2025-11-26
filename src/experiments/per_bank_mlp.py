@@ -80,7 +80,7 @@ def get_constant_configs():
 def clean_and_filter_data(
     df: pd.DataFrame,
     field_config: FieldConfig,
-    min_len:int=10,
+    min_len:int=5,
     filter_amount:int = 1
 ) -> pd.DataFrame:
     """
@@ -160,7 +160,7 @@ def run_bank_benchmark():
     print("-" * 80)
 
     TRAIN_SIZE = 750
-    TEST_SIZE = 250
+    TEST_SIZE = 100
 
     for bank in unique_banks:
         bank_df = df_clean[df_clean['bank_name'] == bank]
@@ -169,7 +169,7 @@ def run_bank_benchmark():
 
         # Check sufficiency
         if n_accounts < TRAIN_SIZE + TEST_SIZE:
-            logger.warning(f"Skipping bank '{bank}': Only {n_accounts} accounts (need 2000 for 1k/1k split).")
+            logger.warning(f"Skipping bank '{bank}': Only {n_accounts} accounts (need {TRAIN_SIZE + TEST_SIZE} for TRAIN_SIZE / TEST_SIZE split).")
             continue
 
         # Sample Accounts
