@@ -28,9 +28,12 @@ def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
 
     # Calculate Best F1 / Threshold
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
+    # Add epsilon to avoid division by zero
     f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-6)
+
     best_idx = np.argmax(f1_scores)
     best_f1 = f1_scores[best_idx]
+    # thresholds array is 1 shorter than prec/rec
     best_thresh = thresholds[best_idx] if best_idx < len(thresholds) else 1.0
 
     print("\n" + "=" * 50)
@@ -45,30 +48,10 @@ def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     print("=" * 50)
 
 
-def inspect_mistakes(df_prepped, y_true, y_pred, y_probs, field_config, title="Mistakes"):
-    print(f"\n>>> EXAMPLES: {title}")
-
-    # Create a DataFrame for easy filtering
-    res = df_prepped.copy()
-    # We need to map the predictions back to the dataframe rows.
-    # Note: df_prepped is 'time-expanded', but predictions are often one per series
-    # if predicting the next step. However, TFTRunner output usually aligns with the batch.
-
-    # Important: The 'y_probs' array comes from the *Prediction* step which yields one prob per group
-    # (since max_prediction_length=1).
-    # We need to map these back to the 'global_group_id's in the dataset.
-
-    # Since we can't easily map row-by-row without the loader's strict order,
-    # we will rely on the fact that TFTRunner.predict(return_x=True) gives us the inputs.
-    # But for this function, we assume y_probs aligns with the unique groups in the batch order.
-    # A safer way for visualization is to rely on the 'x' output from predict.
-    pass  # Implemented inside main loop for safer access to 'x' identifiers
-
-
 def analyze_tune4(model_path: str):
     logger.info(f"Analyzing model at: {model_path}")
     if not Path(model_path).exists():
-        logger.error("Model file not found.")
+        logger.error(f"Model file not found at {model_path}")
         return
 
     # 1. Configs
@@ -147,20 +130,16 @@ def analyze_tune4(model_path: str):
             continue
 
         # Create Loader
-        ds = build_clustered_tft_dataset(
-            df_p, field_config, meta,
-            min_encoder_length=5, max_encoder_length=MAX_ENCODER_LEN
+        # We use train_ds.from_dataset to ensure encoders/scalers are copied correctly
+        inference_ds = train_ds.from_dataset(
+            train_ds, df_p, predict=True, stop_randomization=True
         )
-        # We must use 'predict=True' logic via from_dataset to handle TimeSeriesDataSet correctly for inference
-        # but build_clustered_tft_dataset returns a fresh dataset.
-        # Using the train_ds configuration is safer to ensure encoders match.
-        inference_ds = train_ds.from_dataset(train_ds, df_p, predict=True, stop_randomization=True)
 
         loader = inference_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
 
         logger.info(f"Predicting on {name}...")
 
-        # Get predictions AND input 'x' to trace back to Group IDs
+        # Get predictions AND input 'x'
         raw_output = tft.predict(loader, mode="raw", return_x=True)
         raw_preds = raw_output[0]  # dictionary with 'prediction'
         x = raw_output[1]
@@ -176,47 +155,22 @@ def analyze_tune4(model_path: str):
         print_metrics(y_true, y_pred, probs, set_name=name)
 
         # --- MISTAKE ANALYSIS ---
-        # Decode Group IDs
-        if 'global_group_id' in x['decoder_cat_keys']:  # Newer pytorch-forecasting might differ
-            pass
-
-            # Access encoder directly
-        group_encoder = train_ds.categorical_encoders['global_group_id']
-        # 'global_group_id' index in categorical tensor?
-        # We know it's a static categorical, or time-varying known.
-        # In 'build_clustered_tft_dataset', it is encoded.
-        # usually x['decoder_cat'] contains categoricals.
-
-        # Let's rely on the order.
-        # To get the ID, we need to find which column in 'x' corresponds to 'global_group_id'.
-        # This is complex in TFT. A simpler way is to index predictions by dataframe if order is preserved.
-        # But prediction order usually matches loader order.
-
-        # Try to decode from x['decoder_cat']
-        # We need to find the index of 'global_group_id' in known_categoricals + static_categoricals
-        # This metadata is in tft.dataset.categorical_encoders
-
-        # Heuristic: We skip complex decoding and just list stats for now,
-        # or assume we can't easily link back without custom mapping logic.
-
-        # However, we can calculate FP/FN counts easily.
-        fp_mask = (y_pred == 1) & (y_true == 0)
-        fn_mask = (y_pred == 0) & (y_true == 1)
-
-        print(f"Mistake Counts:")
-        print(f"  False Positives: {fp_mask.sum()}")
-        print(f"  False Negatives: {fn_mask.sum()}")
-
-        # To show examples, we'll assume we can grab the 'global_group_id' from the batch 'x'
-        # The encoder name is 'global_group_id'.
         try:
-            # We need to find the index in x['decoder_cat']
-            # tft.dataset.categoricals gives the list of categorical names in order
+            # FIX: Resolve feature index using the dataset metadata
             cat_names = tft.dataset.categoricals
-            if 'global_group_id' in cat_names:
-                idx = cat_names.index('global_group_id')
+            target_group_col = 'global_group_id'
+
+            if target_group_col in cat_names:
+                idx = cat_names.index(target_group_col)
+
+                # Retrieve encoder
+                group_encoder = tft.dataset.categorical_encoders[target_group_col]
+
                 # decoder_cat shape: [Batch, Time, NumCats]
+                # We take time=0 since the group is static/constant for the sample
                 group_codes = x['decoder_cat'][:, 0, idx].cpu()
+
+                # Inverse transform to get string IDs
                 group_ids = group_encoder.inverse_transform(group_codes)
 
                 # Build mini dataframe for errors
@@ -227,14 +181,28 @@ def analyze_tune4(model_path: str):
                     'Pred': y_pred
                 })
 
-                print("\n>>> False Positive Examples (Predicted Rec, Actual Not):")
-                print(res_df[res_df['True'] == 0].sort_values('Prob', ascending=False).head(5).to_string(index=False))
+                fp_df = res_df[(res_df['True'] == 0) & (res_df['Pred'] == 1)]
+                fn_df = res_df[(res_df['True'] == 1) & (res_df['Pred'] == 0)]
 
-                print("\n>>> False Negative Examples (Predicted Not, Actual Rec):")
-                print(res_df[res_df['True'] == 1].sort_values('Prob', ascending=True).head(5).to_string(index=False))
+                print(f"Mistake Counts (Total Series: {len(res_df)}):")
+                print(f"  False Positives: {len(fp_df)}")
+                print(f"  False Negatives: {len(fn_df)}")
+
+                if not fp_df.empty:
+                    print("\n>>> False Positive Examples (Predicted Rec, Actual Not):")
+                    # Show top confident mistakes
+                    print(fp_df.sort_values('Prob', ascending=False).head(5).to_string(index=False))
+
+                if not fn_df.empty:
+                    print("\n>>> False Negative Examples (Predicted Not, Actual Rec):")
+                    # Show top confident mistakes (Prob close to 0)
+                    print(fn_df.sort_values('Prob', ascending=True).head(5).to_string(index=False))
+
+            else:
+                logger.warning(f"'{target_group_col}' not found in dataset categoricals: {cat_names}")
 
         except Exception as e:
-            logger.warning(f"Could not decode Group IDs for examples: {e}")
+            logger.error(f"Error decoding examples: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
