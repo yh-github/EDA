@@ -213,11 +213,11 @@ class ExpRunner:
         y_true = np.concatenate(all_targets)
         y_pred = (y_prob > 0.5).astype(int)
 
-        p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
+        p, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
         auc = roc_auc_score(y_true, y_prob)
 
         return {
-            "precision": r(p), "recall": r(r), "f1": r(f1), "roc_auc": r(auc),
+            "precision": r(p), "recall": r(recall), "f1": r(f1), "roc_auc": r(auc),
             "y_true": y_true, "y_pred": y_pred  # Return raw for detailed reports if needed
         }
 
