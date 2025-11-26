@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from sklearn.metrics import classification_report
-from common.config import ExperimentConfig, FieldConfig, EmbModel
+from common.config import ExperimentConfig, FieldConfig, EmbModel, get_device
 from common.data import FeatureSet
 from common.feature_processor import FeatProcParams
 from common.embedder import EmbeddingService
@@ -73,7 +73,7 @@ def run_experiment():
 
     logger.info(f"Pointwise Test Metrics: {metrics}")
 
-    model = model.to(runner.get_device())
+    model = model.to(get_device())
 
     # >>> START CLUSTERING <<<
     logger.info(">>> STEP 2: Running Model-Based Clustering on Test Set...")
