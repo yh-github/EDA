@@ -20,7 +20,6 @@ try:
     import umap
     import hdbscan
 except ImportError:
-    # Handle cases where umap is installed as umap-learn
     import umap.umap_ as umap
     import hdbscan
 
@@ -36,14 +35,14 @@ logger = logging.getLogger(__name__)
 class ClusteringResult:
     """Holds the results of the clustering process for an account."""
     groups: list[InteroperableGroup]
-    clustered_df: pd.DataFrame  # Original DF with 'cluster_label' and 'prediction'
-    metrics: dict[str, float]  # F1, Precision, Recall
+    clustered_df: pd.DataFrame
+    metrics: dict[str, float]
 
 
 class EmbClusterer:
     """
     Clusters transactions for a single account using Hybrid Embeddings.
-    Supports GPU acceleration via RAPIDS (cuML) for UMAP and HDBSCAN.
+    Includes post-clustering filters for Amount Stability and Cycle Quality.
     """
 
     def __init__(
@@ -55,7 +54,11 @@ class EmbClusterer:
             umap_components: int = 5,
             umap_neighbors: int = 15,
             cluster_epsilon: float = 0.5,
-            use_gpu: bool = True
+            use_gpu: bool = True,
+            # --- Filters ---
+            max_amount_cv: float = 0.1,  # Coefficient of Variation (Std/Mean)
+            # Updated: Enforce Weekly (7 days) with jitter (e.g., >= 6.0 days)
+            min_cycle_days: float = 6.0
     ):
         self.field_config = field_config
         self.feat_params = feat_params
@@ -65,36 +68,30 @@ class EmbClusterer:
         self.umap_neighbors = umap_neighbors
         self.cluster_epsilon = cluster_epsilon
 
-        # Check GPU availability
+        self.max_amount_cv = max_amount_cv
+        self.min_cycle_days = min_cycle_days
+
         self.use_gpu = use_gpu and HAS_GPU_CLUSTERING
         if use_gpu and not HAS_GPU_CLUSTERING:
-            logger.warning("GPU clustering requested but cuML/cupy not found. Falling back to CPU.")
-        elif use_gpu:
-            logger.info("EmbClusterer: GPU Acceleration Enabled (cuML).")
+            logger.warning("GPU clustering requested but cuML not found. Falling back to CPU.")
 
     def cluster_account(self, df: pd.DataFrame) -> ClusteringResult:
-        """
-        Main entry point: Features -> Embed -> Cluster -> Extract -> Evaluate.
-        """
         if len(df) < self.min_samples:
-            # logger.debug(f"Not enough samples ({len(df)}) to cluster.")
             return self._empty_result(df)
 
-        # 1. Feature Generation (Amount & Date)
+        # 1. Feature Generation
         processor = HybridFeatureProcessor(self.feat_params, self.field_config)
         meta = processor.fit(df)
         features_df = processor.transform(df)
 
-        # Select continuous/dense features
         dense_cols = meta.continuous_scalable_cols + meta.cyclical_cols
         X_dense = features_df[dense_cols].values
 
         # 2. Text Embeddings
-        # EmbeddingService handles its own GPU usage via PyTorch
         texts = df[self.field_config.text].tolist()
         X_text = self.emb_service.embed(texts)
 
-        # 3. Construct Hybrid Embedding Vector
+        # 3. Hybrid Vector
         if X_dense.shape[1] > 0:
             scaler = StandardScaler()
             X_dense_scaled = scaler.fit_transform(X_dense)
@@ -102,13 +99,12 @@ class EmbClusterer:
         else:
             X_hybrid = X_text
 
-        # 4. UMAP Projection (Dimensionality Reduction)
+        # 4. UMAP
         n_neighbors = min(self.umap_neighbors, len(df) - 1)
         if n_neighbors < 2:
             return self._empty_result(df)
 
         if self.use_gpu:
-            # --- GPU UMAP ---
             reducer = CuUMAP(
                 n_neighbors=n_neighbors,
                 n_components=self.umap_components,
@@ -117,7 +113,6 @@ class EmbClusterer:
                 random_state=42
             )
         else:
-            # --- CPU UMAP ---
             reducer = umap.UMAP(
                 n_neighbors=n_neighbors,
                 n_components=self.umap_components,
@@ -128,30 +123,20 @@ class EmbClusterer:
 
         embedding_projection = reducer.fit_transform(X_hybrid)
 
-        # 5. HDBSCAN Clustering
+        # 5. HDBSCAN
         if self.use_gpu:
-            # --- GPU HDBSCAN ---
             clusterer = CuHDBSCAN(
                 min_cluster_size=self.min_samples,
                 metric='euclidean',
                 cluster_selection_epsilon=self.cluster_epsilon,
-                # cuML HDBSCAN parameters are slightly different
                 gen_min_span_tree=True
             )
             labels = clusterer.fit_predict(embedding_projection)
-            # cuML returns probabilities_ as a property usually, but verify consistency
-            if hasattr(clusterer, 'probabilities_'):
-                probs = clusterer.probabilities_
-            else:
-                # Fallback if specific cuML version lacks probs
-                probs = np.ones_like(labels, dtype=float)
+            probs = getattr(clusterer, 'probabilities_', np.ones_like(labels))
 
-            # Ensure we are back on CPU/Numpy for DataFrame operations
-            if hasattr(labels, 'get'): labels = labels.get()  # cupy to numpy
-            if hasattr(probs, 'get'): probs = probs.get()  # cupy to numpy
-
+            if hasattr(labels, 'get'): labels = labels.get()
+            if hasattr(probs, 'get'): probs = probs.get()
         else:
-            # --- CPU HDBSCAN ---
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=self.min_samples,
                 metric='euclidean',
@@ -161,21 +146,26 @@ class EmbClusterer:
             labels = clusterer.fit_predict(embedding_projection)
             probs = clusterer.probabilities_
 
-        # 6. Extract Interoperable Groups
+        # 6. Extract & Validate Groups
         df_out = df.copy()
         df_out['cluster_label'] = labels
         df_out['cluster_prob'] = probs
-        df_out['prediction'] = (labels != -1).astype(int)  # -1 is Noise
+        df_out['prediction'] = 0
 
         groups = self._extract_groups(df_out, labels, probs)
 
-        # 7. Evaluate
+        # 7. Apply Predictions
+        for grp in groups:
+            if grp.is_recurring:
+                cluster_id = int(grp.group_id.split("_")[1])
+                df_out.loc[df_out['cluster_label'] == cluster_id, 'prediction'] = 1
+
+        # 8. Evaluate
         metrics = self._evaluate(df_out)
 
         return ClusteringResult(groups=groups, clustered_df=df_out, metrics=metrics)
 
     def _extract_groups(self, df: pd.DataFrame, labels: np.ndarray, probs: np.ndarray) -> list[InteroperableGroup]:
-        """Converts raw cluster labels into business logic objects."""
         unique_labels = set(labels)
         if -1 in unique_labels:
             unique_labels.remove(-1)
@@ -185,13 +175,20 @@ class EmbClusterer:
             mask = (labels == label)
             cluster_rows = df[mask]
 
-            # Metadata stats
+            # Metadata
             text_mode = cluster_rows[self.field_config.text].mode()
             description = text_mode[0] if not text_mode.empty else "Unknown"
 
-            median_amount = float(cluster_rows[self.field_config.amount].median())
+            # Amount Stability
+            amounts = cluster_rows[self.field_config.amount]
+            median_amount = float(amounts.median())
 
-            # Cycle logic
+            amt_std = amounts.std()
+            amt_mean_abs = amounts.abs().mean()
+            if amt_mean_abs < 1e-3: amt_mean_abs = 1.0
+            amount_cv = amt_std / amt_mean_abs
+
+            # Cycle Logic
             dates = pd.to_datetime(cluster_rows[self.field_config.date]).sort_values()
             if len(dates) > 1:
                 diffs = dates.diff().dt.days.dropna()
@@ -199,8 +196,19 @@ class EmbClusterer:
             else:
                 cycle_days = 0.0
 
-            # Confidence is the mean probability of points belonging to this cluster
             confidence = float(probs[mask].mean())
+
+            # --- Filter Logic ---
+            is_valid = True
+
+            # 1. Variance Check
+            if amount_cv > self.max_amount_cv:
+                is_valid = False
+
+            # 2. Minimum Cycle Check (7 days +/- jitter)
+            # We use the configured threshold (default 6.0)
+            if cycle_days < self.min_cycle_days:
+                is_valid = False
 
             group = InteroperableGroup(
                 group_id=f"cluster_{label}",
@@ -208,30 +216,22 @@ class EmbClusterer:
                 amount_stats=median_amount,
                 cycle_days=cycle_days,
                 confidence=confidence,
-                is_recurring=True  # By definition of being in a cluster
+                is_recurring=is_valid
             )
             results.append(group)
 
         return results
 
     def _evaluate(self, df: pd.DataFrame) -> dict[str, float]:
-        """Calculates F1, Precision, Recall against the ground truth 'isRecurring'."""
         y_true = df[self.field_config.label].astype(int).values
         y_pred = df['prediction'].values
-
         p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
-        return {
-            "f1": float(f1),
-            "precision": float(p),
-            "recall": float(r)
-        }
+        return {"f1": float(f1), "precision": float(p), "recall": float(r)}
 
     def _empty_result(self, df: pd.DataFrame) -> ClusteringResult:
-        """Fallback for when clustering cannot run."""
         df_out = df.copy()
         df_out['cluster_label'] = -1
         df_out['cluster_prob'] = 0.0
         df_out['prediction'] = 0
-
         metrics = self._evaluate(df_out)
         return ClusteringResult(groups=[], clustered_df=df_out, metrics=metrics)
