@@ -20,6 +20,8 @@ import torch
 import pandas as pd
 import numpy as np
 from pathlib import Path
+
+from pytorch_forecasting import TimeSeriesDataSet
 from sklearn.metrics import precision_recall_fscore_support, precision_recall_curve
 
 from common.data import create_train_val_test_split
@@ -59,27 +61,36 @@ def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     print("=" * 50)
 
 
-def analyze_mistakes(train_ds, x, probs, y_true, y_pred):
+
+def analyze_mistakes(
+    template_ds: TimeSeriesDataSet,
+    x: dict[str, torch.Tensor],
+    probs: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> None:
     """
     Decodes the Group IDs to show specific false positives/negatives.
+    Uses x['groups'] to retrieve the Global Group ID.
     """
     try:
         # 1. Identify Group ID Column from encoders
-        # In tune5/6 this is 'global_group_id'
         target_group_col = 'global_group_id'
 
-        if target_group_col not in train_ds.categorical_encoders:
+        if target_group_col not in template_ds.categorical_encoders:
             logger.warning(f"Could not find '{target_group_col}' in dataset encoders. Skipping mistake analysis.")
             return
 
-        group_encoder = train_ds.categorical_encoders[target_group_col]
-        cat_names = train_ds.categoricals
-        idx = cat_names.index(target_group_col)
+        group_encoder = template_ds.categorical_encoders[target_group_col]
 
-        # 2. Extract IDs
-        # decoder_cat shape: [Batch, Time, NumCats]
-        # Groups are static, so Time=0 is fine
-        group_codes = x['decoder_cat'][:, 0, idx].cpu()
+        # FIX: Check x['groups'] instead of decoder_cat
+        if 'groups' not in x:
+             logger.warning("'groups' key missing in prediction output x. Cannot decode groups.")
+             return
+
+        # x['groups'] shape: [Batch, n_groups]
+        # Since group_ids=["global_group_id"], our target is at index 0.
+        group_codes = x['groups'][:, 0].cpu()
         group_ids = group_encoder.inverse_transform(group_codes)
 
         # 3. Build Analysis DataFrame
