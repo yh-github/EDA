@@ -325,3 +325,24 @@ def filter_unique_bank_variants(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f"Filtered row count: {len(filtered_df)} (Dropped {len(df) - len(filtered_df)} overlapping rows)")
     return filtered_df
+
+
+def clean_text(series, hide_digits=False, trunc_repeating=True, lower=True):
+    """
+    Applies vectorized text cleaning operations on a pandas Series.
+    """
+    # Base clean: Convert to string and strip whitespace
+    series = series.astype(str).str.strip()
+
+    if lower:
+        series = series.str.lower()
+
+    if hide_digits:
+        # Replace sequences of 3 or more digits with '###'
+        series = series.str.replace(r'\d{3,}', '###', regex=True)
+
+    if trunc_repeating:
+        # Replace sequences of 3 or more IDENTICAL characters with just 3 of them
+        series = series.str.replace(r'(.)\1{2,}', r'\1\1\1', regex=True)
+
+    return series

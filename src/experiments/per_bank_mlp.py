@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 from common.config import ExperimentConfig, FieldConfig, EmbModel
-from common.data import filter_unique_bank_variants
+from common.data import filter_unique_bank_variants, clean_text
 from common.feature_processor import FeatProcParams
 from pointwise.classifier import HybridModel
 from common.embedder import EmbeddingService
@@ -95,9 +95,6 @@ def clean_and_filter_data(
     if bank_name not in df.columns:
         raise ValueError("Column 'bank_name' missing from data file.")
 
-    # 1. Remove digits from bank_name
-    df[bank_name] = df[bank_name].astype(str).str.replace(r'\d+', '', regex=True).str.strip()
-
     # 2. Filter Amount
     if filter_amount > 0:
         df = df[df[field_config.amount] > 0].copy()
@@ -111,6 +108,8 @@ def clean_and_filter_data(
     valid_accounts = acc_counts[acc_counts >= min_len].index
     df = df[df[field_config.accountId].isin(valid_accounts)].copy()
     logger.info(f"After account count >= {min_len} filter: {len(df)} rows, {len(valid_accounts)} accounts")
+
+    df[field_config.text] = clean_text(df[field_config.text])
 
     return df
 
@@ -132,7 +131,10 @@ def run_bank_benchmark():
         logger.error(f"File not found: {args.data_path}")
         return
 
-    df_clean = clean_and_filter_data(filter_unique_bank_variants(full_df), field_config)
+    df_clean = clean_and_filter_data(
+        filter_unique_bank_variants(full_df),
+        field_config
+    )
 
     # --- 3. Initialize Runner ---
     # We create one runner instance to manage embeddings and shared logic.
@@ -148,7 +150,7 @@ def run_bank_benchmark():
 
     # --- 4. Per-Bank Loop ---
     results_list = []
-    unique_banks = df_clean['bank_name'].unique()
+    unique_banks = df_clean[field_config.bank_name].unique()
     logger.info(f"Found {len(unique_banks)} unique banks: {unique_banks}")
 
     # Prepare CSV header by creating empty file (or overwrite)
@@ -157,13 +159,16 @@ def run_bank_benchmark():
     print(f"\n{'Bank Name':<30} | {'F1':<6} | {'Prec':<6} | {'Rec':<6} | {'Best F1':<8} | {'Thresh':<6}")
     print("-" * 80)
 
+    TRAIN_SIZE = 750
+    TEST_SIZE = 250
+
     for bank in unique_banks:
         bank_df = df_clean[df_clean['bank_name'] == bank]
         unique_accounts = bank_df[field_config.accountId].unique()
         n_accounts = len(unique_accounts)
 
         # Check sufficiency
-        if n_accounts < 2000:
+        if n_accounts < TRAIN_SIZE + TEST_SIZE:
             logger.warning(f"Skipping bank '{bank}': Only {n_accounts} accounts (need 2000 for 1k/1k split).")
             continue
 
@@ -172,8 +177,8 @@ def run_bank_benchmark():
         rng = np.random.RandomState(exp_config.random_state)
         shuffled_accs = rng.permutation(unique_accounts)
 
-        train_accs = shuffled_accs[:1000]
-        test_accs = shuffled_accs[1000:2000]
+        train_accs = shuffled_accs[:TRAIN_SIZE]
+        test_accs = shuffled_accs[TRAIN_SIZE:(TRAIN_SIZE+TEST_SIZE)]
 
         df_train = bank_df[bank_df[field_config.accountId].isin(train_accs)]
         df_test = bank_df[bank_df[field_config.accountId].isin(test_accs)]
