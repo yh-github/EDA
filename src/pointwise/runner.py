@@ -400,7 +400,7 @@ class ExpRunner:
             **final_metrics_rounded,
             **diagnostics,
             "embedder.model_name": str(self.emb_params.model_name)
-        }, model, feature_config
+        }, model
 
     def run_training_set_size(self, fractions: list[float]) -> dict[int, dict]:
         df_train, df_test = self.split_data_by_group()
