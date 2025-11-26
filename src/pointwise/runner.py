@@ -20,10 +20,12 @@ from pointwise.trainer import PyTorchTrainer
 
 logger = logging.getLogger(__name__)
 
-ModelParams = HybridModel.MlpHyperParams|TransformerHyperParams
+ModelParams = HybridModel.MlpHyperParams | TransformerHyperParams
 
-def r(x: float| floating[Any]) -> float:
+
+def r(x: float | floating[Any]) -> float:
     return round(float(x), 3)
+
 
 @dataclass(frozen=True)
 class ExpData:
@@ -32,10 +34,11 @@ class ExpData:
     y_train: np.ndarray
     y_test: np.ndarray
 
+
 class ExpRunner:
 
     @classmethod
-    def copy(cls, other:Self) -> Self:
+    def copy(cls, other: Self) -> Self:
         return ExpRunner(
             exp_params=other.exp_params,
             full_df=other.full_df,
@@ -47,24 +50,24 @@ class ExpRunner:
 
     @staticmethod
     def create(
-        exp_params: ExperimentConfig,
-        full_df:pd.DataFrame,
-        emb_params:EmbeddingService.Params,
-        feat_proc_params:FeatProcParams,
-        model_params:ModelParams,
-        field_config:FieldConfig = FieldConfig()
+            exp_params: ExperimentConfig,
+            full_df: pd.DataFrame,
+            emb_params: EmbeddingService.Params,
+            feat_proc_params: FeatProcParams,
+            model_params: ModelParams,
+            field_config: FieldConfig = FieldConfig()
     ):
         set_global_seed(exp_params.random_state)
         return ExpRunner(exp_params, full_df, emb_params, feat_proc_params, model_params, field_config)
 
     def __init__(self,
-        exp_params: ExperimentConfig,
-        full_df: pd.DataFrame,
-        emb_params: EmbeddingService.Params,
-        feat_proc_params: FeatProcParams,
-        model_params: ModelParams,
-        field_config: FieldConfig = FieldConfig()
-    ):
+                 exp_params: ExperimentConfig,
+                 full_df: pd.DataFrame,
+                 emb_params: EmbeddingService.Params,
+                 feat_proc_params: FeatProcParams,
+                 model_params: ModelParams,
+                 field_config: FieldConfig = FieldConfig()
+                 ):
         self.exp_params = exp_params
         self.full_df = full_df
         self.emb_params = emb_params
@@ -74,7 +77,7 @@ class ExpRunner:
         self.field_config = field_config
         self.embedder_map: dict[EmbModel, EmbeddingService] = {}
 
-    def get_embedder(self, model_params:EmbeddingService.Params) -> EmbeddingService:
+    def get_embedder(self, model_params: EmbeddingService.Params) -> EmbeddingService:
         model_name = model_params.model_name
         if model_name not in self.embedder_map:
             logger.info(f"Creating new EmbeddingService(model_name={model_name})")
@@ -104,7 +107,7 @@ class ExpRunner:
         try:
             train_idx, test_idx = next(gss.split(
                 full_df,
-                y=full_df[field_config.label], # stratified
+                y=full_df[field_config.label],  # stratified
                 groups=full_df[field_config.accountId]  # crucial
             ))
         except ValueError as e:
@@ -128,7 +131,7 @@ class ExpRunner:
             logger.error(f"FATAL LEAKAGE: {len(overlap)} accounts are in BOTH sets.")
             raise AssertionError("Data leakage detected! Account overlap in train/test.")
 
-        def df_stats(df:pd.DataFrame) -> str:
+        def df_stats(df: pd.DataFrame) -> str:
             return f"len={len(df)} accounts={df[self.field_config.accountId].nunique()}"
 
         logger.info(f"Split complete. Train: {df_stats(train_df)}, Test: {df_stats(test_df)}.")
@@ -136,9 +139,9 @@ class ExpRunner:
         return train_df, test_df
 
     def create_learning_curve_splits(
-        self,
-        full_train_df: pd.DataFrame,
-        fractions: list[float],
+            self,
+            full_train_df: pd.DataFrame,
+            fractions: list[float],
     ) -> Generator[tuple[float, pd.DataFrame], None, None]:
         """
         Takes the *full* training set and yields smaller, fractional subsets
@@ -183,98 +186,94 @@ class ExpRunner:
             yield frac, sub_df
 
     def build_data(
-        self,
-        df_train_frac: pd.DataFrame,
-        df_test: pd.DataFrame
+            self,
+            df_train_frac: pd.DataFrame,
+            df_test: pd.DataFrame
     ) -> tuple[FeatureSet, FeatureSet, HybridFeatureProcessor, FeatureMetadata]:
         """
-        Builds all feature sets (text, continuous, categorical) for the model.
-        This method is now driven entirely by the FeatureMetadata returned
-        from the processor.
+        Standard 2-way build (Train/Test). Fits on Train.
         """
+        return self._build_data_internal(df_train_frac, df_test, None)
 
-        # --- 1. Get Text Embeddings and Labels ---
+    def build_data_three_way(
+            self,
+            df_train: pd.DataFrame,
+            df_val: pd.DataFrame,
+            df_test: pd.DataFrame
+    ) -> tuple[FeatureSet, FeatureSet, FeatureSet, HybridFeatureProcessor, FeatureMetadata]:
+        """
+        3-way build (Train/Val/Test). Fits on Train, transforms all three.
+        """
+        train_fs, val_fs, processor, meta, test_fs = self._build_data_internal(df_train, df_val, df_test)
+        return train_fs, val_fs, test_fs, processor, meta
+
+    def _build_data_internal(self, df_train, df_val, df_test=None):
+        """Shared logic for building feature sets."""
+
+        # 1. Embeddings
         embedder = self.get_embedder(self.emb_params)
-        y_train = df_train_frac[self.field_config.label].values
-        y_test = df_test[self.field_config.label].values
 
-        logger.info(f"Embedding {len(df_train_frac)} train texts...")
-        X_text_train = embedder.embed(df_train_frac[self.field_config.text].tolist())
+        def get_text_emb(df):
+            return embedder.embed(df[self.field_config.text].tolist())
 
-        logger.info(f"Embedding {len(df_test)} test texts...")
-        X_text_test = embedder.embed(df_test[self.field_config.text].tolist())
+        X_text_train = get_text_emb(df_train)
+        X_text_val = get_text_emb(df_val)
+        X_text_test = get_text_emb(df_test) if df_test is not None else None
 
-        # --- 2. Fit and Transform Date/Amount Features ---
+        # 2. Feature Processor
         processor = HybridFeatureProcessor.create(self.feat_proc_params, self.field_config)
+        metadata = processor.fit(df_train)  # Fit ONLY on Train
 
-        # Fit on train data and get the metadata
-        metadata = processor.fit(df_train_frac)
+        df_train_feats = processor.transform(df_train)
+        df_val_feats = processor.transform(df_val)
+        df_test_feats = processor.transform(df_test) if df_test is not None else None
 
-        # Transform both train and test
-        train_features_df = processor.transform(df_train_frac)
-        test_features_df = processor.transform(df_test)
-
-        # --- 3. Get Feature Lists from Metadata ---
+        # 3. Scaling & Stacking
         cyclical_cols = metadata.cyclical_cols
         continuous_scalable_cols = metadata.continuous_scalable_cols
         categorical_cols = list(metadata.categorical_features.keys())
 
-        # --- 4. Build Continuous Features Array (X_continuous) ---
-        # This list will hold the arrays to be concatenated
-        train_cont_arrays_to_stack = []
-        test_cont_arrays_to_stack = []
+        scaler = StandardScaler()
 
-        # Add cyclical (unscaled) features if they exist
-        if cyclical_cols:
-            train_cont_arrays_to_stack.append(train_features_df[cyclical_cols].values)
-            test_cont_arrays_to_stack.append(test_features_df[cyclical_cols].values)
-
-        # Add scaled continuous features if they exist
+        # Fit scaler ONLY on Train
         if continuous_scalable_cols:
-            scaler = StandardScaler()
-            X_cont_scaled_train = scaler.fit_transform(train_features_df[continuous_scalable_cols])
-            X_cont_scaled_test = scaler.transform(test_features_df[continuous_scalable_cols])
+            scaler.fit(df_train_feats[continuous_scalable_cols])
 
-            train_cont_arrays_to_stack.append(X_cont_scaled_train)
-            test_cont_arrays_to_stack.append(X_cont_scaled_test)
+        def build_fs(df_original, df_feats, x_text):
+            y = df_original[self.field_config.label].values
 
-        # Concatenate all continuous features
-        if train_cont_arrays_to_stack:
-            X_cont_train = np.concatenate(train_cont_arrays_to_stack, axis=1)
-            X_cont_test = np.concatenate(test_cont_arrays_to_stack, axis=1)
-        else:
-            # Handle edge case where no continuous/cyclical features are made
-            X_cont_train = np.empty((len(df_train_frac), 0))
-            X_cont_test = np.empty((len(df_test), 0))
+            # Continuous
+            cont_parts = []
+            if cyclical_cols:
+                cont_parts.append(df_feats[cyclical_cols].values)
+            if continuous_scalable_cols:
+                cont_parts.append(scaler.transform(df_feats[continuous_scalable_cols]))
 
-        # --- 5. Build Categorical Features Array (X_categorical) ---
-        # This works even if categorical_cols is empty (creates an [N, 0] array)
-        X_cat_train = train_features_df[categorical_cols].values
-        X_cat_test = test_features_df[categorical_cols].values
+            if cont_parts:
+                X_cont = np.concatenate(cont_parts, axis=1)
+            else:
+                X_cont = np.empty((len(df_original), 0))
 
-        # --- 6. Package into FeatureSet Dataclasses ---
-        train_feature_set = FeatureSet(
-            X_text=X_text_train,
-            X_continuous=X_cont_train,
-            X_categorical=X_cat_train,
-            y=y_train
-        )
+            # Categorical
+            X_cat = df_feats[categorical_cols].values
 
-        test_feature_set = FeatureSet(
-            X_text=X_text_test,
-            X_continuous=X_cont_test,
-            X_categorical=X_cat_test,
-            y=y_test
-        )
+            return FeatureSet(X_text=x_text, X_continuous=X_cont, X_categorical=X_cat, y=y)
 
-        return train_feature_set, test_feature_set, processor, metadata
+        train_fs = build_fs(df_train, df_train_feats, X_text_train)
+        val_fs = build_fs(df_val, df_val_feats, X_text_val)
+
+        if df_test is not None:
+            test_fs = build_fs(df_test, df_test_feats, X_text_test)
+            return train_fs, val_fs, processor, metadata, test_fs
+
+        return train_fs, val_fs, processor, metadata
 
     @classmethod
     def _calculate_optimal_threshold_metrics(
-        cls,
-        model: nn.Module,
-        data_loader: DataLoader,
-        device: torch.device
+            cls,
+            model: nn.Module,
+            data_loader: DataLoader,
+            device: torch.device
     ) -> dict[str, Any]:
         """
         Evaluates the model on a dataset, calculates the Precision-Recall curve,
@@ -326,28 +325,12 @@ class ExpRunner:
             }
         }
 
-    def run_experiment(
-        self,
-        train_features: FeatureSet,
-        test_features: FeatureSet,
-        metadata: FeatureMetadata
-    ):
-        return self.do_run_experiment(train_features, test_features, metadata)[0]
-
-
-    def do_run_experiment(
-        self,
-        train_features: FeatureSet,
-        test_features: FeatureSet,
-        metadata: FeatureMetadata
-    ):
-        # --- Use params from config ---
+    def _setup_training(self, train_features: FeatureSet, test_features: FeatureSet, metadata: FeatureMetadata):
         DEVICE = get_device()
         NUM_EPOCHS = self.exp_params.epochs
         BATCH_SIZE = self.exp_params.batch_size
         LEARNING_RATE = self.exp_params.learning_rate
 
-        # --- Create DataLoaders ---
         train_dataset = TransactionDataset(train_features)
         test_dataset = TransactionDataset(test_features)
 
@@ -366,15 +349,12 @@ class ExpRunner:
         train_loader = dataloader(train_dataset, is_train=True)
         test_loader = dataloader(test_dataset, is_train=False)
 
-        # --- Instantiate the Model ---
         feature_config = FeatureHyperParams.build(train_features, metadata)
         model = self.build_model(feature_config).to(DEVICE)
 
-        # --- Setup Optimizer and Loss ---
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # --- Create and run the Trainer ---
         trainer = PyTorchTrainer(
             model=model,
             optimizer=optimizer,
@@ -383,24 +363,42 @@ class ExpRunner:
             patience=self.exp_params.early_stopping_patience
         )
 
+        return trainer, model, train_loader, test_loader, DEVICE, NUM_EPOCHS
+
+    def run_experiment(
+            self,
+            train_features: FeatureSet,
+            test_features: FeatureSet,
+            metadata: FeatureMetadata
+    ):
+        return self.do_run_experiment(train_features, test_features, metadata)[0]
+
+    def do_run_experiment(
+            self,
+            train_features: FeatureSet,
+            test_features: FeatureSet,
+            metadata: FeatureMetadata
+    ):
+        trainer, model, train_loader, test_loader, DEVICE, NUM_EPOCHS = self._setup_training(train_features,
+                                                                                             test_features, metadata)
         final_metrics = trainer.fit(train_loader, test_loader, NUM_EPOCHS)
-
         diagnostics = self._calculate_optimal_threshold_metrics(model, test_loader, DEVICE)
-
-        logger.info(f"  Default F1 (0.5): {final_metrics['f1']:.4f} | "
-                    f"Potential Best F1: {diagnostics['val_best_f1']:.4f} "
-                    f"(thresh={diagnostics['val_best_threshold']:.4f})")
-
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
+        return {**final_metrics_rounded, **diagnostics, "embedder.model_name": str(self.emb_params.model_name)}, model
 
-        if trainer.best_model_state is not None:
-            model.load_state_dict(trainer.best_model_state)
-
-        return {
-            **final_metrics_rounded,
-            **diagnostics,
-            "embedder.model_name": str(self.emb_params.model_name)
-        }, model
+    def run_experiment_and_return_model(
+            self,
+            train_features: FeatureSet,
+            test_features: FeatureSet,
+            metadata: FeatureMetadata
+    ):
+        """
+        Runs training and returns the trained model (restored to best state)
+        along with metrics.
+        """
+        # Re-use logic via do_run_experiment
+        metrics, model = self.do_run_experiment(train_features, test_features, metadata)
+        return metrics, model
 
     def run_training_set_size(self, fractions: list[float]) -> dict[int, dict]:
         df_train, df_test = self.split_data_by_group()
@@ -519,7 +517,6 @@ class ExpRunner:
             'feature_config': model.feature_config
         }
         torch.save(payload, path)
-
 
     def load_checkpoint(self, path: str | Path):
         """Saves model weights AND configuration in one file."""
