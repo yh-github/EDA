@@ -3,9 +3,10 @@ import pandas as pd
 import argparse
 from pathlib import Path
 from sklearn.metrics import precision_recall_fscore_support, classification_report
+from sklearn.model_selection import GroupShuffleSplit  # Added import
 
 from common.config import FieldConfig, EmbModel, ExperimentConfig
-from common.data import create_train_val_test_split
+# Removed create_train_val_test_split import to avoid confusion
 from common.feature_processor import FeatProcParams
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
@@ -26,7 +27,7 @@ def run_pipeline():
     args = parse_args()
     setup_logging(Path("logs/"), "supervised_clustering")
 
-    # 1. Load & Split Data
+    # 1. Load Data
     logger.info("Loading Data...")
     df = pd.read_csv(args.data_path)
     field_config = FieldConfig()
@@ -34,13 +35,19 @@ def run_pipeline():
     df_clean[field_config.label] = df_clean[field_config.label].astype(int)
 
     exp_config = ExperimentConfig()
-    # Using Standard Split
-    train_df, _, test_df = create_train_val_test_split(
-        test_size=0.2, val_size=0.0,  # Use all non-test for training
-        full_df=df_clean,
-        random_state=exp_config.random_state,
-        field_config=field_config
-    )
+
+    # --- FIX: Direct 2-Way Split (Train/Test) ---
+    logger.info(f"Splitting Data (Train/Test) with random_state={exp_config.random_state}...")
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=exp_config.random_state)
+
+    # Split by Account ID to prevent leakage
+    train_idx, test_idx = next(gss.split(df_clean, groups=df_clean[field_config.accountId]))
+
+    train_df = df_clean.iloc[train_idx].copy()
+    test_df = df_clean.iloc[test_idx].copy()
+
+    logger.info(f"Train: {len(train_df)} rows ({train_df[field_config.accountId].nunique()} accounts)")
+    logger.info(f"Test:  {len(test_df)} rows ({test_df[field_config.accountId].nunique()} accounts)")
 
     # 2. Setup Components
     emb_service = EmbeddingService.create(EmbeddingService.Params(model_name=EmbModel.MPNET, batch_size=512))
@@ -52,10 +59,10 @@ def run_pipeline():
         use_categorical_amount=False
     )
 
-    # Relaxed Clusterer for Recall
+    # Relaxed Clusterer for High Recall (Candidate Generation)
     clusterer = EmbClusterer(
         field_config, feat_params, emb_service,
-        min_samples=2,  # Catch everything
+        min_samples=2,  # Catch everything (pairs)
         cluster_epsilon=0.0,  # Tight clusters
         use_gpu=args.gpu
     )
@@ -67,6 +74,7 @@ def run_pipeline():
     train_candidates = []
 
     # Iterate Train Accounts
+    # GroupBy is safe here because train_df contains only training accounts
     for _, acc_df in train_df.groupby(field_config.accountId):
         try:
             _, cands = clusterer.extract_candidates(acc_df)
@@ -115,7 +123,7 @@ def run_pipeline():
     logger.info("FINAL TEST RESULTS")
     logger.info("=" * 50)
 
-    p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary')
+    p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
     logger.info(f"Precision : {p:.4f}")
     logger.info(f"Recall    : {r:.4f}")
     logger.info(f"F1 Score  : {f1:.4f}")
