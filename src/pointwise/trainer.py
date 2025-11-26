@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score
 from pointwise.classifier import HybridModel
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,8 @@ class PyTorchTrainer:
             'loss': total_loss / len(test_loader),
             'accuracy': accuracy_score(all_y_true, all_y_pred),
             'f1': f1_score(all_y_true, all_y_pred, zero_division=0),
+            'precision': precision_score(all_y_true, all_y_pred, zero_division=0),
+            'recall': recall_score(all_y_true, all_y_pred, zero_division=0),
             'roc_auc': roc_auc_score(all_y_true, all_y_pred_proba)
         }
 
