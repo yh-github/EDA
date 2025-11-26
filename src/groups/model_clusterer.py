@@ -91,7 +91,7 @@ class ModelBasedClusterer:
                 embedding_projection = reducer.fit_transform(latent_vectors)
             else:
                 reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine',
-                                    random_state=42)
+                                    random_state=42, n_jobs=1)
                 embedding_projection = reducer.fit_transform(latent_vectors)
         else:
             # Skip Dim Reduction for tiny datasets
