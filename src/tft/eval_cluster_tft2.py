@@ -49,8 +49,13 @@ def analyze_mistakes_simple(
     4. Logs high-level stats.
     """
     try:
+        # FIX: Flatten all inputs to ensure they are 1D (avoids ValueError: 2)
+        group_ids = np.array(group_ids).flatten()
+        probs = np.array(probs).flatten()
+        y_true = np.array(y_true).flatten()
+        y_pred = np.array(y_pred).flatten()
+
         # 1. Create a Lookup for Group-Level Scores
-        # group_ids, probs, y_true, y_pred are all aligned (1 row per Group)
         group_preds = pd.DataFrame({
             'global_group_id': group_ids,
             'Group_Prob': probs,
@@ -109,6 +114,7 @@ def analyze_mistakes_simple(
 
     except Exception as e:
         logger.error(f"Error during mistake analysis: {e}", exc_info=True)
+
 
 def analyze_mistakes_simple_OK(
     index_df: pd.DataFrame,
