@@ -14,7 +14,7 @@ BATCH_SIZE = 2048
 # Increase epochs slightly as we are narrowing in on a stable region
 MAX_EPOCHS = 25
 N_TRIALS = 10
-STUDY_NAME = "tft_tune5_refinement"
+STUDY_NAME = "tft_tune6_refinement"
 BEST_MODEL_PATH = "cache/tft_models/best_tune6_model.pt"
 
 if __name__ == "__main__":
