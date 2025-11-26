@@ -2,6 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_recall_fscore_support
 
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ClusteringResult:
-    """Holds the results of the clustering process for an account."""
     groups: list[InteroperableGroup]
     clustered_df: pd.DataFrame
     metrics: dict[str, float]
@@ -41,8 +41,8 @@ class ClusteringResult:
 
 class EmbClusterer:
     """
-    Clusters transactions for a single account using Hybrid Embeddings.
-    Includes post-clustering filters for Amount Stability and Cycle Quality.
+    Clusters transactions using Balanced Hybrid Embeddings (PCA-Text + Dense Features).
+    Enforces strict Period Stability to distinguish 'Recurring' from 'Frequent'.
     """
 
     def __init__(
@@ -50,15 +50,16 @@ class EmbClusterer:
             field_config: FieldConfig,
             feat_params: FeatProcParams,
             emb_service: EmbeddingService,
-            min_samples: int = 3,
+            min_samples: int = 2,  # Lowered to capture pairs
             umap_components: int = 5,
             umap_neighbors: int = 15,
-            cluster_epsilon: float = 0.5,
+            cluster_epsilon: float = 0.0,  # Tighter clusters
             use_gpu: bool = True,
             # --- Filters ---
-            max_amount_cv: float = 0.1,  # Coefficient of Variation (Std/Mean)
-            # Updated: Enforce Weekly (7 days) with jitter (e.g., >= 6.0 days)
-            min_cycle_days: float = 6.0
+            max_amount_cv: float = 0.1,  # Amount Stability
+            min_cycle_days: float = 6.0,  # Minimum Period
+            max_period_std: float = 3.5,  # New: Period STABILITY (Standard Deviation of gaps)
+            text_pca_components: int = 16  # New: Compress text to balance features
     ):
         self.field_config = field_config
         self.feat_params = feat_params
@@ -70,6 +71,8 @@ class EmbClusterer:
 
         self.max_amount_cv = max_amount_cv
         self.min_cycle_days = min_cycle_days
+        self.max_period_std = max_period_std
+        self.text_pca_components = text_pca_components
 
         self.use_gpu = use_gpu and HAS_GPU_CLUSTERING
         if use_gpu and not HAS_GPU_CLUSTERING:
@@ -79,7 +82,7 @@ class EmbClusterer:
         if len(df) < self.min_samples:
             return self._empty_result(df)
 
-        # 1. Feature Generation
+        # 1. Dense Features (Date/Amount)
         processor = HybridFeatureProcessor(self.feat_params, self.field_config)
         meta = processor.fit(df)
         features_df = processor.transform(df)
@@ -87,17 +90,32 @@ class EmbClusterer:
         dense_cols = meta.continuous_scalable_cols + meta.cyclical_cols
         X_dense = features_df[dense_cols].values
 
-        # 2. Text Embeddings
+        # 2. Text Embeddings with PCA Compression
         texts = df[self.field_config.text].tolist()
-        X_text = self.emb_service.embed(texts)
+        X_text_raw = self.emb_service.embed(texts)
 
-        # 3. Hybrid Vector
+        # We perform PCA on text to prevent it from overwhelming the dense features
+        # If dataset is too small for PCA, use raw (sliced)
+        n_samples = X_text_raw.shape[0]
+        n_comps = min(self.text_pca_components, n_samples)
+
+        if n_comps < 2:
+            X_text_compressed = X_text_raw[:, :self.text_pca_components]
+        else:
+            pca = PCA(n_components=n_comps)
+            X_text_compressed = pca.fit_transform(X_text_raw)
+
+        # 3. Balanced Hybrid Vector
+        # We scale dense features to have unit variance, similar to PCA output
         if X_dense.shape[1] > 0:
             scaler = StandardScaler()
             X_dense_scaled = scaler.fit_transform(X_dense)
-            X_hybrid = np.hstack([X_text, X_dense_scaled])
+
+            # Optional: Weighting can be applied here.
+            # Currently treating 16 Text Dims roughly equal to 10 Dense Dims.
+            X_hybrid = np.hstack([X_text_compressed, X_dense_scaled])
         else:
-            X_hybrid = X_text
+            X_hybrid = X_text_compressed
 
         # 4. UMAP
         n_neighbors = min(self.umap_neighbors, len(df) - 1)
@@ -109,7 +127,7 @@ class EmbClusterer:
                 n_neighbors=n_neighbors,
                 n_components=self.umap_components,
                 min_dist=0.0,
-                metric='cosine',
+                metric='cosine',  # Cosine on the hybrid vector handles the mix well
                 random_state=42
             )
         else:
@@ -133,7 +151,6 @@ class EmbClusterer:
             )
             labels = clusterer.fit_predict(embedding_projection)
             probs = getattr(clusterer, 'probabilities_', np.ones_like(labels))
-
             if hasattr(labels, 'get'): labels = labels.get()
             if hasattr(probs, 'get'): probs = probs.get()
         else:
@@ -154,15 +171,12 @@ class EmbClusterer:
 
         groups = self._extract_groups(df_out, labels, probs)
 
-        # 7. Apply Predictions
         for grp in groups:
             if grp.is_recurring:
                 cluster_id = int(grp.group_id.split("_")[1])
                 df_out.loc[df_out['cluster_label'] == cluster_id, 'prediction'] = 1
 
-        # 8. Evaluate
         metrics = self._evaluate(df_out)
-
         return ClusteringResult(groups=groups, clustered_df=df_out, metrics=metrics)
 
     def _extract_groups(self, df: pd.DataFrame, labels: np.ndarray, probs: np.ndarray) -> list[InteroperableGroup]:
@@ -179,35 +193,44 @@ class EmbClusterer:
             text_mode = cluster_rows[self.field_config.text].mode()
             description = text_mode[0] if not text_mode.empty else "Unknown"
 
-            # Amount Stability
             amounts = cluster_rows[self.field_config.amount]
             median_amount = float(amounts.median())
 
-            amt_std = amounts.std()
+            # Amount Stability
             amt_mean_abs = amounts.abs().mean()
-            if amt_mean_abs < 1e-3: amt_mean_abs = 1.0
-            amount_cv = amt_std / amt_mean_abs
+            amount_cv = amounts.std() / amt_mean_abs if amt_mean_abs > 1e-3 else 0.0
 
-            # Cycle Logic
+            # Cycle Logic (Robust)
             dates = pd.to_datetime(cluster_rows[self.field_config.date]).sort_values()
+            cycle_days = 0.0
+            period_std = 999.0  # High default variance
+
             if len(dates) > 1:
                 diffs = dates.diff().dt.days.dropna()
                 cycle_days = float(diffs.median())
-            else:
-                cycle_days = 0.0
+                if len(diffs) > 1:
+                    period_std = float(diffs.std())
+                else:
+                    # If only 2 transactions, we can't measure stability of the interval
+                    # We assume it's stable if the amount is stable
+                    period_std = 0.0
 
             confidence = float(probs[mask].mean())
 
             # --- Filter Logic ---
             is_valid = True
 
-            # 1. Variance Check
+            # 1. Variance Check (Ad-hoc spending)
             if amount_cv > self.max_amount_cv:
                 is_valid = False
 
-            # 2. Minimum Cycle Check (7 days +/- jitter)
-            # We use the configured threshold (default 6.0)
+            # 2. Min Cycle (Bursts)
             if cycle_days < self.min_cycle_days:
+                is_valid = False
+
+            # 3. Period Stability (Regularity)
+            # A true subscription has consistent intervals.
+            if period_std > self.max_period_std:
                 is_valid = False
 
             group = InteroperableGroup(
