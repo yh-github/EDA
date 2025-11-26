@@ -7,7 +7,6 @@ from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader
-from classifier import HybridModel
 from classifier_transformer import TransformerHyperParams, TabularTransformerModel
 from common.config import *
 from common.config import EmbModel
@@ -15,6 +14,7 @@ from common.data import TransactionDataset, FeatureSet, TrainingSample, create_t
 from common.embedder import EmbeddingService
 from common.exp_utils import set_global_seed
 from common.feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureMetadata, FeatureHyperParams
+from pointwise.classifier import HybridModel
 from trainer import PyTorchTrainer
 
 logger = logging.getLogger(__name__)
