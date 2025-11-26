@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from sklearn.metrics import classification_report
-
 from common.config import ExperimentConfig, FieldConfig, EmbModel
 from common.data import FeatureSet
 from common.feature_processor import FeatProcParams
@@ -48,34 +47,33 @@ def run_experiment():
 
     mlp_params = HybridModel.MlpHyperParams(
         mlp_hidden_layers=[128, 64],
-        dropout_rate=0.25,
-        text_projection_dim=64  # Project text to 64 dims so it mixes well
+        dropout_rate=0.25
     )
 
     runner = ExpRunner.create(exp_config, df_clean, emb_params, feat_params, mlp_params, field_config)
 
     # Create Splits
     df_train, df_test = runner.split_data_by_group()
-
     logger.info(">>> STEP 1: Training Pointwise Model (The Embedder)...")
     # Build data for training
     train_fs, test_fs, processor, meta = runner.build_data(df_train, df_test)
 
     # Train
-    feature_config = runner.get_feature_config(train_fs, meta)  # Need helper or recreate logic
-    # (Reusing runner internals via public API if possible, else manual train)
-    # Runner.run_experiment does training + eval. We can use that.
-    metrics = runner.run_experiment(train_fs, test_fs, meta)
+    save_path = Path("cache/mlp_models/for_clustering.pt")
+    if not save_path.exists():
+        metrics, model = runner.do_run_experiment(
+            train_features=train_fs,
+            test_features=test_fs,
+            metadata=meta
+        )
+        runner.save_model(model, save_path)
+    else:
+        model = runner.load_checkpoint(save_path)
+        metrics = "Model loaded and not tested again"
+
     logger.info(f"Pointwise Test Metrics: {metrics}")
 
-    # Extract the trained model
-    # Since run_experiment builds a local model, we need to reconstruct it
-    # and load weights or just modify runner to return it.
-    # Hack: For this script, let's just Re-Build and Re-Train manually to hold the reference.
-
-    model = runner.build_model(feature_config).to(runner.get_device())
-    # ... (Train manually for 1 epoch or reuse logic if refactored) ...
-    # Assuming we have a trained 'model' now.
+    model = model.to(runner.get_device())
 
     # >>> START CLUSTERING <<<
     logger.info(">>> STEP 2: Running Model-Based Clustering on Test Set...")

@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import Self, Generator, Any
 import pandas as pd
 from numpy import floating
@@ -331,6 +332,15 @@ class ExpRunner:
         test_features: FeatureSet,
         metadata: FeatureMetadata
     ):
+        return self.do_run_experiment(train_features, test_features, metadata)[0]
+
+
+    def do_run_experiment(
+        self,
+        train_features: FeatureSet,
+        test_features: FeatureSet,
+        metadata: FeatureMetadata
+    ):
         # --- Use params from config ---
         DEVICE = get_device()
         NUM_EPOCHS = self.exp_params.epochs
@@ -383,11 +393,13 @@ class ExpRunner:
 
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
 
+        model.load_state_dict(trainer.best_model_state())
+
         return {
             **final_metrics_rounded,
             **diagnostics,
             "embedder.model_name": str(self.emb_params.model_name)
-        }
+        }, model, feature_config
 
     def run_training_set_size(self, fractions: list[float]) -> dict[int, dict]:
         df_train, df_test = self.split_data_by_group()
@@ -490,3 +502,37 @@ class ExpRunner:
 
         else:
             raise TypeError(f"Unknown model_params type: {type(self.model_params)}")
+
+    def save_checkpoint(self, model: HybridModel, path: str | Path):
+        """Saves model weights AND configuration in one file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Create payload
+        payload = {
+            "state_dict": model.state_dict(),
+            'emb_params': self.emb_params,
+            'feat_proc_params': self.feat_proc_params,
+            'model_params': self.model_params,
+            'exp_config': self.exp_params,
+            'field_config': self.field_config,
+            'feature_config': model.feature_config
+        }
+        torch.save(payload, path)
+
+
+    def load_checkpoint(self, path: str | Path):
+        """Saves model weights AND configuration in one file."""
+        payload = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
+        # Create payload
+        # TODO update self
+        # runner = cls.create(
+        #     emb_params=payload['emb_params'],
+        #     feat_proc_params=payload['feat_proc_params'],
+        #     model_params=payload['model_params'],
+        #     full_df=df_full,
+        #     field_config=payload['field_config'],
+        #     exp_params=payload['exp_params']
+        # )
+        model = self.build_model(feature_config=payload['feature_config'])
+        model.load_state_dict(payload['state_dict'])
+        return model

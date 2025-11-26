@@ -22,6 +22,7 @@ class HybridModel(nn.Module):
         super().__init__()
 
         # --- Store which features are active based on the config ---
+        self.feature_config = feature_config
         self.use_text = feature_config.text_embed_dim > 0
         self.use_continuous = feature_config.continuous_feat_dim > 0
         self.use_categorical = len(feature_config.categorical_vocab_sizes) > 0
