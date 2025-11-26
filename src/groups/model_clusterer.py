@@ -25,7 +25,7 @@ except ImportError:
 
 from common.config import FieldConfig
 from common.feature_processor import HybridFeatureProcessor, FeatProcParams
-from common.data import FeatureSet, TransactionDataset
+from common.data import FeatureSet
 from pointwise.classifier import HybridModel
 
 logger = logging.getLogger(__name__)
@@ -38,53 +38,46 @@ class ModelClusteringResult:
 
 
 class ModelBasedClusterer:
-    """
-    Clusters transactions using the Latent Space of a pre-trained HybridModel.
-    """
-
     def __init__(
             self,
             model: HybridModel,
             processor: HybridFeatureProcessor,
             min_samples: int = 2,
-            use_gpu: bool = True
+            use_gpu: bool = True,
+            voting_threshold: float = 0.5  # New param for voting
     ):
         self.model = model
         self.processor = processor
         self.min_samples = min_samples
         self.use_gpu = use_gpu and HAS_GPU_CLUSTERING
+        self.voting_threshold = voting_threshold
         self.field_config = FieldConfig()
 
         self.model.eval()
         self.device = next(model.parameters()).device
 
-    def cluster_and_evaluate(self, df: pd.DataFrame, set_name: str) -> ModelClusteringResult:
-        raise NotImplementedError("Use 'cluster_features' method with prepared tensors.")
-
     def cluster_features(self, feature_set: FeatureSet, df_original: pd.DataFrame) -> ModelClusteringResult:
-        """
-        Runs clustering on prepared features.
-        """
         # Move to GPU/Tensor
         x_text = torch.from_numpy(feature_set.X_text).float().to(self.device)
         x_cont = torch.from_numpy(feature_set.X_continuous).float().to(self.device)
         x_cat = torch.from_numpy(feature_set.X_categorical).long().to(self.device)
 
-        # --- 1. Get Latent Embeddings ---
+        # --- 1. Get Embeddings AND Probabilities ---
         with torch.no_grad():
-            # calling model.embed() gives the penultimate layer
+            # Get Latent Vectors (for Clustering)
             latent_vectors = self.model.embed(x_text, x_cont, x_cat).cpu().numpy()
+
+            # Get Pointwise Predictions (for Voting)
+            logits = self.model.forward(x_text, x_cont, x_cat)
+            probs = torch.sigmoid(logits).cpu().numpy()
 
         n_samples = len(df_original)
         if n_samples < self.min_samples:
             return self._empty_result(df_original)
 
-        # --- 2. UMAP Projection (Conditional) ---
-        # FIX: UMAP requires n_samples > n_components (5).
-        # If samples are small (<= 10), we skip UMAP and cluster the latent vectors directly.
+        # --- 2. UMAP Projection ---
         if n_samples > 10:
             n_neighbors = min(15, n_samples - 1)
-
             if self.use_gpu:
                 reducer = CuUMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine',
                                  random_state=42)
@@ -94,38 +87,42 @@ class ModelBasedClusterer:
                                     random_state=42, n_jobs=1)
                 embedding_projection = reducer.fit_transform(latent_vectors)
         else:
-            # Skip Dim Reduction for tiny datasets
             embedding_projection = latent_vectors
 
         # --- 3. HDBSCAN Clustering ---
-        # Ensure min_cluster_size isn't larger than the dataset itself
         effective_min_samples = min(self.min_samples, n_samples)
 
         if self.use_gpu:
-            clusterer = CuHDBSCAN(
-                min_cluster_size=effective_min_samples,
-                metric='euclidean',
-                cluster_selection_epsilon=0.0,
-                gen_min_span_tree=True
-            )
+            clusterer = CuHDBSCAN(min_cluster_size=effective_min_samples, metric='euclidean',
+                                  cluster_selection_epsilon=0.0, gen_min_span_tree=True)
             labels = clusterer.fit_predict(embedding_projection)
-
             if hasattr(labels, 'get'): labels = labels.get()
         else:
-            clusterer = hdbscan.HDBSCAN(
-                min_cluster_size=effective_min_samples,
-                metric='euclidean',
-                cluster_selection_epsilon=0.0,
-                prediction_data=True
-            )
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=effective_min_samples, metric='euclidean',
+                                        cluster_selection_epsilon=0.0, prediction_data=True)
             labels = clusterer.fit_predict(embedding_projection)
 
-        # --- 4. Prediction Logic ---
-        # Anyone in a cluster is "Recurring"
-        # Anyone in Noise (-1) is "Non-Recurring"
+        # --- 4. CLUSTER VOTING (The Fix) ---
         df_out = df_original.copy()
         df_out['cluster_label'] = labels
-        df_out['prediction'] = (labels != -1).astype(int)
+        df_out['pointwise_prob'] = probs  # Store original scores
+        df_out['prediction'] = 0  # Default to 0
+
+        unique_labels = set(labels)
+        if -1 in unique_labels: unique_labels.remove(-1)
+
+        for label in unique_labels:
+            # Select rows in this cluster
+            mask = (labels == label)
+            cluster_probs = probs[mask]
+
+            # VOTE: Average probability of the group
+            avg_score = np.mean(cluster_probs)
+
+            # Only accept cluster if the Pointwise model generally agrees
+            if avg_score > self.voting_threshold:
+                df_out.loc[mask, 'prediction'] = 1
+            # else: Left as 0 (Rejected Cluster)
 
         # --- 5. Evaluate ---
         y_true = df_out[self.field_config.label].astype(int).values
