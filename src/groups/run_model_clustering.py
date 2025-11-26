@@ -54,8 +54,14 @@ def run_experiment():
     train_fs, val_fs, test_fs, processor, meta = runner.build_data_three_way(df_train, df_val, df_test)
 
     # 4. Train
-    metrics, model = runner.run_experiment_and_return_model(train_fs, val_fs, meta)
-    logger.info(f"Pointwise Validation Metrics: {metrics}")
+    val_metrics, model = runner.run_experiment_and_return_model(train_fs, val_fs, meta)
+    logger.info(f"Pointwise Validation Metrics (Best Epoch): {val_metrics}")
+
+    # --- NEW: Evaluate Pointwise on Test Set ---
+    logger.info(">>> STEP 1.5: Evaluating Pointwise Model on Test Set...")
+    test_metrics = runner.evaluate_model_on_set(model, test_fs)
+    logger.info(
+        f"Pointwise TEST Metrics: F1={test_metrics['f1']}, P={test_metrics['precision']}, R={test_metrics['recall']}, AUC={test_metrics['roc_auc']}")
 
     # 5. Cluster (Test Set Only)
     logger.info(">>> STEP 2: Running Model-Based Clustering on Held-Out Test Set...")
@@ -67,7 +73,6 @@ def run_experiment():
     for acc_id, idxs in test_indices.items():
         indices = np.sort(idxs)
 
-        # Reconstruct FeatureSet for this account
         sub_fs = FeatureSet(
             X_text=test_fs.X_text[indices],
             X_continuous=test_fs.X_continuous[indices],
