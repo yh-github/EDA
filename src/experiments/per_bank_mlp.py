@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument(
         "--data_path",
         type=str,
-        default="data/bank_data.csv",
+        default="data/combined_transactions_flat.csv",
         help="Path to the new data file containing 'bank_name' column."
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ def get_constant_configs():
         use_cyclical_dates=True,
         use_categorical_dates=True,
         use_continuous_amount=True,
-        use_categorical_amount=True,
+        use_categorical_amount=False,
         use_is_positive=False,  # We are filtering for amount > 0 anyway
         k_top=20,
         n_bins=20
@@ -82,11 +82,12 @@ def clean_and_filter_data(df: pd.DataFrame, field_config: FieldConfig) -> pd.Dat
     logger.info(f"Initial data size: {len(df)}")
 
     # Ensure bank_name exists
-    if 'bank_name' not in df.columns:
+    bank_name = field_config.bank_name
+    if bank_name not in df.columns:
         raise ValueError("Column 'bank_name' missing from data file.")
 
     # 1. Remove digits from bank_name
-    df['bank_name'] = df['bank_name'].astype(str).str.replace(r'\d+', '', regex=True).str.strip()
+    df[bank_name] = df[bank_name].astype(str).str.replace(r'\d+', '', regex=True).str.strip()
 
     # 2. Filter Amount > 0
     df = df[df[field_config.amount] > 0].copy()

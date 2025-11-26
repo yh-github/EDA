@@ -35,6 +35,7 @@ class FieldConfig:
     label: str = 'isRecurring'
     accountId: str = 'accountId'
     trId: str = 'id' # transactionId
+    bank_name: str = 'bank_name'
 
 class EmbModel(StrEnum):
     """Using StrEnum for our model name constants."""

@@ -11,7 +11,7 @@ import diskcache
 from common.config import EmbModel, get_device
 from common.data import TextDataset
 
-CACHE_DIR_BASE = "cache/"
+CACHE_DIR_BASE = "cache/emb32"
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class EmbeddingService:
     @dataclass
     class Params:
         model_name: EmbModel
-        max_length: int = 64
+        max_length: int = 32
         batch_size: int = 256
 
     """
