@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import argparse
 from pathlib import Path
@@ -24,10 +25,13 @@ def parse_args():
         default="data/combined_transactions_flat.csv",
         help="Path to the new data file containing 'bank_name' column."
     )
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     parser.add_argument(
         "--output_path",
         type=str,
-        default="results/bank_benchmark_results.csv",
+        default=f"results/bank_benchmark_results_{timestamp}.csv",
         help="Path to save the results CSV."
     )
     return parser.parse_args()
@@ -156,7 +160,7 @@ def run_bank_benchmark():
     # Prepare CSV header by creating empty file (or overwrite)
     Path(args.output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'Bank Name':<30} | {'F1':<6} | {'Prec':<6} | {'Rec':<6} | {'Best F1':<8} | {'Thresh':<6}")
+    print(f"\n{'Bank Name':<30} | {'F1':<6} | {'Prec':<6} | {'Rec':<6} | {'Thresh':<6} | {'Best F1':<8} ")
     print("-" * 80)
 
     TRAIN_SIZE = 750
@@ -202,13 +206,13 @@ def run_bank_benchmark():
                 # Metrics might need adjustment depending on what run_experiment returns
                 "recall": metrics.get("final_recall", 0),
                 "roc_auc": metrics.get("roc_auc", 0),
-                "best_f1": metrics.get("val_best_f1", 0),
-                "best_threshold": metrics.get("val_best_threshold", 0)
+                "best_threshold": metrics.get("val_best_threshold", 0),
+                "best_f1": metrics.get("val_best_f1", 0)
             }
 
             # Print to screen
             print(
-                f"{bank:<30} | {row['f1']:.4f} | {metrics.get('accuracy', 0):.4f} | n/a    | {row['best_f1']:.4f}   | {row['best_threshold']:.4f}")
+                f"{bank:<30} | {row['f1']:.4f} | {metrics.get('accuracy', 0):.4f} | n/a    | {row['best_threshold']:.4f} | {row['best_f1']:.4f}")
 
             results_list.append(row)
 
