@@ -45,10 +45,11 @@ def get_constant_configs():
         early_stopping_patience=3
     )
 
-    # 2. Embedding Params (MPNET is generally robust)
+    # 2. Embedding Params
     emb_params = EmbeddingService.Params(
-        model_name=EmbModel.MPNET,
-        batch_size=128
+        model_name=EmbModel.BERT_TRAN,
+        batch_size=128,
+        max_length=64 # TODO text cleaning and measure tokens
     )
 
     # 3. Feature Processing Params

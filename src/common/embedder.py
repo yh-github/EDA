@@ -13,7 +13,7 @@ import diskcache
 from common.config import EmbModel, get_device
 from common.data import TextDataset
 
-CACHE_DIR_BASE = "cache/emb32"
+CACHE_DIR_BASE = "cache/emb"
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class EmbeddingService:
     @dataclass
     class Params:
         model_name: EmbModel
-        max_length: int = 32
+        max_length: int = 64
         batch_size: int = 256
 
     """
@@ -45,8 +45,8 @@ class EmbeddingService:
         self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
         self.max_length = max_length
 
-        cache_key = f"{model_name.replace('/', '__')}" #_len{max_length}
-        cache_dir = os.path.join(CACHE_DIR_BASE, cache_key)
+        cache_key = f"{model_name.replace('/', '__')}"
+        cache_dir = os.path.join(f'{CACHE_DIR_BASE}{max_length}', cache_key)
 
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
