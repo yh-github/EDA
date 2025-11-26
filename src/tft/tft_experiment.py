@@ -144,7 +144,10 @@ class TFTTuningExperiment:
                 feat_proc_params=self.feat_params,
                 pos_weight=pos_weight,
                 max_epochs=self.max_epochs,
-                use_aggregation=self.use_aggregation
+                use_aggregation=self.use_aggregation,
+                min_encoder_length=self.min_encoder_len,
+                max_encoder_length=self.max_encoder_len
+
             ),
             train_ds,
             train_loader,

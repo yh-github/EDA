@@ -28,6 +28,9 @@ class RunConfig:
     field_config: FieldConfig
     emb_params: EmbeddingService.Params
     feat_proc_params: FeatProcParams
+
+    min_encoder_length: int = 5
+    max_encoder_length: int = 64
     pos_weight: float | None = None
     max_epochs: int = 10
     use_aggregation: bool = False

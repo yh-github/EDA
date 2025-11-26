@@ -59,7 +59,7 @@ def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     print("=" * 50)
 
 
-def analyze_mistakes(tft, x, probs, y_true, y_pred):
+def analyze_mistakes(train_ds, x, probs, y_true, y_pred):
     """
     Decodes the Group IDs to show specific false positives/negatives.
     """
@@ -68,12 +68,12 @@ def analyze_mistakes(tft, x, probs, y_true, y_pred):
         # In tune5/6 this is 'global_group_id'
         target_group_col = 'global_group_id'
 
-        if target_group_col not in tft.dataset.categorical_encoders:
+        if target_group_col not in train_ds.categorical_encoders:
             logger.warning(f"Could not find '{target_group_col}' in dataset encoders. Skipping mistake analysis.")
             return
 
-        group_encoder = tft.dataset.categorical_encoders[target_group_col]
-        cat_names = tft.dataset.categoricals
+        group_encoder = train_ds.categorical_encoders[target_group_col]
+        cat_names = train_ds.categoricals
         idx = cat_names.index(target_group_col)
 
         # 2. Extract IDs
@@ -186,8 +186,8 @@ def evaluate_checkpoint(model_path: str):
         train_prepped,
         rc.field_config,
         meta,
-        min_encoder_length=5,
-        max_encoder_length=64  # Default for Tune 5/6
+        min_encoder_length=rc.min_encoder_length,
+        max_encoder_length=rc.max_encoder_length
     )
 
     # --- 6. Load Model ---
@@ -218,7 +218,7 @@ def evaluate_checkpoint(model_path: str):
     # --- 8. Results ---
     print_metrics(y_true, y_pred, probs, set_name="TEST SET")
 
-    analyze_mistakes(tft, x, probs, y_true, y_pred)
+    analyze_mistakes(train_ds,  x, probs, y_true, y_pred)
 
 
 if __name__ == "__main__":
