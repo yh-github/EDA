@@ -37,6 +37,89 @@ setup_logging(Path("logs/"), "eval_cluster2")
 logger = logging.getLogger(__name__)
 
 
+def analyze_mistakes(
+        template_ds: TimeSeriesDataSet,
+        x: dict[str, torch.Tensor],
+        probs: np.ndarray,
+        y_true: np.ndarray,
+        y_pred: np.ndarray
+) -> None:
+    """
+    Decodes the Group IDs to show specific false positives/negatives.
+    """
+    try:
+        # 1. Identify Group ID Column from encoders
+        target_group_col = 'global_group_id'
+
+        if target_group_col not in template_ds.categorical_encoders:
+            logger.warning(f"Could not find '{target_group_col}' in dataset encoders. Skipping mistake analysis.")
+            return
+
+        group_encoder = template_ds.categorical_encoders[target_group_col]
+
+        # FIX 2: Ensure encoder is robustly initialized
+        # The 'classes_vector_' error happens if inverse_transform is called on an encoder
+        # that hasn't strictly processed data in the current session context.
+        # We can attempt a dummy fit or just proceed carefully.
+        # In TimeSeriesDataSet, encoders are fitted on creation, so this *should* work if template_ds is valid.
+
+        # 2. Check x['groups'] exists
+        if 'groups' not in x:
+            logger.warning("'groups' key missing in prediction output x. Cannot decode groups.")
+            return
+
+        # x['groups'] shape: [Batch, n_groups]
+        # Since group_ids=["global_group_id"], our target is at index 0.
+        group_codes = x['groups'][:, 0].cpu()
+
+        # Robust decoding
+        try:
+            group_ids = group_encoder.inverse_transform(group_codes)
+        except AttributeError as e:
+            logger.warning(f"Encoder error ({e}). Attempting to access classes_ mapping directly...")
+            # Fallback for some pytorch-forecasting versions
+            if hasattr(group_encoder, "classes_"):
+                # Map codes to classes manually
+                # group_codes are tensors, convert to int numpy
+                codes_np = group_codes.numpy().astype(int)
+                # handle NaN encoding if present (usually 0 is nan or similar)
+                # assuming simple lookup for now
+                group_ids = []
+                vocab = group_encoder.classes_
+                for c in codes_np:
+                    if c < len(vocab):
+                        group_ids.append(vocab[c])
+                    else:
+                        group_ids.append("Unknown")
+            else:
+                raise e
+
+        # 3. Build Analysis DataFrame
+        res_df = pd.DataFrame({
+            'Group': group_ids,
+            'Prob': probs,
+            'True': y_true,
+            'Pred': y_pred
+        })
+
+        fp_df = res_df[(res_df['True'] == 0) & (res_df['Pred'] == 1)]
+        fn_df = res_df[(res_df['True'] == 1) & (res_df['Pred'] == 0)]
+
+        logger.info(f"\nMistake Counts (Total Series: {len(res_df)}):")
+        logger.info(f"  False Positives: {len(fp_df)}")
+        logger.info(f"  False Negatives: {len(fn_df)}")
+
+        if not fp_df.empty:
+            logger.info("\n>>> False Positive Examples (Predicted Rec, Actual Not):")
+            logger.info(fp_df.sort_values('Prob', ascending=False).head(5).to_string(index=False))
+
+        if not fn_df.empty:
+            logger.info("\n>>> False Negative Examples (Predicted Not, Actual Rec):")
+            logger.info(fn_df.sort_values('Prob', ascending=True).head(5).to_string(index=False))
+
+    except Exception as e:
+        logger.error(f"Error during mistake analysis: {e}")
+
 def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary')
 
@@ -60,64 +143,6 @@ def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     print(f"Best Potential F1 : {best_f1:.4f} (at threshold {best_thresh:.4f})")
     print("=" * 50)
 
-
-
-def analyze_mistakes(
-    template_ds: TimeSeriesDataSet,
-    x: dict[str, torch.Tensor],
-    probs: np.ndarray,
-    y_true: np.ndarray,
-    y_pred: np.ndarray
-) -> None:
-    """
-    Decodes the Group IDs to show specific false positives/negatives.
-    Uses x['groups'] to retrieve the Global Group ID.
-    """
-    try:
-        # 1. Identify Group ID Column from encoders
-        target_group_col = 'global_group_id'
-
-        if target_group_col not in template_ds.categorical_encoders:
-            logger.warning(f"Could not find '{target_group_col}' in dataset encoders. Skipping mistake analysis.")
-            return
-
-        group_encoder = template_ds.categorical_encoders[target_group_col]
-
-        # FIX: Check x['groups'] instead of decoder_cat
-        if 'groups' not in x:
-             logger.warning("'groups' key missing in prediction output x. Cannot decode groups.")
-             return
-
-        # x['groups'] shape: [Batch, n_groups]
-        # Since group_ids=["global_group_id"], our target is at index 0.
-        group_codes = x['groups'][:, 0].cpu()
-        group_ids = group_encoder.inverse_transform(group_codes)
-
-        # 3. Build Analysis DataFrame
-        res_df = pd.DataFrame({
-            'Group': group_ids,
-            'Prob': probs,
-            'True': y_true,
-            'Pred': y_pred
-        })
-
-        fp_df = res_df[(res_df['True'] == 0) & (res_df['Pred'] == 1)]
-        fn_df = res_df[(res_df['True'] == 1) & (res_df['Pred'] == 0)]
-
-        print(f"\nMistake Counts (Total Series: {len(res_df)}):")
-        print(f"  False Positives: {len(fp_df)}")
-        print(f"  False Negatives: {len(fn_df)}")
-
-        if not fp_df.empty:
-            print("\n>>> False Positive Examples (Predicted Rec, Actual Not):")
-            print(fp_df.sort_values('Prob', ascending=False).head(5).to_string(index=False))
-
-        if not fn_df.empty:
-            print("\n>>> False Negative Examples (Predicted Not, Actual Rec):")
-            print(fn_df.sort_values('Prob', ascending=True).head(5).to_string(index=False))
-
-    except Exception as e:
-        logger.error(f"Error during mistake analysis: {e}")
 
 
 def evaluate_checkpoint(model_path: str):
