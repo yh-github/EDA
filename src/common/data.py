@@ -290,3 +290,38 @@ def create_train_val_test_split(
     logger.info(f"  Test:    {len(df_test_holdout)} rows, {len(test_acc)} accounts")
 
     return df_train, df_val, df_test_holdout
+
+
+# ---------------------------------------------------------
+# Filter Overlapping Bank Variations
+# ---------------------------------------------------------
+# Logic: If we have "Bank1" and "Bank2", we pick the one with
+# the most rows (largest sample size), drop the others
+
+def filter_unique_bank_variants(df: pd.DataFrame) -> pd.DataFrame:
+    print(f"Original row count: {len(df)}")
+
+    # 1. Calculate row counts for each specific bank name
+    bank_stats = df['bank_name'].value_counts().reset_index()
+    bank_stats.columns = ['bank_name', 'row_count']
+
+    # 2. Derive base name (remove digits) to find groups
+    bank_stats['base_name'] = bank_stats['bank_name'].str.replace(r'\d+', '', regex=True)
+
+    # 3. Sort by row_count descending so the largest is first
+    bank_stats = bank_stats.sort_values('row_count', ascending=False)
+
+    # 4. Select the largest bank_name for each base_name group
+    # drop_duplicates keeps the first occurrence (which is now the largest due to sort)
+    best_variants = bank_stats.drop_duplicates(subset='base_name', keep='first')
+    allowed_banks = set(best_variants['bank_name'])
+
+    print(
+        f"Consolidating {len(bank_stats)} raw bank names into {len(allowed_banks)} unique base entities based on max row count.")
+
+    # 5. Filter the main DataFrame
+    filtered_df = df[df['bank_name'].isin(allowed_banks)].copy()
+
+
+    print(f"Filtered row count: {len(filtered_df)} (Dropped {len(df) - len(filtered_df)} overlapping rows)")
+    return filtered_df

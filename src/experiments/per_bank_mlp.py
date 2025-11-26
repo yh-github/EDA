@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 from common.config import ExperimentConfig, FieldConfig, EmbModel
+from common.data import filter_unique_bank_variants
 from common.feature_processor import FeatProcParams
 from pointwise.classifier import HybridModel
 from common.embedder import EmbeddingService
@@ -74,11 +75,18 @@ def get_constant_configs():
     return exp_config, emb_params, feat_params, model_params
 
 
-def clean_and_filter_data(df: pd.DataFrame, field_config: FieldConfig) -> pd.DataFrame:
+
+
+def clean_and_filter_data(
+    df: pd.DataFrame,
+    field_config: FieldConfig,
+    min_len:int=10,
+    filter_amount:int = 1
+) -> pd.DataFrame:
     """
     1. Remove digits from bank_name.
     2. Filter amount > 0.
-    3. Filter accounts with row count >= 10.
+    3. Filter accounts with row count >= min_len.
     """
     logger.info(f"Initial data size: {len(df)}")
 
@@ -90,17 +98,22 @@ def clean_and_filter_data(df: pd.DataFrame, field_config: FieldConfig) -> pd.Dat
     # 1. Remove digits from bank_name
     df[bank_name] = df[bank_name].astype(str).str.replace(r'\d+', '', regex=True).str.strip()
 
-    # 2. Filter Amount > 0
-    df = df[df[field_config.amount] > 0].copy()
-    logger.info(f"After amount > 0 filter: {len(df)}")
+    # 2. Filter Amount
+    if filter_amount > 0:
+        df = df[df[field_config.amount] > 0].copy()
+        logger.info(f"After amount > 0 filter: {len(df)}")
+    elif filter_amount < 0:
+        df = df[df[field_config.amount] < 0].copy()
+        logger.info(f"After amount < 0 filter: {len(df)}")
 
-    # 3. Filter Accounts with count >= 10
+    # 3. Filter Accounts with count >= min_len
     acc_counts = df[field_config.accountId].value_counts()
-    valid_accounts = acc_counts[acc_counts >= 10].index
+    valid_accounts = acc_counts[acc_counts >= min_len].index
     df = df[df[field_config.accountId].isin(valid_accounts)].copy()
-    logger.info(f"After account count >= 10 filter: {len(df)} rows, {len(valid_accounts)} accounts")
+    logger.info(f"After account count >= {min_len} filter: {len(df)} rows, {len(valid_accounts)} accounts")
 
     return df
+
 
 
 def run_bank_benchmark():
@@ -119,7 +132,7 @@ def run_bank_benchmark():
         logger.error(f"File not found: {args.data_path}")
         return
 
-    df_clean = clean_and_filter_data(full_df, field_config)
+    df_clean = clean_and_filter_data(filter_unique_bank_variants(full_df), field_config)
 
     # --- 3. Initialize Runner ---
     # We create one runner instance to manage embeddings and shared logic.
