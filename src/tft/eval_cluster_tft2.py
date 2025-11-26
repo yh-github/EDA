@@ -37,88 +37,58 @@ setup_logging(Path("logs/"), "eval_cluster2")
 logger = logging.getLogger(__name__)
 
 
-def analyze_mistakes(
-        template_ds: TimeSeriesDataSet,
-        x: dict[str, torch.Tensor],
-        probs: np.ndarray,
-        y_true: np.ndarray,
-        y_pred: np.ndarray
+def analyze_mistakes_simple(
+    index_df: pd.DataFrame,
+    probs: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    original_df: pd.DataFrame
 ) -> None:
     """
-    Decodes the Group IDs to show specific false positives/negatives.
+    Robust mistake analysis using pandas merges.
+    Matches predictions to descriptions via the dataframe index, avoiding manual decoding.
     """
     try:
-        # 1. Identify Group ID Column from encoders
-        target_group_col = 'global_group_id'
+        # 1. Prepare Prediction DataFrame
+        # index_df comes from tft.predict(return_index=True) and contains the group identifiers
+        pred_df = index_df.copy()
+        pred_df['Prob'] = probs
+        pred_df['True'] = y_true
+        pred_df['Pred'] = y_pred
 
-        if target_group_col not in template_ds.categorical_encoders:
-            logger.warning(f"Could not find '{target_group_col}' in dataset encoders. Skipping mistake analysis.")
-            return
+        # 2. Prepare Metadata from Original Data (Description, Median Amount)
+        # We aggregate to get one row per group (using mode for text to ignore variations)
+        meta_df = original_df.groupby('global_group_id').agg({
+            'bankRawDescription': lambda x: x.mode()[0] if not x.mode().empty else "Unknown",
+            'amount': 'median'
+        }).rename(columns={'bankRawDescription': 'Description', 'amount': 'MedianAmt'})
 
-        group_encoder = template_ds.categorical_encoders[target_group_col]
+        # 3. Merge
+        # Left join ensures we attach metadata to the predictions
+        full_df = pred_df.merge(meta_df, on='global_group_id', how='left')
 
-        # FIX 2: Ensure encoder is robustly initialized
-        # The 'classes_vector_' error happens if inverse_transform is called on an encoder
-        # that hasn't strictly processed data in the current session context.
-        # We can attempt a dummy fit or just proceed carefully.
-        # In TimeSeriesDataSet, encoders are fitted on creation, so this *should* work if template_ds is valid.
+        # 4. Filter Mistakes
+        fp_df = full_df[(full_df['True'] == 0) & (full_df['Pred'] == 1)]
+        fn_df = full_df[(full_df['True'] == 1) & (full_df['Pred'] == 0)]
 
-        # 2. Check x['groups'] exists
-        if 'groups' not in x:
-            logger.warning("'groups' key missing in prediction output x. Cannot decode groups.")
-            return
-
-        # x['groups'] shape: [Batch, n_groups]
-        # Since group_ids=["global_group_id"], our target is at index 0.
-        group_codes = x['groups'][:, 0].cpu()
-
-        # Robust decoding
-        try:
-            group_ids = group_encoder.inverse_transform(group_codes)
-        except AttributeError as e:
-            logger.warning(f"Encoder error ({e}). Attempting to access classes_ mapping directly...")
-            # Fallback for some pytorch-forecasting versions
-            if hasattr(group_encoder, "classes_"):
-                # Map codes to classes manually
-                # group_codes are tensors, convert to int numpy
-                codes_np = group_codes.numpy().astype(int)
-                # handle NaN encoding if present (usually 0 is nan or similar)
-                # assuming simple lookup for now
-                group_ids = []
-                vocab = group_encoder.classes_
-                for c in codes_np:
-                    if c < len(vocab):
-                        group_ids.append(vocab[c])
-                    else:
-                        group_ids.append("Unknown")
-            else:
-                raise e
-
-        # 3. Build Analysis DataFrame
-        res_df = pd.DataFrame({
-            'Group': group_ids,
-            'Prob': probs,
-            'True': y_true,
-            'Pred': y_pred
-        })
-
-        fp_df = res_df[(res_df['True'] == 0) & (res_df['Pred'] == 1)]
-        fn_df = res_df[(res_df['True'] == 1) & (res_df['Pred'] == 0)]
-
-        logger.info(f"\nMistake Counts (Total Series: {len(res_df)}):")
+        logger.info(f"\nMistake Counts (Total Series: {len(full_df)}):")
         logger.info(f"  False Positives: {len(fp_df)}")
         logger.info(f"  False Negatives: {len(fn_df)}")
 
+        # 5. Display Top Errors
+        cols_to_show = ['global_group_id', 'Description', 'MedianAmt', 'Prob']
+
         if not fp_df.empty:
             logger.info("\n>>> False Positive Examples (Predicted Rec, Actual Not):")
-            logger.info(fp_df.sort_values('Prob', ascending=False).head(5).to_string(index=False))
+            logger.info(fp_df.sort_values('Prob', ascending=False).head(5)[cols_to_show].to_string(index=False))
 
         if not fn_df.empty:
             logger.info("\n>>> False Negative Examples (Predicted Not, Actual Rec):")
-            logger.info(fn_df.sort_values('Prob', ascending=True).head(5).to_string(index=False))
+            logger.info(fn_df.sort_values('Prob', ascending=True).head(5)[cols_to_show].to_string(index=False))
 
     except Exception as e:
-        logger.error(f"Error during mistake analysis: {e}")
+        logger.error(f"Error during mistake analysis: {e}", exc_info=True)
+
 
 def print_metrics(y_true, y_pred, y_probs, set_name="DataSet"):
     p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary')
@@ -237,7 +207,8 @@ def evaluate_checkpoint(model_path: str):
     logger.info("Running Predictions on Test Set...")
 
     # Create Inference Dataset from Template
-    def make_report(set_name, test_prepped):
+    def make_report(set_name, test_raw):
+        test_prepped = prep_test_set(test_raw)
         inference_ds = train_ds.from_dataset(
             train_ds, test_prepped, predict=True, stop_randomization=True
         )
@@ -248,6 +219,7 @@ def evaluate_checkpoint(model_path: str):
         raw_output = tft.predict(loader, mode="raw", return_x=True)
         raw_preds = raw_output[0]
         x = raw_output[1]
+        index_df = raw_output[2]
 
         # Extract Probabilities (Class 1 = Recurring)
         probs = torch.softmax(raw_preds['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
@@ -258,11 +230,12 @@ def evaluate_checkpoint(model_path: str):
         print_metrics(y_true, y_pred, probs, set_name=set_name)
 
         def do_analyze_mistakes():
-            analyze_mistakes(train_ds,  x, probs, y_true, y_pred)
+            # analyze_mistakes_simple(train_ds,  x, probs, y_true, y_pred)
+            analyze_mistakes_simple(index_df, probs, y_true, y_pred, test_prepped)
         return do_analyze_mistakes
 
-    make_report("VAL SET", prep_test_set(val_df))
-    analyze_mistakes_fun = make_report("TEST SET", prep_test_set(test_df))
+    make_report("VAL SET", val_df)
+    analyze_mistakes_fun = make_report("TEST SET", test_df)
     analyze_mistakes_fun()
 
 
