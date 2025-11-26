@@ -2,16 +2,22 @@ import logging
 import argparse
 import pandas as pd
 import numpy as np
+import warnings
 from pathlib import Path
 from sklearn.metrics import classification_report
-from common.config import ExperimentConfig, FieldConfig, EmbModel, get_device
-from common.data import FeatureSet
+
+# Suppress Warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*n_jobs.*")
+
+from common.config import ExperimentConfig, FieldConfig, EmbModel
 from common.feature_processor import FeatProcParams
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
 from pointwise.runner import ExpRunner
 from pointwise.classifier import HybridModel
 from groups.model_clusterer import ModelBasedClusterer
+from common.data import FeatureSet
 
 logger = logging.getLogger(__name__)
 
@@ -33,72 +39,35 @@ def run_experiment():
     field_config = FieldConfig()
     df_clean = df.dropna(subset=[field_config.date, field_config.amount, field_config.text, field_config.label])
 
-    # 2. Configure & Train Pointwise Model
-    # We use a robust config known to work well
+    # 2. Configure
     exp_config = ExperimentConfig(epochs=5, batch_size=128)
-
-    feat_params = FeatProcParams(
-        use_cyclical_dates=True,
-        use_continuous_amount=True,
-        use_categorical_amount=False  # Keep it simple
-    )
-
+    feat_params = FeatProcParams(use_cyclical_dates=True, use_continuous_amount=True, use_categorical_amount=False)
     emb_params = EmbeddingService.Params(model_name=EmbModel.MPNET)
-
-    mlp_params = HybridModel.MlpHyperParams(
-        mlp_hidden_layers=[128, 64],
-        dropout_rate=0.25
-    )
+    mlp_params = HybridModel.MlpHyperParams(mlp_hidden_layers=[128, 64], dropout_rate=0.25, text_projection_dim=64)
 
     runner = ExpRunner.create(exp_config, df_clean, emb_params, feat_params, mlp_params, field_config)
 
-    # Create Splits
-    df_train, df_test = runner.split_data_by_group()
-    logger.info(">>> STEP 1: Training Pointwise Model (The Embedder)...")
-    # Build data for training
-    train_fs, test_fs, processor, meta = runner.build_data(df_train, df_test)
+    # 3. Split & Build (3-Way)
+    df_train, df_val, df_test = runner.create_train_val_test_split(test_size=0.2, val_size=0.2)
+    logger.info(">>> STEP 1: Training Pointwise Model (Train/Val)...")
 
-    # Train
-    # save_path = Path("cache/mlp_models/for_clustering.pt")
-    # if not save_path.exists():
-    metrics, model = runner.do_run_experiment(
-        train_features=train_fs,
-        test_features=test_fs,
-        metadata=meta
-    )
-    #     runner.save_model(model, save_path)
-    # else:
-    #     model = runner.load_checkpoint(save_path)
-    #     metrics = "Model loaded and not tested again"
+    train_fs, val_fs, test_fs, processor, meta = runner.build_data_three_way(df_train, df_val, df_test)
 
-    logger.info(f"Pointwise Test Metrics: {metrics}")
+    # 4. Train
+    metrics, model = runner.run_experiment_and_return_model(train_fs, val_fs, meta)
+    logger.info(f"Pointwise Validation Metrics: {metrics}")
 
-    model = model.to(get_device())
+    # 5. Cluster (Test Set Only)
+    logger.info(">>> STEP 2: Running Model-Based Clustering on Held-Out Test Set...")
+    clusterer = ModelBasedClusterer(model, processor, min_samples=2, use_gpu=args.gpu, voting_threshold=0.5)
 
-    # >>> START CLUSTERING <<<
-    logger.info(">>> STEP 2: Running Model-Based Clustering on Test Set...")
-
-    clusterer = ModelBasedClusterer(model, processor, min_samples=2, use_gpu=args.gpu)
-
-    # We need to process Account-by-Account
     results = []
-
-    # We need to subset the GLOBAL test_fs (FeatureSet) back into per-account FeatureSets
-    # This is tricky with pre-batched arrays.
-    # EASIER WAY: Just run the clusterer on the raw DF and let it transform on the fly?
-    # No, we want to reuse the specific model inputs.
-
-    # Strategy: Group indices by account
     test_indices = df_test.groupby(field_config.accountId).indices
 
     for acc_id, idxs in test_indices.items():
-        # Slice features
-        # idxs is relative to df_test, so we can slice the arrays in test_fs
-        # But test_fs arrays match df_test row order exactly.
-
-        # 0-based indices for the arrays
         indices = np.sort(idxs)
 
+        # Reconstruct FeatureSet for this account
         sub_fs = FeatureSet(
             X_text=test_fs.X_text[indices],
             X_continuous=test_fs.X_continuous[indices],
@@ -107,22 +76,16 @@ def run_experiment():
         )
 
         sub_df = df_test.iloc[indices].copy()
-
-        # Cluster
         res = clusterer.cluster_features(sub_fs, sub_df)
         results.append(res.clustered_df)
 
-    # Final Eval
+    # 6. Evaluate
     final_df = pd.concat(results)
     y_true = final_df[field_config.label].astype(int)
     y_pred = final_df['prediction']
 
     print("\n" + classification_report(y_true, y_pred))
-
-    # Compare with Pointwise Baseline
-    # The pointwise model gives probabilities. Clustering gives binary groups.
-    # Clustering should have LOWER Recall but HIGHER Precision ideally,
-    # or just clean up the noise.
+    final_df.to_csv(args.output_path, index=False)
 
 
 if __name__ == "__main__":
