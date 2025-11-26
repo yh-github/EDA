@@ -7,7 +7,7 @@ from common.config import ExperimentConfig, FieldConfig, EmbModel
 from common.embedder import EmbeddingService
 from common.feature_processor import FeatProcParams
 from common.log_utils import setup_logging
-from runner import ExpRunner
+from pointwise.runner import ExpRunner
 
 
 def main():

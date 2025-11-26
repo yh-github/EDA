@@ -8,11 +8,11 @@ from sklearn.model_selection import ParameterGrid
 from dataclasses import asdict
 from common.data import create_train_val_test_split
 from common.log_utils import setup_logging
-from runner import ExpRunner, ModelParams
 from common.config import ExperimentConfig, FieldConfig
 from common.embedder import EmbeddingService
 from common.feature_processor import FeatProcParams
-from classifier import HybridModel
+from pointwise.runner import ExpRunner, ModelParams
+from pointwise.classifier import HybridModel
 
 logger = logging.getLogger(__name__)
 exclude_none_values = lambda x: {k: v for (k, v) in x if v is not None}

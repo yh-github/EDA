@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from classifier import HybridModel
+from pointwise.classifier import HybridModel
 
 logger = logging.getLogger(__name__)
 
