@@ -44,15 +44,15 @@ def get_constant_configs():
     """
     # 1. Experiment Config
     exp_config = ExperimentConfig(
-        epochs=10,
+        epochs=15,
         batch_size=128,
-        learning_rate=1e-3,
+        learning_rate=0.0005,
         early_stopping_patience=3
     )
 
     # 2. Embedding Params
     emb_params = EmbeddingService.Params(
-        model_name=EmbModel.BERT_TRAN,
+        model_name=EmbModel.MPNET,
         batch_size=128,
         max_length=64 # TODO text cleaning and measure tokens
     )
