@@ -59,17 +59,17 @@ def run_experiment():
     train_fs, test_fs, processor, meta = runner.build_data(df_train, df_test)
 
     # Train
-    save_path = Path("cache/mlp_models/for_clustering.pt")
-    if not save_path.exists():
-        metrics, model = runner.do_run_experiment(
-            train_features=train_fs,
-            test_features=test_fs,
-            metadata=meta
-        )
-        runner.save_model(model, save_path)
-    else:
-        model = runner.load_checkpoint(save_path)
-        metrics = "Model loaded and not tested again"
+    # save_path = Path("cache/mlp_models/for_clustering.pt")
+    # if not save_path.exists():
+    metrics, model = runner.do_run_experiment(
+        train_features=train_fs,
+        test_features=test_fs,
+        metadata=meta
+    )
+    #     runner.save_model(model, save_path)
+    # else:
+    #     model = runner.load_checkpoint(save_path)
+    #     metrics = "Model loaded and not tested again"
 
     logger.info(f"Pointwise Test Metrics: {metrics}")
 
