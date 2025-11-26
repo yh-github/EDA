@@ -1,7 +1,8 @@
 import logging
-from dataclasses import dataclass
 import pandas as pd
+import numpy as np
 import torch
+from dataclasses import dataclass
 from sklearn.metrics import precision_recall_fscore_support
 
 # --- GPU Imports ---
@@ -23,8 +24,8 @@ except ImportError:
     import hdbscan
 
 from common.config import FieldConfig
-from common.feature_processor import HybridFeatureProcessor
-from common.data import FeatureSet
+from common.feature_processor import HybridFeatureProcessor, FeatProcParams
+from common.data import FeatureSet, TransactionDataset
 from pointwise.classifier import HybridModel
 
 logger = logging.getLogger(__name__)
@@ -58,25 +59,6 @@ class ModelBasedClusterer:
         self.device = next(model.parameters()).device
 
     def cluster_and_evaluate(self, df: pd.DataFrame, set_name: str) -> ModelClusteringResult:
-        """
-        1. Embeds all transactions using the HybridModel.
-        2. Clusters the embeddings using UMAP+HDBSCAN.
-        3. Evaluates against ground truth.
-        """
-        # --- 1. Generate Model Inputs ---
-        # Transform data into features
-        feats = self.processor.transform(df)
-
-        # Prepare Tensors (Reuse logic from your pipeline)
-        # We need to reconstruct the exact tensors the model expects
-        # Assuming we have access to the raw text embeddings or can re-compute/pass them
-        # For simplicity in this snippet, I assume 'df' has a 'vector' column or we pass it
-        # BUT, the robust way is to rely on the FeatureSet structure.
-
-        # Let's assume the caller handles the heavy "Text Embedding" part
-        # and passes us a populated FeatureSet.
-        # But to be self-contained, let's assume we receive the raw DF and
-        # an external "text_embeddings" array for this DF.
         raise NotImplementedError("Use 'cluster_features' method with prepared tensors.")
 
     def cluster_features(self, feature_set: FeatureSet, df_original: pd.DataFrame) -> ModelClusteringResult:
@@ -93,39 +75,59 @@ class ModelBasedClusterer:
             # calling model.embed() gives the penultimate layer
             latent_vectors = self.model.embed(x_text, x_cont, x_cat).cpu().numpy()
 
-        # --- 2. UMAP Projection ---
-        # The latent space is already dense (e.g. 64 dim), but UMAP helps manifold structure
         n_samples = len(df_original)
         if n_samples < self.min_samples:
             return self._empty_result(df_original)
 
-        n_neighbors = min(15, n_samples - 1)
+        # --- 2. UMAP Projection (Conditional) ---
+        # FIX: UMAP requires n_samples > n_components (5).
+        # If samples are small (<= 10), we skip UMAP and cluster the latent vectors directly.
+        if n_samples > 10:
+            n_neighbors = min(15, n_samples - 1)
+
+            if self.use_gpu:
+                reducer = CuUMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine',
+                                 random_state=42)
+                embedding_projection = reducer.fit_transform(latent_vectors)
+            else:
+                reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine',
+                                    random_state=42)
+                embedding_projection = reducer.fit_transform(latent_vectors)
+        else:
+            # Skip Dim Reduction for tiny datasets
+            embedding_projection = latent_vectors
+
+        # --- 3. HDBSCAN Clustering ---
+        # Ensure min_cluster_size isn't larger than the dataset itself
+        effective_min_samples = min(self.min_samples, n_samples)
 
         if self.use_gpu:
-            reducer = CuUMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine', random_state=42)
-            embedding_projection = reducer.fit_transform(latent_vectors)
-
-            clusterer = CuHDBSCAN(min_cluster_size=self.min_samples, metric='euclidean', cluster_selection_epsilon=0.0,
-                                  gen_min_span_tree=True)
+            clusterer = CuHDBSCAN(
+                min_cluster_size=effective_min_samples,
+                metric='euclidean',
+                cluster_selection_epsilon=0.0,
+                gen_min_span_tree=True
+            )
             labels = clusterer.fit_predict(embedding_projection)
 
             if hasattr(labels, 'get'): labels = labels.get()
         else:
-            reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=5, min_dist=0.0, metric='cosine', random_state=42)
-            embedding_projection = reducer.fit_transform(latent_vectors)
-
-            clusterer = hdbscan.HDBSCAN(min_cluster_size=self.min_samples, metric='euclidean',
-                                        cluster_selection_epsilon=0.0, prediction_data=True)
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=effective_min_samples,
+                metric='euclidean',
+                cluster_selection_epsilon=0.0,
+                prediction_data=True
+            )
             labels = clusterer.fit_predict(embedding_projection)
 
-        # --- 3. Prediction Logic ---
+        # --- 4. Prediction Logic ---
         # Anyone in a cluster is "Recurring"
         # Anyone in Noise (-1) is "Non-Recurring"
         df_out = df_original.copy()
         df_out['cluster_label'] = labels
         df_out['prediction'] = (labels != -1).astype(int)
 
-        # --- 4. Evaluate ---
+        # --- 5. Evaluate ---
         y_true = df_out[self.field_config.label].astype(int).values
         y_pred = df_out['prediction'].values
 
