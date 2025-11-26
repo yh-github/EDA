@@ -15,7 +15,7 @@ BATCH_SIZE = 2048
 MAX_EPOCHS = 25
 N_TRIALS = 10
 STUDY_NAME = "tft_tune5_refinement"
-BEST_MODEL_PATH = "cache/tft_models/best_tune5_model.pt"
+BEST_MODEL_PATH = "cache/tft_models/best_tune6_model.pt"
 
 if __name__ == "__main__":
     # Refined Search Space based on Tune 4 Logs (Trial 10 Winner)
