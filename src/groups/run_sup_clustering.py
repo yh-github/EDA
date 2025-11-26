@@ -1,9 +1,7 @@
 import logging
 import pandas as pd
-import numpy as np
 import argparse
 from pathlib import Path
-from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support, classification_report
 
 from common.config import FieldConfig, EmbModel, ExperimentConfig
@@ -69,7 +67,7 @@ def run_pipeline():
     train_candidates = []
 
     # Iterate Train Accounts
-    for _, acc_df in tqdm(train_df.groupby(field_config.accountId), desc="Generating Train Candidates"):
+    for _, acc_df in train_df.groupby(field_config.accountId):
         try:
             _, cands = clusterer.extract_candidates(acc_df)
             train_candidates.extend(cands)
@@ -85,7 +83,7 @@ def run_pipeline():
     logger.info("--- TESTING PHASE ---")
     results = []
 
-    for _, acc_df in tqdm(test_df.groupby(field_config.accountId), desc="Processing Test Accounts"):
+    for _, acc_df in test_df.groupby(field_config.accountId):
         try:
             # 1. Generate Candidates
             df_clustered, candidates = clusterer.extract_candidates(acc_df)
