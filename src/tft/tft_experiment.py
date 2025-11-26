@@ -78,6 +78,7 @@ class TFTTuningExperiment:
         exp_params = ExperimentConfig()
         pl.seed_everything(exp_params.random_state, workers=True)
 
+
         # Split Data
         train_df, val_df, _ = create_train_val_test_split(
             test_size=0.2, val_size=0.2, full_df=full_df,
@@ -109,6 +110,20 @@ class TFTTuningExperiment:
         pos_weight = math.sqrt(float(n_neg / max(n_pos, 1)))
         logger.info(f"Class Weight: {pos_weight}")
 
+        run_conf = RunConfig(
+            field_config=field_config,
+            experiment_config=exp_params,
+            emb_params=self.emb_params,
+            feat_proc_params=self.feat_params,
+            pos_weight=pos_weight,
+            max_epochs=self.max_epochs,
+            use_aggregation=self.use_aggregation,
+            min_encoder_length=self.min_encoder_len,
+            max_encoder_length=self.max_encoder_len
+        )
+
+        logger.info(f"run_conf: {run_conf}")
+
         # Build Datasets using injected build function
         train_ds = self.build_dataset_fn(
             train_df_prepped,
@@ -137,18 +152,7 @@ class TFTTuningExperiment:
 
         # Run Tuning
         runner = TFTRunner(
-            RunConfig(
-                field_config=field_config,
-                experiment_config=exp_params,
-                emb_params=self.emb_params,
-                feat_proc_params=self.feat_params,
-                pos_weight=pos_weight,
-                max_epochs=self.max_epochs,
-                use_aggregation=self.use_aggregation,
-                min_encoder_length=self.min_encoder_len,
-                max_encoder_length=self.max_encoder_len
-
-            ),
+            run_conf,
             train_ds,
             train_loader,
             val_loader,

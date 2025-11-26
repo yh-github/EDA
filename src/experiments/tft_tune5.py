@@ -59,9 +59,9 @@ if __name__ == "__main__":
         feat_params=FeatProcParams(
             use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
             use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0,
-            use_behavioral_features=True, text_dim_reduce=32
+            use_behavioral_features=True
         ),
 
-        emb_params=EmbeddingService.Params(model_name=EmbModel.BERT_TRAN, max_length=64)
+        emb_params=EmbeddingService.Params(model_name=EmbModel.MPNET, max_length=64)
     )
     experiment.run()
