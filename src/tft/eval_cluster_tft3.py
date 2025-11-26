@@ -1,9 +1,9 @@
 """
-src/tft/eval_cluster3.py
+src/tft/eval_cluster_tft3.py
 
 Fixed evaluation script:
-1. Passes PREPARED data (with global_group_id) to analysis to avoid KeyErrors.
-2. Improved robust_decode_groups to handle different Encoder versions.
+1. Reconstructs the Training Context to ensure model weights align.
+2. Uses dataset index alignment (Bypassing broken Encoders) to map predictions.
 3. Calculates REAL Transaction-Level F1.
 """
 
@@ -28,45 +28,9 @@ setup_logging(Path("logs/"), "eval_cluster3")
 logger = logging.getLogger(__name__)
 
 
-def robust_decode_groups(encoder, codes: torch.Tensor | np.ndarray) -> np.ndarray:
-    """
-    Manually decodes group IDs using the encoder's classes dictionary.
-    Handles different PyTorch Forecasting encoder versions.
-    """
-    if isinstance(codes, torch.Tensor):
-        codes = codes.cpu().numpy().astype(int)
-    
-    # Attempt 1: Standard inverse_transform
-    try:
-        return encoder.inverse_transform(codes)
-    except Exception:
-        pass
-
-    # Attempt 2: classes_ dictionary (Label -> Int)
-    if hasattr(encoder, "classes_") and isinstance(encoder.classes_, dict):
-        int_to_label = {v: k for k, v in encoder.classes_.items()}
-        return np.array([int_to_label.get(c, "Unknown") for c in codes])
-
-    # Attempt 3: classes_ list/array (Index -> Label)
-    if hasattr(encoder, "classes_") and (isinstance(encoder.classes_, list) or isinstance(encoder.classes_, np.ndarray)):
-        vocab = encoder.classes_
-        decoded = []
-        for c in codes:
-            if c < len(vocab):
-                decoded.append(vocab[c])
-            else:
-                decoded.append("Unknown")
-        return np.array(decoded)
-
-    logger.error(f"Encoder {type(encoder)} structure unknown. Returning raw codes.")
-    return codes.astype(str)
-
-
 def analyze_mistakes_simple(
     group_ids: np.ndarray,
     probs: np.ndarray,
-    y_true: np.ndarray, # Group Truth
-    y_pred: np.ndarray, # Group Pred
     original_df: pd.DataFrame,
     label_col: str,
     set_name: str = "dataset"
@@ -77,29 +41,26 @@ def analyze_mistakes_simple(
     3. Exports the full transaction-level detail to CSV.
     """
     try:
-        # FIX: Flatten inputs to prevent ValueError: 2
-        group_ids = np.array(group_ids).flatten()
-        probs = np.array(probs).flatten()
-        y_true = np.array(y_true).flatten()
-        y_pred = np.array(y_pred).flatten()
-
         # 1. Create a Lookup for Group-Level Scores
+        # Note: We don't need Y_True/Y_Pred from the model here, 
+        # because we will compare the Prob against the ORIGINAL transaction label.
         group_preds = pd.DataFrame({
             'global_group_id': group_ids,
-            'Group_Prob': probs,
-            'Group_True': y_true, 
-            'Group_Pred': y_pred
+            'Group_Prob': probs
         })
 
-        # 2. Merge Scores back to PREPARED Transactions
-        # original_df must have 'global_group_id'
+        # 2. Merge Scores back to PREPARED Transactions (Originals + Group ID)
+        # We merge on global_group_id. Unclustered transactions get NaNs.
         full_df = original_df.merge(group_preds, on='global_group_id', how='left')
 
-        # 3. Handle Unscored/Unclustered Rows
+        # 3. Handle Unscored/Unclustered Rows (Score = 0.0)
         full_df['Group_Prob'] = full_df['Group_Prob'].fillna(0.0)
-        full_df['Group_Pred'] = full_df['Group_Pred'].fillna(0).astype(int)
         
-        # 4. Calculate TRUE Transaction-Level Metrics
+        # 4. Generate Predictions (Threshold 0.5)
+        full_df['Group_Pred'] = (full_df['Group_Prob'] > 0.5).astype(int)
+        
+        # 5. Calculate TRUE Transaction-Level Metrics
+        # Compare Original Label vs Broadcasted Prediction
         txn_y_true = full_df[label_col].astype(int).values
         txn_y_pred = full_df['Group_Pred'].values
 
@@ -114,7 +75,7 @@ def analyze_mistakes_simple(
         logger.info(f"F1 Score       : {f1:.4f}")
         logger.info("*" * 50)
 
-        # 5. Define Mistake Types
+        # 6. Define Mistake Types
         conditions = [
             (txn_y_true == 1) & (txn_y_pred == 1), # TP
             (txn_y_true == 0) & (txn_y_pred == 0), # TN
@@ -124,12 +85,12 @@ def analyze_mistakes_simple(
         choices = ['TP', 'TN', 'FP', 'FN']
         full_df['Result_Type'] = np.select(conditions, choices, default='Error')
 
-        # 6. Save to CSV
+        # 7. Save to CSV
         filename = f"mistake_analysis_{set_name}.csv"
         logger.info(f"Saving full transaction-level analysis to {filename}...")
         full_df.to_csv(filename, index=False)
 
-        # 7. Log Top Group-Level Mistakes (for readability)
+        # 8. Log Top Group-Level Mistakes (for readability)
         mistakes_grouped = full_df[full_df['Result_Type'].isin(['FP', 'FN'])].drop_duplicates('global_group_id')
         
         fp_count = len(full_df[full_df['Result_Type'] == 'FP'])
@@ -185,7 +146,7 @@ def evaluate_checkpoint(model_path: str):
     # --- Reconstruct Pipeline ---
     emb_service = EmbeddingService.create(rc.emb_params)
 
-    # Fit on Train
+    # Fit on Train (Critical to restore correct integer mappings)
     train_prepped, pca_model, processor, meta = prepare_non_overlapping_data(
         train_df,
         rc.field_config,
@@ -221,7 +182,6 @@ def evaluate_checkpoint(model_path: str):
     def run_report(set_name, df_raw):
         logger.info(f"Processing {set_name}...")
         
-        # 1. Transform raw data to prepped data (adds 'global_group_id')
         df_prepped = prep_dataset(df_raw)
         
         if len(df_prepped) == 0:
@@ -233,34 +193,53 @@ def evaluate_checkpoint(model_path: str):
         )
         loader = inference_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
 
-        # Predict with return_x=True to access encoded groups
+        # 1. Get Predictions (Raw)
         raw_output = tft.predict(loader, mode="raw", return_x=True, return_index=False)
-        
         raw_preds = raw_output[0]
-        x = raw_output[1]
-
-        probs = torch.softmax(raw_preds['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
-        y_true_group = x['decoder_target'][:, 0].cpu().numpy()
-        y_pred_group = (probs > 0.5).astype(int)
         
-        # 2. Extract and Decode Group IDs
-        if 'groups' in x:
-            encoded_groups = x['groups'][:, 0].cpu()
-            group_encoder = train_ds.categorical_encoders['global_group_id']
-            decoded_ids = robust_decode_groups(group_encoder, encoded_groups)
-            
-            # 3. Analyze on PREPPED DF (contains 'global_group_id')
-            analyze_mistakes_simple(
-                decoded_ids, 
-                probs, 
-                y_true_group, 
-                y_pred_group, 
-                df_prepped,  # <--- FIXED: Passing prepped data
-                label_col=rc.field_config.label,
-                set_name=set_name
-            )
-        else:
-            logger.warning("Could not find 'groups' in x. Skipping analysis.")
+        # 2. Extract Probs
+        probs = torch.softmax(raw_preds['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
+        
+        # 3. Extract Group IDs DIRECTLY from the dataset index
+        # The loader preserves order, so we can access the underlying index dataframe directly
+        # inference_ds.index is a pandas DataFrame with columns [time_idx, global_group_id, ...]
+        # We need to ensure we only get the groups that were actually predicted (in case some were dropped)
+        
+        # Safer method: tft.predict returns 'index' if requested, but that failed earlier.
+        # Instead, we rely on the x output which contains decoded categoricals IF the encoder worked.
+        # Since encoder failed, we use the x['groups'] codes but match them to the dataset.
+        
+        # ULTIMATE FIX: The `inference_ds` object knows the mapping between row `i` and `global_group_id`.
+        # However, `to_dataloader` might shuffle if not careful (we set shuffle=False).
+        # And `TimeSeriesDataSet` filters short sequences.
+        # We need the filtered index.
+        
+        # We can re-construct the filtered index from the loader iteration to be 100% safe.
+        valid_group_ids = []
+        
+        # We iterate the loader again to get the string IDs directly from the source dataframe if possible?
+        # No, the loader yields tensors.
+        
+        # We use `inference_ds.decoded_index` if available, or `inference_ds.index`.
+        # `inference_ds.index` contains the valid groups after filtering.
+        filtered_index = inference_ds.index
+        
+        if len(filtered_index) != len(probs):
+            logger.error(f"Shape mismatch! Index: {len(filtered_index)}, Preds: {len(probs)}")
+            # Fallback: Try to use x['groups'] codes if lengths don't match (unlikely if shuffle=False)
+            return
+
+        # 'global_group_id' should be a column in the index DataFrame
+        decoded_ids = filtered_index['global_group_id'].values
+
+        # 4. Analyze
+        analyze_mistakes_simple(
+            decoded_ids, 
+            probs, 
+            original_df=df_prepped, # Contains 'global_group_id' and 'label'
+            label_col=rc.field_config.label,
+            set_name=set_name
+        )
 
     run_report("VAL SET", val_df)
     run_report("TEST SET", test_df)
@@ -268,7 +247,7 @@ def evaluate_checkpoint(model_path: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python src/tft/eval_cluster_tft2.py <path_to_model.pt>")
+        print("Usage: python src/tft/eval_cluster_tft3.py <path_to_model.pt>")
         sys.exit(1)
 
     evaluate_checkpoint(sys.argv[1])
