@@ -117,7 +117,7 @@ def evaluate_checkpoint(model_path: str):
 
     logger.info(f"Loading checkpoint payload from {model_path}...")
     # Load CPU mapped to avoid GPU errors if running locally
-    payload = torch.load(path_obj, map_location=torch.device("cpu"))
+    payload = torch.load(path_obj, map_location=torch.device("cpu"), weights_only=False)
 
     # --- 1. Extract RunConfig ---
     # This contains all the setup used during training!

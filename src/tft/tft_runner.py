@@ -175,7 +175,7 @@ class TFTRunner:
                 self.best_tuning_f1 = target_f1
                 if best_model_save_path:
                     logger.info(f"New best F1 ({target_f1:.4f})! Saving model to {best_model_save_path}")
-                    self._save_checkpoint(tft, params, best_model_save_path)
+                    self.save_checkpoint(tft, params, best_model_save_path)
 
             return target_f1
 
@@ -219,7 +219,7 @@ class TFTRunner:
         return study
 
 
-    def _save_checkpoint(self, model: TemporalFusionTransformer, params: dict, path: str | Path):
+    def save_checkpoint(self, model: TemporalFusionTransformer, params: dict, path: str | Path):
         """Saves model weights AND configuration in one file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,7 +268,7 @@ class TFTRunner:
 
         if model_path:
             logger.info(f"Saving model to {model_path}...")
-            self._save_checkpoint(tft, params, model_path)
+            self.save_checkpoint(tft, params, model_path)
             # Path(model_path).parent.mkdir(parents=True, exist_ok=True)
             # torch.save(tft.state_dict(), model_path)
 
@@ -276,7 +276,10 @@ class TFTRunner:
         return trainer, tft
 
     @classmethod
-    def load_from_checkpoint(cls, checkpoint_path: str | Path, dataset: TimeSeriesDataSet) -> TemporalFusionTransformer:
+    def load_from_checkpoint(cls,
+        checkpoint_path: str | Path,
+        dataset: TimeSeriesDataSet
+    ) -> TemporalFusionTransformer:
         """
         Loads a TFT model from a custom checkpoint file created by _save_checkpoint.
         Reconstructs the model structure using the provided dataset and saved hyperparameters.
@@ -287,10 +290,12 @@ class TFTRunner:
 
         logger.info(f"Loading custom checkpoint from {path}...")
         # Load payload (state_dict + hparams)
-        payload = torch.load(path, map_location=torch.device("cpu"))
+        payload = torch.load(path, map_location=torch.device("cpu"), weights_only=False)
 
         hparams = payload.get("hyper_parameters", {})
         state_dict = payload.get("state_dict", {})
+
+        run_config = payload.get("run_config")
 
         if not hparams or not state_dict:
             raise ValueError("Checkpoint file is missing 'hyper_parameters' or 'state_dict'.")
@@ -307,7 +312,7 @@ class TFTRunner:
             output_size=hparams.get("output_size", 2),
             loss=CrossEntropy(),
             log_interval=10,
-            reduce_on_plateau_patience=4,
+            reduce_on_plateau_patience=4 if run_config is None else run_config.reduce_on_plateau_patience
         )
 
         tft = cast(TemporalFusionTransformer, tft)
