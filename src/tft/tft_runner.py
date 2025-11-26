@@ -8,7 +8,7 @@ import optuna
 import pandas as pd
 import torch
 from torch.nn.functional import cross_entropy
-from lightning.pytorch.callbacks import EarlyStopping
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from optuna.integration import PyTorchLightningPruningCallback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
@@ -113,6 +113,18 @@ class TFTRunner:
         gc.collect()
         torch.cuda.empty_cache()
 
+    def _restore_best_weights(self, trainer: pl.Trainer, model: TemporalFusionTransformer):
+        """Helper to load the best model from the trainer's checkpoint if available."""
+        if trainer.checkpoint_callback and trainer.checkpoint_callback.best_model_path:
+            best_path = trainer.checkpoint_callback.best_model_path
+            if Path(best_path).exists():
+                logger.info(f"Restoring best weights from {best_path}")
+                # Load Lightning checkpoint
+                checkpoint = torch.load(best_path, map_location=model.device)
+                model.load_state_dict(checkpoint["state_dict"])
+            else:
+                logger.warning(f"Best model path {best_path} does not exist. Using last weights.")
+
     def objective(self, trial: optuna.Trial, custom_search_space: dict[str, Any] | None = None,
                   best_model_save_path: str | Path | None = None) -> float:
         self._cleanup_memory()
@@ -147,28 +159,38 @@ class TFTRunner:
             )
 
             metric_callback = self._get_metrics_callback()
-
             pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
+
+            # Enable checkpointing to save best k models (top 1) during training
+            checkpoint_callback = ModelCheckpoint(
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+                filename="trial_best"
+            )
 
             trainer = pl.Trainer(
                 max_epochs=self.run_config.max_epochs,
                 accelerator="auto",
                 precision="bf16-mixed",
                 gradient_clip_val=params.get("gradient_clip_val", 0.1),
-                callbacks=[early_stop, metric_callback, pruning_callback],
+                callbacks=[early_stop, metric_callback, pruning_callback, checkpoint_callback],
                 enable_progress_bar=False,
                 logger=False,
-                enable_checkpointing=True,
+                enable_checkpointing=True, # Required for ModelCheckpoint to work
                 deterministic=False
             )
 
             trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
 
+            # --- CRITICAL FIX: Restore best weights before evaluation/saving ---
+            self._restore_best_weights(trainer, tft)
+
             target_f1 = metric_callback.last_f1
             prec = metric_callback.last_prec
             rec = metric_callback.last_rec
 
-            logger.info(f"  [Trial Final] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+            logger.info(f"  [Trial Final (Best Weights)] F1: {target_f1:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
 
             trial.set_user_attr("F1", target_f1)
             trial.set_user_attr("Precision", prec)
@@ -195,7 +217,6 @@ class TFTRunner:
         finally:
             self._cleanup_memory()
 
-    # ... (run_tuning and train_single updated to use _cleanup_memory are assumed present) ...
     def run_tuning(
             self,
             study_name: str,
@@ -226,6 +247,7 @@ class TFTRunner:
         """Saves model weights AND configuration in one file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Create payload
         payload = {
             "state_dict": model.state_dict(),
             "hyper_parameters": params,
@@ -247,33 +269,44 @@ class TFTRunner:
             path_obj = Path(model_path)
             if path_obj.exists():
                 logger.info(f"Found checkpoint at {path_obj}. Loading...")
-                state_dict = torch.load(path_obj)
-                tft.load_state_dict(state_dict)
+                # Note: This loads the payload format we defined
+                payload = torch.load(path_obj, map_location=tft.device)
+                tft.load_state_dict(payload["state_dict"])
                 tft.eval()
+                # Return dummy trainer
                 trainer = pl.Trainer(accelerator="auto", logger=False, enable_checkpointing=False, max_epochs=0)
                 return trainer, tft
 
         early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.run_config.patience, verbose=False, mode="min")
         metric_callback = self._get_metrics_callback()
 
+        # FIX: Enable checkpointing to capture best model during single runs
+        checkpoint_callback = ModelCheckpoint(
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            filename="single_run_best"
+        )
+
         trainer = pl.Trainer(
             max_epochs=self.run_config.max_epochs,
             accelerator="auto",
             precision="bf16-mixed",
             gradient_clip_val=params.get("gradient_clip_val", 0.1),
-            callbacks=[early_stop, metric_callback],
+            callbacks=[early_stop, metric_callback, checkpoint_callback],
             enable_progress_bar=False,
             logger=False,
-            enable_checkpointing=False
+            enable_checkpointing=True # Was False, now True to save best weights
         )
 
         trainer.fit(model=tft, train_dataloaders=self.train_loader, val_dataloaders=self.val_loader)
 
+        # Restore best weights before saving
+        self._restore_best_weights(trainer, tft)
+
         if model_path:
-            logger.info(f"Saving model to {model_path}...")
+            logger.info(f"Saving best model to {model_path}...")
             self.save_checkpoint(tft, params, model_path)
-            # Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-            # torch.save(tft.state_dict(), model_path)
 
         self._cleanup_memory()
         return trainer, tft
