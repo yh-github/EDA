@@ -165,18 +165,20 @@ def evaluate_checkpoint(model_path: str):
     )
 
     # --- 4. Transform Test Data ---
-    logger.info("Transforming Test Data...")
-    test_prepped, _, _, _ = prepare_non_overlapping_data(
-        test_df,
-        rc.field_config,
-        embedding_service=emb_service,
-        pca_model=pca_model,
-        processor=processor,
-        fit_processor=False
-    )
+    def prep_test_set(the_test_df):
+        logger.info("Transforming Test Data...")
+        test_prepped, _, _, _ = prepare_non_overlapping_data(
+            the_test_df,
+            rc.field_config,
+            embedding_service=emb_service,
+            pca_model=pca_model,
+            processor=processor,
+            fit_processor=False
+        )
 
-    # Ensure dates are datetime (Safety fix)
-    test_prepped[rc.field_config.date] = pd.to_datetime(test_prepped[rc.field_config.date])
+        # Ensure dates are datetime (Safety fix)
+        test_prepped[rc.field_config.date] = pd.to_datetime(test_prepped[rc.field_config.date])
+        return test_prepped
 
     # --- 5. Build Dataset Template ---
     # We need a dataset to initialize the model.
@@ -199,26 +201,33 @@ def evaluate_checkpoint(model_path: str):
     logger.info("Running Predictions on Test Set...")
 
     # Create Inference Dataset from Template
-    inference_ds = train_ds.from_dataset(
-        train_ds, test_prepped, predict=True, stop_randomization=True
-    )
+    def make_report(set_name, test_prepped):
+        inference_ds = train_ds.from_dataset(
+            train_ds, test_prepped, predict=True, stop_randomization=True
+        )
 
-    loader = inference_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
+        loader = inference_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
 
-    # Predict
-    raw_output = tft.predict(loader, mode="raw", return_x=True)
-    raw_preds = raw_output[0]
-    x = raw_output[1]
+        # Predict
+        raw_output = tft.predict(loader, mode="raw", return_x=True)
+        raw_preds = raw_output[0]
+        x = raw_output[1]
 
-    # Extract Probabilities (Class 1 = Recurring)
-    probs = torch.softmax(raw_preds['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
-    y_true = x['decoder_target'][:, 0].cpu().numpy()
-    y_pred = (probs > 0.5).astype(int)
+        # Extract Probabilities (Class 1 = Recurring)
+        probs = torch.softmax(raw_preds['prediction'], dim=-1)[:, 0, 1].cpu().numpy()
+        y_true = x['decoder_target'][:, 0].cpu().numpy()
+        y_pred = (probs > 0.5).astype(int)
 
-    # --- 8. Results ---
-    print_metrics(y_true, y_pred, probs, set_name="TEST SET")
+        # --- 8. Results ---
+        print_metrics(y_true, y_pred, probs, set_name=set_name)
 
-    analyze_mistakes(train_ds,  x, probs, y_true, y_pred)
+        def do_analyze_mistakes():
+            analyze_mistakes(train_ds,  x, probs, y_true, y_pred)
+        return do_analyze_mistakes
+
+    make_report("VAL SET", prep_test_set(val_df))
+    analyze_mistakes_fun = make_report("TEST SET", prep_test_set(test_df))
+    analyze_mistakes_fun()
 
 
 if __name__ == "__main__":
