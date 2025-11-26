@@ -20,10 +20,7 @@ import torch
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
-from pytorch_forecasting import TimeSeriesDataSet
 from sklearn.metrics import precision_recall_fscore_support, precision_recall_curve
-
 from common.data import create_train_val_test_split
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
@@ -38,6 +35,82 @@ logger = logging.getLogger(__name__)
 
 
 def analyze_mistakes_simple(
+        group_ids: np.ndarray,
+        probs: np.ndarray,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        original_df: pd.DataFrame,
+        set_name: str = "dataset"
+) -> None:
+    """
+    1. Maps group-level predictions back to ALL original transactions.
+    2. Identifies mistakes (False Positives/Negatives).
+    3. Exports the full transaction-level detail to CSV.
+    4. Logs high-level stats.
+    """
+    try:
+        # 1. Create a Lookup for Group-Level Scores
+        # group_ids, probs, y_true, y_pred are all aligned (1 row per Group)
+        group_preds = pd.DataFrame({
+            'global_group_id': group_ids,
+            'Group_Prob': probs,
+            'Group_True': y_true,
+            'Group_Pred': y_pred
+        })
+
+        # 2. Merge Scores back to Original Transactions
+        # original_df is transaction-level. We broadcast the group score to all txns in that group.
+        # We use LEFT join to keep all transactions (even if unclustered/unscored)
+        full_df = original_df.merge(group_preds, on='global_group_id', how='left')
+
+        # 3. Define Mistake Columns
+        # Fill NaNs for unclustered rows
+        full_df['Group_Prob'] = full_df['Group_Prob'].fillna(0.0)
+        full_df['Group_Pred'] = full_df['Group_Pred'].fillna(0).astype(int)
+
+        # Determine Status: TP, TN, FP, FN, or Unscored
+        # We use the GROUP truth to define the mistake, as that's what the model saw.
+        conditions = [
+            (full_df['Group_True'] == 1) & (full_df['Group_Pred'] == 1),  # TP
+            (full_df['Group_True'] == 0) & (full_df['Group_Pred'] == 0),  # TN
+            (full_df['Group_True'] == 0) & (full_df['Group_Pred'] == 1),  # FP
+            (full_df['Group_True'] == 1) & (full_df['Group_Pred'] == 0),  # FN
+        ]
+        choices = ['TP', 'TN', 'FP', 'FN']
+
+        full_df['Result_Type'] = np.select(conditions, choices, default='Unscored')
+
+        # 4. Save to CSV
+        filename = f"mistake_analysis_{set_name}.csv"
+        logger.info(f"Saving full transaction-level analysis to {filename}...")
+        full_df.to_csv(filename, index=False)
+
+        # 5. Log Summary (Group Level for clarity)
+        # We aggregate back to group level just for the summary log
+        mistakes_df = full_df[full_df['Result_Type'].isin(['FP', 'FN'])].drop_duplicates('global_group_id')
+
+        fp_count = len(mistakes_df[mistakes_df['Result_Type'] == 'FP'])
+        fn_count = len(mistakes_df[mistakes_df['Result_Type'] == 'FN'])
+
+        logger.info(f"Mistake Counts (Groups): FP={fp_count}, FN={fn_count}")
+
+        # Show top examples
+        cols = ['global_group_id', 'bankRawDescription', 'amount', 'Group_Prob']
+
+        if fp_count > 0:
+            logger.info("\n>>> Top False Positives (Predicted Rec, Actual Not):")
+            top_fp = mistakes_df[mistakes_df['Result_Type'] == 'FP'].sort_values('Group_Prob', ascending=False).head(5)
+            logger.info(top_fp[cols].to_string(index=False))
+
+        if fn_count > 0:
+            logger.info("\n>>> Top False Negatives (Predicted Not, Actual Rec):")
+            top_fn = mistakes_df[mistakes_df['Result_Type'] == 'FN'].sort_values('Group_Prob', ascending=True).head(5)
+            logger.info(top_fn[cols].to_string(index=False))
+
+    except Exception as e:
+        logger.error(f"Error during mistake analysis: {e}", exc_info=True)
+
+def analyze_mistakes_simple_OK(
     index_df: pd.DataFrame,
     probs: np.ndarray,
     y_true: np.ndarray,
