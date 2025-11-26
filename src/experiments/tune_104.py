@@ -1,6 +1,6 @@
-from glob.hyper_tuner import HyperTuner
+from pointwise.hyper_tuner import HyperTuner
 from common.config import EmbModel
-from glob.classifier_transformer import TransformerHyperParams
+from pointwise.classifier_transformer import TransformerHyperParams
 
 structured_grid_config = {
     'exp_params': {

@@ -1,4 +1,4 @@
-from glob.hyper_tuner import HyperTuner
+from pointwise.hyper_tuner import HyperTuner
 from common.config import EmbModel
 
 # grid search around best from tune1

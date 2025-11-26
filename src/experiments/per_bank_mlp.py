@@ -6,9 +6,9 @@ import numpy as np
 
 from common.config import ExperimentConfig, FieldConfig, EmbModel
 from common.feature_processor import FeatProcParams
-from glob.classifier import HybridModel
+from pointwise.classifier import HybridModel
 from common.embedder import EmbeddingService
-from glob.runner import ExpRunner
+from pointwise.runner import ExpRunner
 from common.log_utils import setup_logging
 
 # Setup Logging

@@ -2,7 +2,7 @@ import torch
 
 from common.data import FeatureSet, TransactionDataset
 from common.feature_processor import HybridFeatureProcessor, FeatProcParams, FeatureHyperParams
-from glob.classifier import HybridModel
+from pointwise.classifier import HybridModel
 
 
 # Reusing fixtures from conftest.py implicitly
