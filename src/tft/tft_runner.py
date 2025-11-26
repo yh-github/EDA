@@ -120,7 +120,7 @@ class TFTRunner:
             if Path(best_path).exists():
                 logger.info(f"Restoring best weights from {best_path}")
                 # Load Lightning checkpoint
-                checkpoint = torch.load(best_path, map_location=model.device)
+                checkpoint = torch.load(best_path, map_location=model.device, weights_only=False)
                 model.load_state_dict(checkpoint["state_dict"])
             else:
                 logger.warning(f"Best model path {best_path} does not exist. Using last weights.")
