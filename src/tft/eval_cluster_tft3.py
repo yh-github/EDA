@@ -23,7 +23,7 @@ from tft.tft_runner import TFTRunner, RunConfig
 from tft.tft_data_clustered import build_clustered_tft_dataset
 from experiments.tft_tune4 import prepare_non_overlapping_data
 
-setup_logging(Path("logs/"), "eval_cluster2")
+setup_logging(Path("logs/"), "eval_cluster3")
 logger = logging.getLogger(__name__)
 
 
@@ -263,7 +263,7 @@ def evaluate_checkpoint(model_path: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python src/tft/eval_cluster_tft2.py <path_to_model.pt>")
+        print("Usage: python src/tft/eval_cluster_tft3.py <path_to_model.pt>")
         sys.exit(1)
 
     evaluate_checkpoint(sys.argv[1])
