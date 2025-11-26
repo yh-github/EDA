@@ -1,5 +1,7 @@
-import logging
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import logging
 import time
 from dataclasses import dataclass
 

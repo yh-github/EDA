@@ -113,7 +113,7 @@ def run_bank_benchmark():
     # --- 2. Load and Preprocess Data ---
     logger.info(f"Loading data from {args.data_path}...")
     try:
-        full_df = pd.read_csv(args.data_path)
+        full_df = pd.read_csv(args.data_path, low_memory=False)
     except FileNotFoundError:
         logger.error(f"File not found: {args.data_path}")
         return
