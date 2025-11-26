@@ -1,21 +1,38 @@
 import gc
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 import lightning.pytorch as pl
 import optuna
 import pandas as pd
 import torch
-import torch.nn.functional as F
+from torch.nn.functional import cross_entropy
 from lightning.pytorch.callbacks import EarlyStopping
 from optuna.integration import PyTorchLightningPruningCallback
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import CrossEntropy
 from torch.utils.data import DataLoader
 
+from common.config import ExperimentConfig, FieldConfig
+from common.embedder import EmbeddingService
+from common.feature_processor import FeatProcParams
 from tft.metrics import RawMetricsCallback, AggregatedMetricsCallback, BaseMetricsCallback
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RunConfig:
+    experiment_config: ExperimentConfig
+    field_config: FieldConfig
+    emb_params: EmbeddingService.Params
+    feat_proc_params: FeatProcParams
+    pos_weight: float | None = None
+    max_epochs: int = 10
+    use_aggregation: bool = False
+    patience: int = 3
+    reduce_on_plateau_patience: int = 2  # < patience
 
 
 class WeightedCrossEntropy(CrossEntropy):
@@ -30,7 +47,7 @@ class WeightedCrossEntropy(CrossEntropy):
             else:
                 self.weight = self.weight.to(y_pred.device)
 
-        loss_val = F.cross_entropy(
+        loss_val = cross_entropy(
             y_pred.view(-1, y_pred.size(-1)),
             y_actual.view(-1),
             weight=self.weight,
@@ -41,34 +58,27 @@ class WeightedCrossEntropy(CrossEntropy):
 class TFTRunner:
     def __init__(
             self,
+            run_config: RunConfig,
             train_ds: TimeSeriesDataSet,
             train_loader: DataLoader,
             val_loader: DataLoader,
             # Pass the validation DF here!
-            val_df: pd.DataFrame | None = None,
-            pos_weight: float | None = None,
-            max_epochs: int = 10,
-            use_aggregation: bool = True
+            val_df: pd.DataFrame | None = None
     ) -> None:
+        self.run_config = run_config
         self.train_ds = train_ds
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.val_df = val_df
-        self.pos_weight = pos_weight
-        self.max_epochs = max_epochs
         self.best_tuning_f1: float = -1.0
-        self.use_aggregation = use_aggregation
 
-        # TODO parameters
-        self.patience = 3
-        self.reduce_on_plateau_patience = 2 # < patience
 
     def _get_metrics_callback(self) -> BaseMetricsCallback:
         """Factory method to select the correct metrics callback."""
-        if self.use_aggregation and self.val_df is not None:
+        if self.run_config.use_aggregation and self.val_df is not None:
             return AggregatedMetricsCallback(validation_df=self.val_df)
 
-        if self.use_aggregation and self.val_df is None:
+        if self.run_config.use_aggregation and self.val_df is None:
             logger.warning("use_aggregation=True but val_df is None. Using RawMetricsCallback.")
 
         return RawMetricsCallback()
@@ -76,12 +86,12 @@ class TFTRunner:
     def _create_model(self, params: dict[str, Any]) -> TemporalFusionTransformer:
         loss_fn = params.get("loss")
         if loss_fn is None:
-            if self.pos_weight is not None:
-                loss_fn = WeightedCrossEntropy(weight=[1.0, self.pos_weight])
+            if self.run_config.pos_weight is not None:
+                loss_fn = WeightedCrossEntropy(weight=[1.0, self.run_config.pos_weight])
             else:
                 loss_fn = CrossEntropy()
 
-        return TemporalFusionTransformer.from_dataset(
+        tft = TemporalFusionTransformer.from_dataset(
             self.train_ds,
             learning_rate=params["learning_rate"],
             hidden_size=params["hidden_size"],
@@ -91,8 +101,9 @@ class TFTRunner:
             output_size=params.get("output_size", 2),
             loss=loss_fn,
             log_interval=10,
-            reduce_on_plateau_patience=self.reduce_on_plateau_patience,
+            reduce_on_plateau_patience=self.run_config.reduce_on_plateau_patience,
         )
+        return cast(TemporalFusionTransformer, tft)
 
     @staticmethod
     def _cleanup_memory():
@@ -124,14 +135,20 @@ class TFTRunner:
         try:
             tft = self._create_model(params)
 
-            early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
+            early_stop = EarlyStopping(
+                monitor="val_loss",
+                min_delta=1e-4,
+                patience=self.run_config.patience,
+                verbose=False,
+                mode="min"
+            )
 
             metric_callback = self._get_metrics_callback()
 
             pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
 
             trainer = pl.Trainer(
-                max_epochs=self.max_epochs,
+                max_epochs=self.run_config.max_epochs,
                 accelerator="auto",
                 precision="bf16-mixed",
                 gradient_clip_val=params.get("gradient_clip_val", 0.1),
@@ -201,14 +218,15 @@ class TFTRunner:
         )
         return study
 
-    @staticmethod
-    def _save_checkpoint(model: TemporalFusionTransformer, params: dict, path: str | Path):
+
+    def _save_checkpoint(self, model: TemporalFusionTransformer, params: dict, path: str | Path):
         """Saves model weights AND configuration in one file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "state_dict": model.state_dict(),
-            "hyper_parameters": params
+            "hyper_parameters": params,
+            "run_config": self.run_config
         }
         torch.save(payload, path)
 
@@ -232,11 +250,11 @@ class TFTRunner:
                 trainer = pl.Trainer(accelerator="auto", logger=False, enable_checkpointing=False, max_epochs=0)
                 return trainer, tft
 
-        early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.patience, verbose=False, mode="min")
+        early_stop = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=self.run_config.patience, verbose=False, mode="min")
         metric_callback = self._get_metrics_callback()
 
         trainer = pl.Trainer(
-            max_epochs=self.max_epochs,
+            max_epochs=self.run_config.max_epochs,
             accelerator="auto",
             precision="bf16-mixed",
             gradient_clip_val=params.get("gradient_clip_val", 0.1),
@@ -291,6 +309,8 @@ class TFTRunner:
             log_interval=10,
             reduce_on_plateau_patience=4,
         )
+
+        tft = cast(TemporalFusionTransformer, tft)
 
         # Load Weights
         tft.load_state_dict(state_dict)

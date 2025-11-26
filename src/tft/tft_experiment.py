@@ -2,7 +2,7 @@ import logging
 import math
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, Any
+from typing import Callable, Any
 
 import lightning.pytorch as pl
 import pandas as pd
@@ -15,7 +15,7 @@ from common.feature_processor import FeatProcParams
 from common.log_utils import setup_logging
 # Default imports for the standard pipeline
 from tft.tft_data import prepare_tft_data, build_tft_dataset
-from tft.tft_runner import TFTRunner
+from tft.tft_runner import TFTRunner, RunConfig
 
 logger = logging.getLogger("tft_experiment")
 
@@ -43,6 +43,7 @@ class TFTTuningExperiment:
             log_dir: str = "logs/",
             use_aggregation: bool = False,
             feat_params: FeatProcParams|None = None,
+            emb_params: EmbeddingService.Params|None = None,
     ):
         self.study_name = study_name
         self.best_model_path = best_model_path
@@ -61,6 +62,7 @@ class TFTTuningExperiment:
             use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
             use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
         )
+        self.emb_params = emb_params or EmbeddingService.Params(model_name=EmbModel.MPNET)
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
@@ -83,7 +85,8 @@ class TFTTuningExperiment:
         )
 
         logger.info("Initializing Embedder...")
-        emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
+        emb_service = EmbeddingService.create(self.emb_params)
+        # emb_service = EmbeddingService(model_name=EmbModel.MPNET, max_length=64, batch_size=512)
 
         # Common feature params used by both experiments
         feat_params = self.feat_params
@@ -134,14 +137,20 @@ class TFTTuningExperiment:
 
         # Run Tuning
         runner = TFTRunner(
+            RunConfig(
+                field_config=field_config,
+                experiment_config=exp_params,
+                emb_params=self.emb_params,
+                feat_proc_params=self.feat_params,
+                pos_weight=pos_weight,
+                max_epochs=self.max_epochs,
+                use_aggregation=self.use_aggregation
+            ),
             train_ds,
             train_loader,
             val_loader,
             # --- Pass the validation DataFrame explicitly ---
-            val_df=val_df_prepped if self.use_aggregation else None,
-            pos_weight=pos_weight,
-            max_epochs=self.max_epochs,
-            use_aggregation=self.use_aggregation
+            val_df=val_df_prepped if self.use_aggregation else None
         )
 
         logger.info(f"Starting Study: {self.study_name}")

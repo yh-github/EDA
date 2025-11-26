@@ -1,3 +1,5 @@
+from common.config import EmbModel
+from common.embedder import EmbeddingService
 from common.exp_utils import get_cli_args
 from common.feature_processor import FeatProcParams
 from tft.tft_experiment import TFTTuningExperiment
@@ -11,7 +13,7 @@ MAX_ENCODER_LEN = 64
 BATCH_SIZE = 2048
 # Increase epochs slightly as we are narrowing in on a stable region
 MAX_EPOCHS = 25
-N_TRIALS = 20
+N_TRIALS = 10
 STUDY_NAME = "tft_tune5_refinement"
 BEST_MODEL_PATH = "cache/tft_models/best_tune5_model.pt"
 
@@ -27,8 +29,8 @@ if __name__ == "__main__":
         # Winner was 0.28. Range [0.25, 0.35] covers top trials.
         "dropout": lambda trial: trial.suggest_float("dropout", 0.25, 0.35),
 
-        # Winner used 2, but 4 was close.
-        "attention_head_size": lambda trial: trial.suggest_categorical("attention_head_size", [2, 4]),
+        # Winner used 2
+        "attention_head_size": 2,
 
         # Winner was 0.53.
         "gradient_clip_val": lambda trial: trial.suggest_float("gradient_clip_val", 0.3, 0.7)
@@ -58,6 +60,8 @@ if __name__ == "__main__":
             use_is_positive=False, use_categorical_dates=True, use_cyclical_dates=True,
             use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0,
             use_behavioral_features=True
-        )
+        ),
+
+        emb_params=EmbeddingService.Params(model_name=EmbModel.MPNET, max_length=64)
     )
     experiment.run()
