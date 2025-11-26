@@ -393,7 +393,8 @@ class ExpRunner:
 
         final_metrics_rounded = {k: r(v) for k, v in final_metrics.items()}
 
-        model.load_state_dict(trainer.best_model_state())
+        if trainer.best_model_state is not None:
+            model.load_state_dict(trainer.best_model_state)
 
         return {
             **final_metrics_rounded,
