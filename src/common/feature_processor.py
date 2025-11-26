@@ -40,6 +40,7 @@ class FeatProcParams:
     k_top: int = 20
     n_bins: int = 20
     use_behavioral_features: bool = False
+    text_dim_reduce: int|None = None
 
     def is_nop(self) -> bool:
         return all(

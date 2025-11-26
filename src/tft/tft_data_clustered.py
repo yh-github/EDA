@@ -97,7 +97,7 @@ def prepare_clustered_tft_data(
         processor: HybridFeatureProcessor = None,
         fit_processor: bool = False
 ) -> tuple[pd.DataFrame, PCA, HybridFeatureProcessor, FeatureMetadata]:
-    n_components = 16
+    pca_components = feat_params.text_dim_reduce or 16
 
     df = df.copy()
 
@@ -140,7 +140,7 @@ def prepare_clustered_tft_data(
 
         # KEY: Use existing PCA if provided (Inference Mode), else Fit (Training Mode)
         if pca_model is None:
-            pca_model = PCA(n_components=n_components)
+            pca_model = PCA(n_components=pca_components)
             compressed = pca_model.fit_transform(embeddings)
         else:
             compressed = pca_model.transform(embeddings)

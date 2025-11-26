@@ -93,13 +93,13 @@ def assign_non_overlapping_amount_clusters(
 
 
 def prepare_non_overlapping_data(
-        df: pd.DataFrame,
-        field_config: FieldConfig,
-        feat_params: FeatProcParams = None,
-        embedding_service: EmbeddingService = None,
-        pca_model: PCA = None,
-        processor: HybridFeatureProcessor = None,
-        fit_processor: bool = False
+    df: pd.DataFrame,
+    field_config: FieldConfig,
+    feat_params: FeatProcParams = None,
+    embedding_service: EmbeddingService = None,
+    pca_model: PCA = None,
+    processor: HybridFeatureProcessor = None,
+    fit_processor: bool = False
 ):
     """
     Custom preparation pipeline for Tune 4.
@@ -144,7 +144,7 @@ def prepare_non_overlapping_data(
         embeddings = embedding_service.embed(texts)
 
         if pca_model is None:
-            pca_model = PCA(n_components=16)
+            pca_model = PCA(n_components=feat_params.text_dim_reduce or 16)
             compressed = pca_model.fit_transform(embeddings)
         else:
             compressed = pca_model.transform(embeddings)
@@ -175,7 +175,7 @@ if __name__ == "__main__":
         prepare_data_fn=prepare_non_overlapping_data,
 
         # Reuse the Clustered Dataset Builder (compatible with global_group_id)
-        build_dataset_fn=build_clustered_tft_dataset, ###### <<< NO
+        build_dataset_fn=build_clustered_tft_dataset,
 
         # Disabled per your request: Clusters are unique, so no aggregation needed.
         use_aggregation=False

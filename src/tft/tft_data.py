@@ -10,14 +10,14 @@ from common.feature_processor import HybridFeatureProcessor, FeatProcParams, Fea
 
 
 def prepare_tft_data(
-        df: pd.DataFrame,
-        field_config: FieldConfig,
-        feat_params: FeatProcParams = None,
-        embedding_service: EmbeddingService = None,
-        pca_model: PCA = None,
-        processor: HybridFeatureProcessor = None,
-        fit_processor: bool = False,
-        filter_direction: int = 1
+    df: pd.DataFrame,
+    field_config: FieldConfig,
+    feat_params: FeatProcParams = None,
+    embedding_service: EmbeddingService = None,
+    pca_model: PCA = None,
+    processor: HybridFeatureProcessor = None,
+    fit_processor: bool = False,
+    filter_direction: int = 1
 ) -> tuple[pd.DataFrame, PCA, HybridFeatureProcessor, FeatureMetadata]:
     """
     Prepares data for TFT by:
@@ -26,7 +26,7 @@ def prepare_tft_data(
     3. Generating/Compressing Text Embeddings.
     4. Running HybridFeatureProcessor for Date/Amount features.
     """
-    pca_components = 16
+    pca_components = feat_params.text_dim_reduce or 16
 
     df = df.copy()
 
