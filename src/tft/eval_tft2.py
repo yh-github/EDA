@@ -18,10 +18,6 @@ from common.embedder import EmbeddingService
 setup_logging(Path("logs/"), "eval_refined")
 logger = logging.getLogger(__name__)
 
-# UPDATE THIS TO YOUR ACTUAL CHECKPOINT PATH
-CHECKPOINT_PATH = "cache/tft_models/best_tune1.1_model.pt"
-
-
 @dataclass
 class InteroperableGroup:
     group_id: str
@@ -123,7 +119,7 @@ def is_simple_cycle(days: float) -> bool:
     return False
 
 
-def evaluate_refined():
+def evaluate_refined(mode_path:Path):
     # 1. Load Data
     field_config = FieldConfig()
     full_df = pd.read_csv("data/rec_data2.csv").dropna(
@@ -169,17 +165,17 @@ def evaluate_refined():
     )
 
     # 3. Load Model
-    if not Path(CHECKPOINT_PATH).exists():
-        logger.error(f"Checkpoint not found at {CHECKPOINT_PATH}")
+    if not Path(mode_path).exists():
+        logger.error(f"Checkpoint not found at {mode_path}")
         return
 
-    tft = TFTRunner.load_from_checkpoint(CHECKPOINT_PATH, dataset=dummy_ds)
+    tft = TFTRunner.load_from_checkpoint(mode_path, dataset=dummy_ds)
     tft.dataset = dummy_ds
     logger.info("Model loaded successfully.")
 
     # 4. Create Loader
     test_ds = TimeSeriesDataSet.from_dataset(dummy_ds, test_df_prepped, predict=True, stop_randomization=True)
-    test_loader = test_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
+    test_loader = test_ds.to_dataloader(train=False, batch_size=256, num_workers=0)
 
     # 5. Raw Predictions
     logger.info("Running raw predictions...")
@@ -255,6 +251,6 @@ def evaluate_refined():
         for g in filtered_groups[:5]:
             logger.info(f"  - Rejected '{g.description}' (Conf: {g.confidence:.2f}, Cycle: {g.cycle_days:.1f} days)")
 
-
+import sys
 if __name__ == "__main__":
-    evaluate_refined()
+    evaluate_refined(Path(sys.argv[1]))
