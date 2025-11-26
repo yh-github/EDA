@@ -216,7 +216,7 @@ def evaluate_checkpoint(model_path: str):
         loader = inference_ds.to_dataloader(train=False, batch_size=256, num_workers=4)
 
         # Predict
-        raw_output = tft.predict(loader, mode="raw", return_x=True)
+        raw_output = tft.predict(loader, mode="raw", return_x=True, return_index=True)
         raw_preds = raw_output[0]
         x = raw_output[1]
         index_df = raw_output[2]
