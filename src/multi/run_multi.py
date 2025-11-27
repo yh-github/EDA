@@ -1,4 +1,7 @@
 import os
+
+from common.exp_utils import set_global_seed
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import argparse
@@ -64,14 +67,15 @@ def main():
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
 
     # Reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
+    set_global_seed(config.random_state)
 
     # 2. Load Data
-    if args.data and os.path.exists(args.data):
+    if args.data and args.data.lower()=="mock":
+        df = mock_data_generator()
+    elif args.data and os.path.exists(args.data):
         df = pd.read_csv(args.data)
     else:
-        df = mock_data_generator()
+        raise Exception(f"No CSV found path={args.data}")
 
     logger.info(f"Loaded {len(df)} transactions.")
 

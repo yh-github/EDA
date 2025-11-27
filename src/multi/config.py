@@ -9,6 +9,7 @@ class MultiExpConfig:
     Central configuration for the Multi experiment.
     """
     # Paths
+    random_state: int = 0x5EED
     data_path: str = "./data/transactions.csv"
     output_dir: str = "./checkpoints"
 

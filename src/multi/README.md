@@ -103,7 +103,8 @@ We use a **Cascade Evaluation** strategy to ensure quality at every level:
 
 Input CSV should contain at least:
 
-* accountId: Unique user ID.  
+* trId: Unique transaction ID.
+* accountId: Unique user ID.
 * date: Transaction date.  
 * amount: Transaction amount.  
 * bankRawDescription: Description text.  
