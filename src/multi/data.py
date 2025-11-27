@@ -62,6 +62,8 @@ class MultiTransactionDataset(Dataset):
         noise_mask = df['patternId_str'].isin(['-1', '-1.0', 'None', 'nan', '<NA>'])
         df.loc[noise_mask, 'patternId_encoded'] = -1
 
+        df = df.drop(columns=['patternId_str'])
+
         return df
 
     def __len__(self):
@@ -75,8 +77,7 @@ class MultiTransactionDataset(Dataset):
         if len(group) > self.config.max_seq_len:
             group = group.sort_values(f.date, ascending=True).iloc[-self.config.max_seq_len:]
 
-        # Features
-        # FIX: Handle missing counter_party gracefully if it doesn't exist in DataFrame
+        # Handle missing counter_party gracefully if it doesn't exist in DataFrame
         desc = group[f.text].fillna('')
         if f.counter_party in group.columns:
             cp = group[f.counter_party].fillna('')
