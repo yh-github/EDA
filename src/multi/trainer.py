@@ -40,7 +40,8 @@ class MultiTrainer:
             # 1. Adjacency Loss
             mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
             adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
-            adj_loss = (adj_loss * mask_2d).sum() / mask_2d.sum().clamp(min=1)
+
+            adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
 
             # 2. Cycle Loss
             cycle_loss = self.cycle_criterion(
@@ -48,7 +49,7 @@ class MultiTrainer:
                 batch['cycle_target'].view(-1)
             )
             mask_1d = batch['padding_mask'].view(-1)
-            cycle_loss = (cycle_loss * mask_1d).sum() / mask_1d.sum().clamp(min=1)
+            cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
 
             loss = adj_loss + cycle_loss
 
