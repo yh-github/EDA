@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-
 import torch
+from common.config import EmbModel
 
 
 @dataclass
@@ -13,8 +13,7 @@ class MultiExpConfig:
     output_dir: str = "./checkpoints"
 
     # Model Hyperparameters
-    # Using a tiny BERT for speed/demo; on A100 you can upgrade to 'distilbert-base-uncased'
-    text_encoder_model: str = "prajjwal1/bert-tiny"
+    text_encoder_model: str = EmbModel.MPNET.value
     hidden_dim: int = 256
     num_heads: int = 4
     num_layers: int = 2

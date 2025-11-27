@@ -368,4 +368,7 @@ def deduplicate(df: pd.DataFrame, field_config: FieldConfig=FieldConfig()) -> pd
     if dropped_count > 0:
         logger.info(f"Deduplicated transactions: Dropped {dropped_count} rows based on '{field_config.trId}'.")
 
+    mask = (df['isForeignCurrency'] == False) & (df['status'] == 'Cleared')
+    df_deduped = df_deduped[mask]
+
     return df_deduped

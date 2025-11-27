@@ -46,11 +46,10 @@ def bcubed_precision_recall(true_ids, pred_ids):
 def evaluate_run(data_path, model_path, embedder_model_name):
     # 1. Setup
     config = MultiExpConfig()
-    config.batch_size = 32
 
-    emb_params = EmbeddingService.Params(model_name=embedder_model_name)
-    service = EmbeddingService.create(emb_params)
-    predictor = MultiPredictor(model_path, config, service)
+    # 2. Predictor (Embedder removed from init, handled internally)
+    predictor = MultiPredictor(model_path, config)
+
 
     # 2. Predict
     print(f"Loading data from {data_path}...")

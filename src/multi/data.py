@@ -8,31 +8,31 @@ from multi.config import MultiExpConfig
 
 class MultiTransactionDataset(Dataset):
     def __init__(self, df: pd.DataFrame, config: MultiExpConfig, tokenizer):
-        """
-        Groups transactions by AccountID AND Direction (Credit/Debit).
-        This reduces N and isolates distinct patterns.
-        """
         self.config = config
         self.tokenizer = tokenizer
 
-        # 1. Filter out long cycles
+        # Safe handling of missing target columns for Inference
+        if 'patternCycle' not in df.columns:
+            df['patternCycle'] = 'None'
+        if 'patternId' not in df.columns:
+            df['patternId'] = -1
+
+        # 1. Filter out long cycles (if they exist)
         df = df[~df['patternCycle'].isin(['Annual', 'SemiAnnual'])].copy()
 
         # 2. Fill NaNs
         df['patternId'] = df['patternId'].fillna(-1)
         df['patternCycle'] = df['patternCycle'].fillna('None')
 
-        # 3. Create Direction Column (1 for Credit, -1 for Debit)
-        # We handle 0 amounts as Debit or ignore them
+        # 3. Create Direction Column
         df['direction'] = np.sign(df['amount'])
-        # Filter out 0 amounts if they exist (usually failed txns)
         df = df[df['direction'] != 0]
 
         # 4. Group by Account AND Direction
-        # This effectively splits every account into two independent samples
         self.groups = [group for _, group in df.groupby(['accountId', 'direction'])]
 
-        # Shuffle groups to mix credits and debits in batches
+        # Only shuffle if training; usually done via DataLoader shuffle=True,
+        # but shuffling the list here helps mixing credit/debit in batches
         np.random.shuffle(self.groups)
 
     def __len__(self):
@@ -43,22 +43,16 @@ class MultiTransactionDataset(Dataset):
 
         # Cap sequence length
         if len(group) > self.config.max_seq_len:
-            # We take the MOST RECENT transactions.
             group = group.sort_values('date', ascending=True).iloc[-self.config.max_seq_len:]
 
-        # 1. Text Features
+        # Features
         texts = (group['bankRawDescription'].fillna('') + " " + group['counter_party'].fillna('')).tolist()
-
-        # 2. Amount Features
         amounts = group['amount'].values.astype(np.float32)
-        # Log normalize
         log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
-
-        # 3. Date Features
         dates = pd.to_datetime(group['date'])
         days_since_start = (dates - dates.min()).dt.days.values.astype(np.float32)
 
-        # 4. Targets
+        # Targets
         pattern_ids = group['patternId'].values
         cycles = group['patternCycle'].map(self.config.cycle_map).fillna(0).values.astype(np.int64)
 
@@ -72,9 +66,7 @@ class MultiTransactionDataset(Dataset):
 
 
 def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
-    """
-    Standard dynamic padding collate function.
-    """
+    """Standard dynamic padding collate function."""
 
     # Flatten texts
     all_texts = [t for item in batch for t in item['texts']]
@@ -110,11 +102,14 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         batched_days[i, :length, 0] = torch.tensor(item['days'])
         batched_cycles[i, :length] = torch.tensor(item['cycles'])
 
-        # Adjacency
+        # Adjacency Matrix Construction
+        # Only construct adjacency if we have valid pattern IDs (not all -1)
         p_ids = item['pattern_ids']
-        p_ids_tensor = torch.tensor(p_ids).unsqueeze(1)
-        matches = (p_ids_tensor == p_ids_tensor.T) & (p_ids_tensor != -1)
-        batched_adjacency[i, :length, :length] = matches.float()
+        if np.any(p_ids != -1):
+            p_ids_tensor = torch.tensor(p_ids).unsqueeze(1)
+            # Match if IDs are same AND ID is not -1
+            matches = (p_ids_tensor == p_ids_tensor.T) & (p_ids_tensor != -1)
+            batched_adjacency[i, :length, :length] = matches.float()
 
         padding_mask[i, :length] = True
         current_idx += length
