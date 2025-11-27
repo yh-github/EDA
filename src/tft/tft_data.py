@@ -1,5 +1,4 @@
 import logging
-
 import pandas as pd
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data.encoders import NaNLabelEncoder, EncoderNormalizer
