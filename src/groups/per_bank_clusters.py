@@ -1,10 +1,8 @@
-import logging
 import argparse
-import pandas as pd
-import numpy as np
+import logging
 import warnings
 from pathlib import Path
-from sklearn.metrics import classification_report, precision_recall_fscore_support
+import pandas as pd
 
 # Suppress Warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -18,7 +16,6 @@ from common.data import filter_unique_bank_variants
 from pointwise.runner import ExpRunner
 from pointwise.classifier import HybridModel
 from groups.model_clusterer import ModelBasedClusterer
-from common.data import FeatureSet
 
 logger = logging.getLogger(__name__)
 
