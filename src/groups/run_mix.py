@@ -17,8 +17,8 @@ from common.log_utils import setup_logging
 from common.data import filter_unique_bank_variants, FeatureSet
 from pointwise.runner import ExpRunner
 from pointwise.classifier import HybridModel
-# We import the class directly; ensure your file matches this import
-from groups.model_clusterer import ModelBasedClusterer
+# Ensure your model_clusterer.py has the 'enable_recovery' update!
+from groups.model_clusterer2 import ModelBasedClusterer
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,22 @@ def run_mixed_experiment():
         df_clean[field_config.label] = df_clean[field_config.label].astype(str).str.lower() == 'true'
     df_clean[field_config.label] = df_clean[field_config.label].astype(int)
 
-    # --- DOWNSAMPLE STEP ---
-    logger.info("Downsampling dataset to 33%...")
-    df_clean = df_clean.sample(frac=0.3, random_state=112025)
+    # --- CRITICAL FIX: ACCOUNT-BASED SAMPLING ---
+    # We must keep the *entire history* for a subset of users.
+    logger.info("Downsampling dataset to 33% of ACCOUNTS...")
+    unique_accounts = df_clean[field_config.accountId].unique()
 
-    logger.info(f"Dataset Ready: {len(df_clean)} rows across {df_clean['bank_name'].nunique()} banks.")
+    # Randomly select 33% of account IDs
+    rng = np.random.default_rng(112025)
+    selected_accounts = rng.choice(unique_accounts, size=int(len(unique_accounts) * 0.33), replace=False)
+
+    # Filter dataframe to keep ONLY rows from selected accounts
+    df_clean = df_clean[df_clean[field_config.accountId].isin(selected_accounts)].copy()
+
+    logger.info(
+        f"Dataset Ready: {len(df_clean)} rows ({len(selected_accounts)} accounts) across {df_clean['bank_name'].nunique()} banks.")
 
     # 3. Configuration
-    # Larger batch size for efficiency
     exp_config = ExperimentConfig(epochs=5, batch_size=256)
 
     feat_params = FeatProcParams(
@@ -130,15 +138,15 @@ def run_mixed_experiment():
     # 6. Run Model-Based Clustering (Test Set)
     logger.info(">>> STEP 2: Running Model-Based Clustering on Global Test Set...")
 
-    # Initialize Clusterer
+    # Initialize Clusterer WITH Recovery
     clusterer = ModelBasedClusterer(
         model, processor,
         min_samples=2,
         use_gpu=args.gpu,
         voting_threshold=0.4,
         anchoring_threshold=0.85,
-        # enable_recovery=True,
-        # recovery_distance_threshold=2.5
+        enable_recovery=True,
+        recovery_distance_threshold=2.5
     )
 
     results = []
