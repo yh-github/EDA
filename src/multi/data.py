@@ -20,9 +20,8 @@ class MultiTransactionDataset(Dataset):
         # 1. Filter out long cycles (if they exist)
         df = df[~df['patternCycle'].isin(['Annual', 'SemiAnnual'])].copy()
 
-        # 2. Fill NaNs
-        df['patternId'] = df['patternId'].fillna(-1)
-        df['patternCycle'] = df['patternCycle'].fillna('None')
+        # 2. Encode Pattern IDs (Extracted to method for cleanliness)
+        df = self._encode_pattern_ids(df)
 
         # 3. Create Direction Column
         df['direction'] = np.sign(df['amount'])
@@ -31,9 +30,27 @@ class MultiTransactionDataset(Dataset):
         # 4. Group by Account AND Direction
         self.groups = [group for _, group in df.groupby(['accountId', 'direction'])]
 
-        # Only shuffle if training; usually done via DataLoader shuffle=True,
-        # but shuffling the list here helps mixing credit/debit in batches
+        # Only shuffle if training
         np.random.shuffle(self.groups)
+
+    def _encode_pattern_ids(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Robustly encodes string/mixed pattern IDs into integers for PyTorch.
+        Preserves -1 as the 'Noise' label.
+        """
+        # Ensure it's a string to handle mixed types safely
+        df['patternId_str'] = df['patternId'].astype(str)
+
+        # Factorize creates a unique int for every unique string.
+        codes, _ = pd.factorize(df['patternId_str'])
+        df['patternId_encoded'] = codes
+
+        # Identify which code corresponds to our "Noise" labels ("-1", "None", "nan")
+        # We map these back to -1 so the collate_fn knows to ignore them.
+        noise_mask = df['patternId_str'].isin(['-1', '-1.0', 'None', 'nan', '<NA>'])
+        df.loc[noise_mask, 'patternId_encoded'] = -1
+
+        return df
 
     def __len__(self):
         return len(self.groups)
@@ -53,7 +70,8 @@ class MultiTransactionDataset(Dataset):
         days_since_start = (dates - dates.min()).dt.days.values.astype(np.float32)
 
         # Targets
-        pattern_ids = group['patternId'].values
+        # Use the encoded integer ID we created
+        pattern_ids = group['patternId_encoded'].values.astype(np.int64)
         cycles = group['patternCycle'].map(self.config.cycle_map).fillna(0).values.astype(np.int64)
 
         return {
@@ -110,6 +128,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         if np.any(p_ids != -1):
             p_ids_tensor = torch.tensor(p_ids).unsqueeze(1)
             # Match if IDs are same AND ID is not -1
+            # Broadcast to create N x N matrix
             matches = (p_ids_tensor == p_ids_tensor.T) & (p_ids_tensor != -1)
             batched_adjacency[i, :length, :length] = matches.float()
 
