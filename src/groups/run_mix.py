@@ -137,8 +137,8 @@ def run_mixed_experiment():
         use_gpu=args.gpu,
         voting_threshold=0.4,
         anchoring_threshold=0.85,
-        enable_recovery=True,
-        recovery_distance_threshold=2.5
+        # enable_recovery=True,
+        # recovery_distance_threshold=2.5
     )
 
     results = []
