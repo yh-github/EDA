@@ -5,23 +5,39 @@ import torch.nn as nn
 from transformers import AutoModel
 from multi.config import MultiExpConfig
 
-
 class TimeEncoding(nn.Module):
-    def __init__(self, hidden_dim):
+    """
+    Sinusoidal Positional Encoding for time (days).
+    Allows the model to learn periodicity (e.g., 7 days, 30 days).
+    """
+
+    def __init__(self, hidden_dim:int, max_len:int=10000):
         super().__init__()
         self.hidden_dim = hidden_dim
-        # Frequencies usually range from 1 to 10000
-        self.div_term = torch.exp(torch.arange(0, hidden_dim, 2) * (-math.log(10000.0) / hidden_dim))
+
+        # Create constant 'pe' matrix with values dependent on pos and i
+        # We register it as a buffer so it saves with the model but isn't a trained parameter
+        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(10000.0) / hidden_dim))
+        self.register_buffer('div_term', div_term)
 
     def forward(self, days):
-        # days shape: [Batch, Seq, 1]
-        pe = torch.zeros(days.shape[0], days.shape[1], self.hidden_dim).to(days.device)
-        position = days * 1.0  # Ensure float
+        """
+        Args:
+            days: Tensor of shape [Batch, Seq, 1] containing day offsets (float)
+        """
+        # Output shape: [Batch, Seq, Hidden_Dim]
+        pe = torch.zeros(days.shape[0], days.shape[1], self.hidden_dim, device=days.device)
 
-        # Apply Sine to even indices, Cosine to odd indices
+        # We use the scalar 'days' values as the 'position'
+        # days is [B, S, 1], div_term is [H/2]
+        # position * div_term -> [B, S, H/2]
+        position = days * 1.0
+
         pe[:, :, 0::2] = torch.sin(position * self.div_term)
         pe[:, :, 1::2] = torch.cos(position * self.div_term)
+
         return pe
+
 
 class TransactionEncoder(nn.Module):
     class TransactionEncoder(nn.Module):
@@ -73,6 +89,7 @@ class TransactionEncoder(nn.Module):
 
         self.amount_proj = nn.Linear(1, config.hidden_dim)
         self.time_encoder = TimeEncoding(config.hidden_dim)
+        self.calendar_proj = nn.Linear(4, config.hidden_dim)
         self.layer_norm = nn.LayerNorm(config.hidden_dim)
 
     def _encode_text_stream(self, input_ids, attention_mask, projector):
@@ -89,6 +106,7 @@ class TransactionEncoder(nn.Module):
             attention_mask: torch.Tensor,
             amounts: torch.Tensor,
             days: torch.Tensor,
+            calendar_features: torch.Tensor,
             cp_input_ids: torch.Tensor = None,
             cp_attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
@@ -99,9 +117,14 @@ class TransactionEncoder(nn.Module):
 
         amt_emb = self.amount_proj(amounts)
 
-        day_emb = self.time_encoder(days)
+        # Helps learn "Every 28 days"
+        freq_emb = self.time_encoder(days)
 
-        fused = desc_emb + amt_emb + day_emb
+        # 4. Phase Context (Absolute Calendar)
+        # Helps learn "On the 1st" or "On weekends"
+        phase_emb = self.calendar_proj(calendar_features)
+
+        fused = desc_emb + amt_emb + freq_emb + phase_emb
 
         if self.use_cp and cp_input_ids is not None:
             cp_emb = self._encode_text_stream(cp_input_ids, cp_attention_mask, self.cp_proj)
@@ -134,6 +157,7 @@ class TransactionTransformer(nn.Module):
             batch['attention_mask'],
             batch['amounts'],
             batch['days'],
+            batch['calendar_features'],
             cp_input_ids=batch.get('cp_input_ids'),
             cp_attention_mask=batch.get('cp_attention_mask')
         )

@@ -67,6 +67,8 @@ class MultiPredictor:
 
             if not batch_data: continue
 
+            # collate_fn handles padding and tensor conversion
+            # It now expects 'calendar_features' in the input dicts
             batch = collate_fn(batch_data, self.tokenizer, self.config)
             batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
 
@@ -104,11 +106,26 @@ class MultiPredictor:
             min_date = dates.iloc[0]
             days = (dates - min_date).dt.days.values.astype(np.float32)
 
+            # --- NEW: Generate Calendar Features (Mirroring data.py) ---
+            # Day of Week (0=Mon, 6=Sun)
+            dow = dates.dt.dayofweek.values.astype(np.float32)
+            # Day of Month (1..31)
+            dom = dates.dt.day.values.astype(np.float32)
+
+            two_pi = 2 * np.pi
+            calendar_feats = np.stack([
+                np.sin(dow * (two_pi / 7)),
+                np.cos(dow * (two_pi / 7)),
+                np.sin(dom * (two_pi / 31)),
+                np.cos(dom * (two_pi / 31))
+            ], axis=1).astype(np.float32)
+
             batch_list.append({
                 "texts": texts,
                 "cps": cps,
                 "amounts": log_amounts,
                 "days": days,
+                "calendar_features": calendar_feats, # <--- Added
                 "pattern_ids": np.zeros(len(group)) - 1,
                 "cycles": np.zeros(len(group)),
             })
@@ -139,6 +156,7 @@ class MultiPredictor:
             for cluster_id in range(n_components):
                 indices = np.where(labels == cluster_id)[0]
 
+                # We keeping the min size 2 filter for now as requested
                 if len(indices) < 2:
                     continue
 

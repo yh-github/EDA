@@ -71,7 +71,27 @@ class MultiTransactionDataset(Dataset):
 
         dates = pd.to_datetime(group[f.date])
         min_date = dates.iloc[0]
+        # 1. Existing Relative Time (For Frequency/Intervals)
         days_since_start = (dates - min_date).dt.days.values.astype(np.float32)
+
+        # 2. NEW: Calendar Features (For Phase/Seasonality)
+        # Day of Week (0=Mon, 6=Sun)
+        dow = dates.dt.dayofweek.values.astype(np.float32)
+        # Day of Month (1..31)
+        dom = dates.dt.day.values.astype(np.float32)
+
+        # Normalize to [0, 2π]
+        # We use 7 days for week, 31 days for month to ensure coverage
+        two_pi = 2 * np.pi
+
+        # 4 Dimensions: Sin/Cos Week, Sin/Cos Month
+        # Shape: [Seq_Len, 4]
+        calendar_feats = np.stack([
+            np.sin(dow * (two_pi / 7)),
+            np.cos(dow * (two_pi / 7)),
+            np.sin(dom * (two_pi / 31)),
+            np.cos(dom * (two_pi / 31))
+        ], axis=1).astype(np.float32)
 
         pattern_ids = group['patternId_encoded'].values.astype(np.int64)
         cycles = group[f.patternCycle].map(self.config.cycle_map).fillna(0).values.astype(np.int64)
@@ -81,6 +101,7 @@ class MultiTransactionDataset(Dataset):
             "cps": cps,
             "amounts": log_amounts,
             "days": days_since_start,
+            "calendar_features": calendar_feats,
             "pattern_ids": pattern_ids,
             "cycles": cycles
         }
@@ -128,6 +149,9 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
 
     b_amounts = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     b_days = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
+    # New: Calendar Buffer [Batch, Max_Len, 4]
+    b_calendar = torch.zeros((batch_size, max_len_in_batch, 4), dtype=torch.float32)
+
     b_cycles = torch.zeros((batch_size, max_len_in_batch), dtype=torch.long)
     b_adjacency = torch.zeros((batch_size, max_len_in_batch, max_len_in_batch), dtype=torch.float32)
     padding_mask = torch.zeros((batch_size, max_len_in_batch), dtype=torch.bool)
@@ -146,6 +170,9 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         # Scalars
         b_amounts[i, :length, 0] = torch.tensor(item['amounts'])
         b_days[i, :length, 0] = torch.tensor(item['days'])
+        # Calendar
+        b_calendar[i, :length, :] = torch.tensor(item['calendar_features'])
+
         b_cycles[i, :length] = torch.tensor(item['cycles'])
 
         # Adjacency
@@ -163,6 +190,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         "attention_mask": b_attn_mask,
         "amounts": b_amounts,
         "days": b_days,
+        "calendar_features": b_calendar,
         "adjacency_target": b_adjacency,
         "cycle_target": b_cycles,
         "padding_mask": padding_mask
