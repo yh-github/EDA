@@ -1,6 +1,7 @@
 import logging
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # FIX: Prevent tokenizer deadlocks
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import numpy as np
@@ -17,12 +18,6 @@ logger = logging.getLogger(__name__)
 
 class MultiPredictor:
     def __init__(self, model_path: str, runtime_config: MultiExpConfig = None):
-        """
-        Args:
-            model_path: Path to the .pt file
-            runtime_config: Optional config to override runtime params (like batch_size),
-                            but ARCHITECTURE params will be loaded from the checkpoint.
-        """
         if runtime_config is None:
             runtime_config = MultiExpConfig()
 
@@ -35,7 +30,6 @@ class MultiPredictor:
         if isinstance(checkpoint, dict) and "config" in checkpoint:
             saved_config = checkpoint["config"]
             state_dict = checkpoint["state_dict"]
-            # Allow runtime config to override batch_size
             saved_config.batch_size = runtime_config.batch_size
             self.config = saved_config
         else:
@@ -54,17 +48,14 @@ class MultiPredictor:
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         fc = self.field_config
 
-        # Validation
         req_cols = [fc.accountId, fc.date, fc.amount, fc.text]
         for col in req_cols:
             if col not in df.columns:
                 raise KeyError(f"Input DataFrame missing required column: {col}")
 
-        # Prepare Groups
         df['direction'] = np.sign(df[fc.amount])
         df = df[df['direction'] != 0].copy()
 
-        # Group processing
         groups = [group for _, group in df.groupby([fc.accountId, 'direction'])]
 
         results = []
@@ -91,27 +82,31 @@ class MultiPredictor:
 
     def _prepare_batch_data(self, groups):
         fc = self.field_config
+        use_cp = self.config.use_counter_party
         batch_list = []
 
         for group in groups:
             group = group.sort_values(fc.date)
 
-            # handle missing counter_party
-            desc = group[fc.text].fillna('')
-            if fc.counter_party in group.columns:
-                cp = group[fc.counter_party].fillna('')
-                texts = (desc + " " + cp).tolist()
-            else:
-                texts = desc.tolist()
+            texts = group[fc.text].fillna('').tolist()
+
+            cps = []
+            if use_cp:
+                if fc.counter_party in group.columns:
+                    cps = group[fc.counter_party].fillna('').tolist()
+                else:
+                    cps = [""] * len(texts)
 
             amounts = group[fc.amount].values.astype(np.float32)
             log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
 
             dates = pd.to_datetime(group[fc.date])
-            days = (dates - dates.min()).dt.days.values.astype(np.float32)
+            min_date = dates.iloc[0]
+            days = (dates - min_date).dt.days.values.astype(np.float32)
 
             batch_list.append({
                 "texts": texts,
+                "cps": cps,
                 "amounts": log_amounts,
                 "days": days,
                 "pattern_ids": np.zeros(len(group)) - 1,
@@ -130,7 +125,6 @@ class MultiPredictor:
             adj = probs[b_idx, :n, :n]
             node_cycles = cycle_softmax[b_idx, :n, :]
 
-            # Probability that cycle is NOT 'None' (index 0)
             recurring_scores = 1.0 - node_cycles[:, 0]
 
             adj_binary = (adj > 0.5).astype(int)
@@ -154,7 +148,6 @@ class MultiPredictor:
                 is_recurring = (best_cycle_idx != 0)
 
                 if is_recurring:
-                    # Generate unique pattern ID for this specific cluster
                     pid_str = f"{group[self.field_config.accountId].iloc[0]}_{group['direction'].iloc[0]}_{cluster_id}"
                     cycle_str = self.idx_to_cycle.get(best_cycle_idx, "None")
 

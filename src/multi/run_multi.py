@@ -1,5 +1,7 @@
 import os
+
 from common.exp_utils import set_global_seed
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
 import logging
@@ -8,12 +10,11 @@ import torch
 import random
 import numpy as np
 from pathlib import Path
-from multi.config import MultiExpConfig
+from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.data import get_dataloader
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
 from common.data import create_train_val_test_split
-from multi.config import MultiFieldConfig
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +39,7 @@ def mock_data_generator(num_accounts=100):
                 'accountId': acc_id,
                 'transactionId': f"{acc_id}_{i}",
                 'bankRawDescription': f"PAYMENT TO {'NETFLIX' if is_rec else 'STORE'} {random.randint(1, 100)}",
-                'counter_party': 'Netflix' if is_rec else 'Unknown',
+                'counterParty': 'Netflix' if is_rec else '',  # Include CP column for mock
                 'amount': amount,
                 'date': pd.Timestamp('2023-01-01') + pd.Timedelta(days=random.randint(0, 150)),
                 'isRecurring': is_rec,
@@ -64,12 +65,10 @@ def main():
     config.output_dir = args.output_dir
 
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
-
-    # Reproducibility
     set_global_seed(config.random_state)
 
     # 2. Load Data
-    if args.data and args.data.lower()=="mock":
+    if args.data and args.data.lower() == "mock":
         df = mock_data_generator()
     elif args.data and os.path.exists(args.data):
         df = pd.read_csv(args.data)
@@ -81,19 +80,35 @@ def main():
     df[field_config.accountId] = df[field_config.accountId].astype(str)
     df[field_config.trId] = df[field_config.trId].astype(str)
 
-    # 3. Downsample (Account-based)
+    # 3. Feature Availability Check
+    if field_config.counter_party in df.columns:
+        # Check coverage (non-empty)
+        # We treat empty strings and NaNs as "missing"
+        valid_cp = df[field_config.counter_party].replace('', np.nan).notna()
+        coverage = valid_cp.sum() / len(df)
+        logger.info(f"Counter Party Coverage: {coverage:.2%}")
+
+        if coverage < 0.5:
+            logger.warning("Counter Party coverage low (<50%). Disabling feature.")
+            config.use_counter_party = False
+        else:
+            logger.info("Counter Party coverage good. Enabling feature.")
+            config.use_counter_party = True
+    else:
+        logger.warning("Counter Party column missing. Disabling feature.")
+        config.use_counter_party = False
+
+    # 4. Downsample (Account-based)
     if 0.0 < args.downsample < 1.0:
         logger.info(f"Downsampling to {args.downsample:.0%} of accounts...")
         account_ids = df[field_config.accountId].unique()
         rng = np.random.default_rng(config.random_state)
-        # Ensure at least one account is selected
         n_select = max(1, int(len(account_ids) * args.downsample))
         selected_ids = rng.choice(account_ids, size=n_select, replace=False)
         df = df[df[field_config.accountId].isin(selected_ids)].copy()
         logger.info(f"Dataset size after downsampling: {len(df)} rows ({len(selected_ids)} accounts)")
 
-    # 4. Split Data (Using Common Utility)
-    # Using 10% Test / 10% Val / 80% Train to maximize training data while keeping checks
+    # 5. Split Data
     logger.info("Splitting data into Train/Val/Test...")
     train_df, val_df, test_df = create_train_val_test_split(
         test_size=0.1,
@@ -103,17 +118,16 @@ def main():
         field_config=field_config
     )
 
-    # 5. Data Loaders
-    # Note: get_dataloader initializes the Tokenizer internally based on config
+    # 6. Data Loaders
     train_loader = get_dataloader(train_df, config, shuffle=True)
     val_loader = get_dataloader(val_df, config, shuffle=False)
 
-    # 6. Model Initialization
-    logger.info(f"Initializing model on {config.device}...")
+    # 7. Model Initialization
+    logger.info(f"Initializing model on {config.device} (use_cp={config.use_counter_party})...")
     model = TransactionTransformer(config)
     trainer = MultiTrainer(model, config, pos_weight=2.5)
 
-    # 7. Training Loop
+    # 8. Training Loop
     best_f1 = -1.0
     save_path = os.path.join(config.output_dir, "model.pth")
 
@@ -123,15 +137,12 @@ def main():
 
         logger.info(f"Epoch {epoch + 1}/{config.num_epochs} | Loss: {train_loss:.4f} | Val F1: {metrics['f1']:.4f}")
 
-        # Save Best Model
         if metrics['f1'] > best_f1:
             best_f1 = metrics['f1']
-
             checkpoint = {
-                "config": config,  # Save the architecture params
-                "state_dict": model.state_dict()  # Save the weights
+                "config": config,
+                "state_dict": model.state_dict()
             }
-
             torch.save(checkpoint, save_path)
             logger.info(f"  --> New Best Model Saved to {save_path}")
 

@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 from torch.utils.data import Dataset
 from common.config import FieldConfig
+from multi.config import MultiFieldConfig
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ def create_train_val_test_split(
     val_size: float,
     full_df: pd.DataFrame,
     random_state: int,
-    field_config: FieldConfig = FieldConfig()
+    field_config: FieldConfig|MultiFieldConfig = FieldConfig()
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     logger.info(f"Splitting {len(full_df)} rows into Train/Val/Test...")
 
