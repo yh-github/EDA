@@ -15,13 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 class MultiTrainer:
-    def __init__(self, model, config: MultiExpConfig):
+    def __init__(self, model, config: MultiExpConfig, pos_weight: float = None):
         self.model = model.to(config.device)
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
         # Loss Functions
-        self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none')
+        # pos_weight to handle class imbalance (Sparse Edges)
+        if pos_weight:
+            # We must wrap the float in a tensor and move it to the device
+            weight_tensor = torch.tensor([pos_weight]).to(config.device)
+            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
+        else:
+            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none')
+
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
     def train_epoch(self, dataloader, epoch_idx):
@@ -74,10 +81,11 @@ class MultiTrainer:
 
             adj_logits, _ = self.model(batch)
 
+            # Standard threshold 0.5 might be too high initially if the model is conservative
             preds = (torch.sigmoid(adj_logits) > 0.5).float()
 
             mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-            # Remove diagonal from evaluation
+            # Remove diagonal from evaluation (self-loops are easy)
             eye = torch.eye(preds.shape[1], device=self.config.device).unsqueeze(0)
             mask_2d = mask_2d & (eye == 0)
 

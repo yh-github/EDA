@@ -109,7 +109,7 @@ def main():
     # 6. Model Initialization
     logger.info(f"Initializing model on {config.device}...")
     model = TransactionTransformer(config)
-    trainer = MultiTrainer(model, config)
+    trainer = MultiTrainer(model, config, pos_weight=2.5)
 
     # 7. Training Loop
     best_f1 = -1.0
