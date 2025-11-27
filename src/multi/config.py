@@ -33,6 +33,7 @@ class MultiExpConfig:
     num_heads: int = 4
     num_layers: int = 2
     dropout: float = 0.1
+    use_counter_party: bool = True
 
     # Training Hyperparameters
     batch_size: int = 16
@@ -41,8 +42,8 @@ class MultiExpConfig:
     max_seq_len: int = 200
 
     # Tokenizer Limits
-    max_text_length: int = 32  # Raw description
-    max_cp_length: int = 16    # Counter party (usually shorter)
+    max_text_length: int = 64
+    max_cp_length: int = 32
 
     # Cycle Labels
     cycle_map: dict = field(default_factory=lambda: {
