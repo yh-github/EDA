@@ -17,6 +17,7 @@ from common.log_utils import setup_logging
 from common.data import filter_unique_bank_variants, FeatureSet
 from pointwise.runner import ExpRunner
 from pointwise.classifier import HybridModel
+# We import the class directly; ensure your file matches this import
 from groups.model_clusterer import ModelBasedClusterer
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def run_mixed_experiment():
 
     field_config = FieldConfig()
 
-    # 2. Filter Variants ONLY
+    # 2. Filter Variants
     logger.info("Filtering unique bank variants...")
     df_clean = filter_unique_bank_variants(full_df)
 
@@ -81,6 +82,10 @@ def run_mixed_experiment():
     if df_clean[field_config.label].dtype == 'object':
         df_clean[field_config.label] = df_clean[field_config.label].astype(str).str.lower() == 'true'
     df_clean[field_config.label] = df_clean[field_config.label].astype(int)
+
+    # --- DOWNSAMPLE STEP ---
+    logger.info("Downsampling dataset to 33%...")
+    df_clean = df_clean.sample(frac=0.3, random_state=112025)
 
     logger.info(f"Dataset Ready: {len(df_clean)} rows across {df_clean['bank_name'].nunique()} banks.")
 
