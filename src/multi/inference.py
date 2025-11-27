@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import numpy as np
 import pandas as pd
@@ -8,26 +10,51 @@ from multi.config import MultiExpConfig
 from multi.encoder import TransactionTransformer
 from multi.data import collate_fn
 
+logger = logging.getLogger(__name__)
 
 class MultiPredictor:
-    def __init__(self, model_path: str, config: MultiExpConfig):
-        self.config = config
-        self.device = config.device
+    def __init__(self, model_path: str, runtime_config: MultiExpConfig = None):
+        """
+        Args:
+            model_path: Path to the .pt file
+            runtime_config: Optional config to override runtime params (like batch_size),
+                            but ARCHITECTURE params will be loaded from the checkpoint.
+        """
+        # Default config if none passed (just for device/paths)
+        if runtime_config is None:
+            runtime_config = MultiExpConfig()
 
-        # The encoder uses a live Transformer, so we need the Tokenizer, not EmbeddingService
-        print(f"Loading Tokenizer: {config.text_encoder_model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(config.text_encoder_model)
+        self.device = runtime_config.device
 
-        print(f"Loading model from {model_path}...")
-        self.model = TransactionTransformer(config)
+        logger.info(f"Loading checkpoint from {model_path}...")
+        checkpoint = torch.load(model_path, map_location=self.device)
 
-        # Load weights
-        state_dict = torch.load(model_path, map_location=self.device)
+        # --- LOAD LOGIC ---
+        if isinstance(checkpoint, dict) and "config" in checkpoint:
+            # Robust Load: Use the saved config to define model structure
+            saved_config = checkpoint["config"]
+            state_dict = checkpoint["state_dict"]
+
+            # (Optional) Allow runtime config to override non-structural params
+            # e.g. use the batch_size requested at runtime, not training time
+            saved_config.batch_size = runtime_config.batch_size
+            self.config = saved_config
+        else:
+            raise Exception('checkpoint not a dict')
+
+        # 1. Initialize Tokenizer (from the config found in checkpoint)
+        logger.info(f"Loading Tokenizer: {self.config.text_encoder_model}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.text_encoder_model)
+
+        # 2. Initialize Model (with correct structure)
+        self.model = TransactionTransformer(self.config)
+
+        # 3. Load Weights
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
 
-        self.idx_to_cycle = {v: k for k, v in config.cycle_map.items()}
+        self.idx_to_cycle = {v: k for k, v in self.config.cycle_map.items()}
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         # Prepare Groups

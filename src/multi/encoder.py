@@ -1,4 +1,3 @@
-from common.embedder import EmbeddingService
 import torch.nn as nn
 from transformers import AutoModel
 from multi.config import MultiExpConfig

@@ -103,7 +103,13 @@ def main():
         # Save Best Model
         if metrics['f1'] > best_f1:
             best_f1 = metrics['f1']
-            torch.save(model.state_dict(), save_path)
+
+            checkpoint = {
+                "config": config,  # Save the architecture params
+                "state_dict": model.state_dict()  # Save the weights
+            }
+
+            torch.save(checkpoint, save_path)
             logger.info(f"  --> New Best Model Saved to {save_path}")
 
     logger.info("Training Complete.")
