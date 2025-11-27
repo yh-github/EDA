@@ -1,8 +1,27 @@
+import math
+
 import torch
 import torch.nn as nn
 from transformers import AutoModel
 from multi.config import MultiExpConfig
 
+
+class TimeEncoding(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        # Frequencies usually range from 1 to 10000
+        self.div_term = torch.exp(torch.arange(0, hidden_dim, 2) * (-math.log(10000.0) / hidden_dim))
+
+    def forward(self, days):
+        # days shape: [Batch, Seq, 1]
+        pe = torch.zeros(days.shape[0], days.shape[1], self.hidden_dim).to(days.device)
+        position = days * 1.0  # Ensure float
+
+        # Apply Sine to even indices, Cosine to odd indices
+        pe[:, :, 0::2] = torch.sin(position * self.div_term)
+        pe[:, :, 1::2] = torch.cos(position * self.div_term)
+        return pe
 
 class TransactionEncoder(nn.Module):
     class TransactionEncoder(nn.Module):
@@ -53,7 +72,7 @@ class TransactionEncoder(nn.Module):
             self.cp_proj = None
 
         self.amount_proj = nn.Linear(1, config.hidden_dim)
-        self.day_proj = nn.Linear(1, config.hidden_dim)
+        self.time_encoder = TimeEncoding(config.hidden_dim)
         self.layer_norm = nn.LayerNorm(config.hidden_dim)
 
     def _encode_text_stream(self, input_ids, attention_mask, projector):
@@ -79,13 +98,15 @@ class TransactionEncoder(nn.Module):
         desc_emb = self._encode_text_stream(input_ids, attention_mask, self.text_proj)
 
         amt_emb = self.amount_proj(amounts)
-        day_emb = self.day_proj(days)
+
+        day_emb = self.time_encoder(days)
 
         fused = desc_emb + amt_emb + day_emb
 
         if self.use_cp and cp_input_ids is not None:
             cp_emb = self._encode_text_stream(cp_input_ids, cp_attention_mask, self.cp_proj)
             fused = fused + cp_emb
+
 
         return self.layer_norm(fused)
 
