@@ -2,6 +2,19 @@ from dataclasses import dataclass, field
 import torch
 from common.config import EmbModel
 
+@dataclass(frozen=True)
+class MultiFieldConfig:
+    date: str = 'date'
+    amount: str = 'amount'
+    text: str = 'bankRawDescription'
+    label: str = 'isRecurring'
+    accountId: str = 'accountId'
+    trId: str = 'trId'
+    patternId: str = 'patternId'
+    patternCycle: str = 'patternCycle'
+    counter_party:str = 'counterParty'
+    bank_name: str = 'bank_name'
+
 
 @dataclass
 class MultiExpConfig:

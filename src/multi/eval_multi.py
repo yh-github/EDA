@@ -1,10 +1,9 @@
 import argparse
-import pandas as pd
 import numpy as np
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, average_precision_score
+import pandas as pd
+from sklearn.metrics import f1_score, accuracy_score, average_precision_score
 from multi.config import MultiExpConfig
 from multi.inference import MultiPredictor
-from common.embedder import EmbeddingService
 
 
 def bcubed_precision_recall(true_ids, pred_ids):

@@ -1,12 +1,8 @@
 import os
-
 from common.exp_utils import set_global_seed
-
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 import argparse
 import logging
-
 import pandas as pd
 import torch
 import random
@@ -16,6 +12,8 @@ from multi.config import MultiExpConfig
 from multi.data import get_dataloader
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
+from common.data import create_train_val_test_split
+from common.config import FieldConfig
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +54,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--data", type=str, default="data/all_data.csv", help="Path to CSV data")
     parser.add_argument("--output_dir", type=str, default="checkpoints/multi", help="Dir to save model")
+    parser.add_argument("--downsample", type=float, default=0.3, help="Fraction of accounts to use (0.0-1.0)")
     args = parser.parse_args()
 
     # 1. Config & Setup
@@ -78,27 +77,41 @@ def main():
         raise Exception(f"No CSV found path={args.data}")
 
     logger.info(f"Loaded {len(df)} transactions.")
+    field_config = FieldConfig()
 
-    # 3. Split Data (Account-based)
-    account_ids = df['accountId'].unique()
-    np.random.shuffle(account_ids)
-    split = int(len(account_ids) * 0.8)
-    train_ids, val_ids = account_ids[:split], account_ids[split:]
+    # 3. Downsample (Account-based)
+    if 0.0 < args.downsample < 1.0:
+        logger.info(f"Downsampling to {args.downsample:.0%} of accounts...")
+        account_ids = df[field_config.accountId].unique()
+        rng = np.random.default_rng(config.random_state)
+        # Ensure at least one account is selected
+        n_select = max(1, int(len(account_ids) * args.downsample))
+        selected_ids = rng.choice(account_ids, size=n_select, replace=False)
+        df = df[df[field_config.accountId].isin(selected_ids)].copy()
+        logger.info(f"Dataset size after downsampling: {len(df)} rows ({len(selected_ids)} accounts)")
 
-    train_df = df[df['accountId'].isin(train_ids)].copy()
-    val_df = df[df['accountId'].isin(val_ids)].copy()
+    # 4. Split Data (Using Common Utility)
+    # Using 10% Test / 10% Val / 80% Train to maximize training data while keeping checks
+    logger.info("Splitting data into Train/Val/Test...")
+    train_df, val_df, test_df = create_train_val_test_split(
+        test_size=0.1,
+        val_size=0.1,
+        full_df=df,
+        random_state=config.random_state,
+        field_config=field_config
+    )
 
-    # 4. Data Loaders
+    # 5. Data Loaders
     # Note: get_dataloader initializes the Tokenizer internally based on config
     train_loader = get_dataloader(train_df, config, shuffle=True)
     val_loader = get_dataloader(val_df, config, shuffle=False)
 
-    # 5. Model Initialization
+    # 6. Model Initialization
     logger.info(f"Initializing model on {config.device}...")
     model = TransactionTransformer(config)
     trainer = MultiTrainer(model, config)
 
-    # 6. Training Loop
+    # 7. Training Loop
     best_f1 = -1.0
     save_path = os.path.join(config.output_dir, "model.pth")
 
