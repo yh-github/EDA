@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Callable, Any
 
 import lightning.pytorch as pl
+import numpy as np
 import pandas as pd
 import torch
 
 from common.config import FieldConfig, EmbModel, ExperimentConfig
-from common.data import create_train_val_test_split
+from common.data import create_train_val_test_split, deduplicate
 from common.embedder import EmbeddingService
 from common.feature_processor import FeatProcParams
 from common.log_utils import setup_logging
@@ -44,6 +45,7 @@ class TFTTuningExperiment:
             use_aggregation: bool = False,
             feat_params: FeatProcParams|None = None,
             emb_params: EmbeddingService.Params|None = None,
+            downsample: float|None = None
     ):
         self.study_name = study_name
         self.best_model_path = best_model_path
@@ -63,6 +65,7 @@ class TFTTuningExperiment:
             use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0
         )
         self.emb_params = emb_params or EmbeddingService.Params(model_name=EmbModel.MPNET)
+        self.downsample = downsample
 
     def run(self):
         setup_logging(self.log_dir, "tft_tuning")
@@ -71,12 +74,24 @@ class TFTTuningExperiment:
 
         logger.info("Loading data...")
         field_config = FieldConfig()
-        full_df = pd.read_csv(self.data_path).dropna(
+        full_df = deduplicate(pd.read_csv(self.data_path).dropna(
             subset=[field_config.date, field_config.amount, field_config.text]
-        )
+        ))
 
         exp_params = ExperimentConfig()
         pl.seed_everything(exp_params.random_state, workers=True)
+
+
+        if self.downsample is not None:
+            logger.info(f"Downsampling dataset to {self.downsample:.2f} of ACCOUNTS...")
+            unique_accounts = full_df[field_config.accountId].unique()
+            rng = np.random.default_rng(exp_params.random_state)
+            selected_accounts = rng.choice(unique_accounts, size=int(len(unique_accounts) * self.downsample), replace=False)
+            full_df = full_df[full_df[field_config.accountId].isin(selected_accounts)].copy()
+
+            logger.info(
+                f"Dataset Downsampling: {len(full_df)} rows ({len(selected_accounts)} accounts) across {full_df['bank_name'].nunique()} banks.")
+
 
 
         # Split Data
