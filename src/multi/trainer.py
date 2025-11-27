@@ -21,7 +21,11 @@ class MultiTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
         # --- Mixed Precision Scaler ---
-        self.scaler = torch.cuda.amp.GradScaler()
+        # Updated to new API if available, or fallback
+        if hasattr(torch.amp, 'GradScaler'):
+            self.scaler = torch.amp.GradScaler('cuda')
+        else:
+            self.scaler = torch.cuda.amp.GradScaler()
 
         # Loss Functions
         if pos_weight:
@@ -43,7 +47,8 @@ class MultiTrainer:
             self.optimizer.zero_grad()
 
             # --- Mixed Precision Context ---
-            with torch.cuda.amp.autocast():
+            # Fix: Use torch.amp.autocast for newer PyTorch versions
+            with torch.amp.autocast('cuda'):
                 adj_logits, cycle_logits = self.model(batch)
 
                 # --- LOSS CALCULATION ---
@@ -89,7 +94,7 @@ class MultiTrainer:
         for batch in dataloader:
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 adj_logits, _ = self.model(batch)
 
             preds = (torch.sigmoid(adj_logits) > 0.5).float()
