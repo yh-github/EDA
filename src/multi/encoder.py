@@ -5,11 +5,44 @@ from multi.config import MultiExpConfig
 
 
 class TransactionEncoder(nn.Module):
+    class TransactionEncoder(nn.Module):
+        def get_embedder(self, config: MultiExpConfig):
+            embedder = AutoModel.from_pretrained(config.text_encoder_model)
+
+            # Logic to handle freezing/unfreezing
+            for param in embedder.parameters():
+                param.requires_grad = False
+
+            if config.unfreeze_last_n_layers == 0:
+                return embedder
+
+            # config.unfreeze_last_n_layers > 0:
+            # Freeze everything first
+            for param in embedder.parameters():
+                param.requires_grad = False
+
+            # Unfreeze the specific top layers (Encoder + Pooler)
+            # This depends on the specific architecture (BERT/MiniLM usually have .encoder.layer)
+            # This is a generic way to grab the last N modules
+            encoder_layers = embedder.encoder.layer
+            for layer in encoder_layers[-config.unfreeze_last_n_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+            # Always unfreeze the pooler if it exists
+            if hasattr(self.embedder, 'pooler') and self.embedder.pooler is not None:
+                for param in self.embedder.pooler.parameters():
+                    param.requires_grad = True
+            return embedder
+
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.use_cp = config.use_counter_party
 
         self.embedder = AutoModel.from_pretrained(config.text_encoder_model)
+        for param in self.embedder.parameters():
+            param.requires_grad = False
+
         text_dim = self.embedder.config.hidden_size
 
         self.text_proj = nn.Linear(text_dim, config.hidden_dim)

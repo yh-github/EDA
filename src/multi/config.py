@@ -13,7 +13,7 @@ class MultiFieldConfig:
     trId: str = 'trId'
     patternId: str = 'patternId'
     patternCycle: str = 'patternCycle'
-    counter_party: str = 'counterParty'
+    counter_party: str = 'counter_party'
     bank_name: str = 'bank_name'
 
 
@@ -29,6 +29,8 @@ class MultiExpConfig:
 
     # Model Hyperparameters
     text_encoder_model: str = EmbModel.MPNET.value
+    unfreeze_last_n_layers: int = 2
+
     hidden_dim: int = 256
     num_heads: int = 4
     num_layers: int = 2
