@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
 import logging
-from .config import MultiExpConfig
+from multi.config import MultiExpConfig
 
 # Configure logging
 logging.basicConfig(
@@ -20,10 +20,11 @@ class MultiTrainer:
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
+        # --- Mixed Precision Scaler ---
+        self.scaler = torch.cuda.amp.GradScaler()
+
         # Loss Functions
-        # pos_weight to handle class imbalance (Sparse Edges)
         if pos_weight:
-            # We must wrap the float in a tensor and move it to the device
             weight_tensor = torch.tensor([pos_weight]).to(config.device)
             self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
         else:
@@ -41,27 +42,36 @@ class MultiTrainer:
 
             self.optimizer.zero_grad()
 
-            adj_logits, cycle_logits = self.model(batch)
+            # --- Mixed Precision Context ---
+            with torch.cuda.amp.autocast():
+                adj_logits, cycle_logits = self.model(batch)
 
-            # --- LOSS CALCULATION ---
-            # 1. Adjacency Loss
-            mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-            adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
+                # --- LOSS CALCULATION ---
+                # 1. Adjacency Loss
+                mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
 
-            adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
+                # Exclude self-loops (diagonal) from loss
+                # This prevents the model from learning the trivial "I am me" connection
+                eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
+                mask_2d = mask_2d & (eye == 0)
 
-            # 2. Cycle Loss
-            cycle_loss = self.cycle_criterion(
-                cycle_logits.view(-1, self.config.num_classes),
-                batch['cycle_target'].view(-1)
-            )
-            mask_1d = batch['padding_mask'].view(-1)
-            cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
+                adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
+                adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
 
-            loss = adj_loss + cycle_loss
+                # 2. Cycle Loss
+                cycle_loss = self.cycle_criterion(
+                    cycle_logits.view(-1, self.config.num_classes),
+                    batch['cycle_target'].view(-1)
+                )
+                mask_1d = batch['padding_mask'].view(-1)
+                cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
 
-            loss.backward()
-            self.optimizer.step()
+                loss = adj_loss + cycle_loss
+
+            # --- Mixed Precision Backward ---
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             total_loss += loss.item()
 
@@ -79,13 +89,12 @@ class MultiTrainer:
         for batch in dataloader:
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
-            adj_logits, _ = self.model(batch)
+            with torch.cuda.amp.autocast():
+                adj_logits, _ = self.model(batch)
 
-            # Standard threshold 0.5 might be too high initially if the model is conservative
             preds = (torch.sigmoid(adj_logits) > 0.5).float()
 
             mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-            # Remove diagonal from evaluation (self-loops are easy)
             eye = torch.eye(preds.shape[1], device=self.config.device).unsqueeze(0)
             mask_2d = mask_2d & (eye == 0)
 

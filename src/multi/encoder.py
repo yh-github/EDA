@@ -68,6 +68,8 @@ class TransactionEncoder(nn.Module):
             if hasattr(self.embedder, 'pooler') and self.embedder.pooler is not None:
                 for param in self.embedder.pooler.parameters():
                     param.requires_grad = True
+
+            embedder.gradient_checkpointing_enable()
             return embedder
 
     def __init__(self, config: MultiExpConfig):

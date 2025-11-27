@@ -38,7 +38,7 @@ class MultiExpConfig:
     use_counter_party: bool = True
 
     # Training Hyperparameters
-    batch_size: int = 16
+    batch_size: int = 8
     learning_rate: float = 1e-4
     num_epochs: int = 10
     max_seq_len: int = 200

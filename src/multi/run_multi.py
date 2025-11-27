@@ -52,7 +52,7 @@ def mock_data_generator(num_accounts=100):
 def main():
     parser = argparse.ArgumentParser(description="Multi Bank Transaction Pattern Detector")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--data", type=str, default="data/all_data.csv", help="Path to CSV data")
     parser.add_argument("--output_dir", type=str, default="checkpoints/multi", help="Dir to save model")
     parser.add_argument("--downsample", type=float, default=0.3, help="Fraction of accounts to use (0.0-1.0)")
@@ -71,7 +71,7 @@ def main():
     if args.data and args.data.lower() == "mock":
         df = mock_data_generator()
     elif args.data and os.path.exists(args.data):
-        df = pd.read_csv(args.data)
+        df = pd.read_csv(args.data, low_memory=False)
     else:
         raise Exception(f"No CSV found path={args.data}")
 
