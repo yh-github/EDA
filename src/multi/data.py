@@ -3,8 +3,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
-
-from .config import MultiExpConfig
+from multi.config import MultiExpConfig
 
 
 class MultiTransactionDataset(Dataset):

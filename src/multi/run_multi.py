@@ -3,10 +3,10 @@ import pandas as pd
 import torch
 import random
 import numpy as np
-from src.config import MultiExpConfig
-from src.data import get_dataloader
-from src.model import TransactionTransformer
-from src.train import MultiTrainer
+from multi.config import MultiExpConfig
+from multi.data import get_dataloader
+from multi.encoder import TransactionTransformer
+from multi.trainer import MultiTrainer
 
 
 def mock_data_generator(num_accounts=100):
