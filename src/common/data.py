@@ -298,7 +298,11 @@ def create_train_val_test_split(
 # Logic: If we have "Bank1" and "Bank2", we pick the one with
 # the most rows (largest sample size), drop the others
 
-def filter_unique_bank_variants(df: pd.DataFrame) -> pd.DataFrame:
+def filter_unique_bank_variants(df: pd.DataFrame, field_config=FieldConfig()) -> pd.DataFrame:
+    bank_name = field_config.bank_name
+    if bank_name not in df.columns:
+        return df
+
     print(f"Original row count: {len(df)}")
 
     # 1. Calculate row counts for each specific bank name
@@ -346,3 +350,22 @@ def clean_text(series, hide_digits=False, trunc_repeating=True, lower=True):
         series = series.str.replace(r'(.)\1{2,}', r'\1\1\1', regex=True)
 
     return series
+
+
+def deduplicate(df: pd.DataFrame, field_config: FieldConfig=FieldConfig()) -> pd.DataFrame:
+    """
+    Deduplicates the DataFrame based on the transaction ID column.
+    Keeps the first occurrence and logs the number of dropped rows.
+    """
+    initial_count = len(df)
+
+    df = filter_unique_bank_variants(df, field_config)
+
+    # Drop duplicates based on the configured transaction ID column
+    df_deduped = df.drop_duplicates(subset=[field_config.trId], keep='first').copy()
+
+    dropped_count = initial_count - len(df_deduped)
+    if dropped_count > 0:
+        logger.info(f"Deduplicated transactions: Dropped {dropped_count} rows based on '{field_config.trId}'.")
+
+    return df_deduped

@@ -14,7 +14,7 @@ from common.config import ExperimentConfig, FieldConfig, EmbModel
 from common.feature_processor import FeatProcParams
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
-from common.data import filter_unique_bank_variants, FeatureSet
+from common.data import filter_unique_bank_variants, FeatureSet, deduplicate
 from pointwise.runner import ExpRunner
 from pointwise.classifier import HybridModel
 # Ensure your model_clusterer.py has the 'enable_recovery' update!
@@ -71,7 +71,7 @@ def run_mixed_experiment():
 
     # 2. Filter Variants
     logger.info("Filtering unique bank variants...")
-    df_clean = filter_unique_bank_variants(full_df)
+    df_clean = deduplicate(full_df)
 
     # Essential sanity checks
     df_clean = df_clean.dropna(subset=[
