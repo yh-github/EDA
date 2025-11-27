@@ -115,7 +115,7 @@ class TFTTuningExperiment:
         )
         val_df_prepped, _, _, _ = self.prepare_data_fn(
             val_df, field_config, embedding_service=emb_service,
-            pca_model=pca_model, processor=processor, fit_processor=False
+            pca_model=pca_model, processor=processor, fit_processor=False, feat_params=self.feat_params
         )
 
         # Calculate class weights

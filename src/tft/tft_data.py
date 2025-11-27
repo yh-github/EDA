@@ -26,7 +26,7 @@ def prepare_tft_data(
     3. Generating/Compressing Text Embeddings.
     4. Running HybridFeatureProcessor for Date/Amount features.
     """
-    pca_components = feat_params.text_dim_reduce or 16
+    pca_components = (feat_params is not None and feat_params.text_dim_reduce) or 16
 
     df = df.copy()
 
