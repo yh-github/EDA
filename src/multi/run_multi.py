@@ -13,7 +13,7 @@ from multi.data import get_dataloader
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
 from common.data import create_train_val_test_split
-from common.config import FieldConfig
+from multi.config import MultiFieldConfig
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -77,7 +77,9 @@ def main():
         raise Exception(f"No CSV found path={args.data}")
 
     logger.info(f"Loaded {len(df)} transactions.")
-    field_config = FieldConfig()
+    field_config = MultiFieldConfig()
+    df[field_config.accountId] = df[field_config.accountId].astype(str)
+    df[field_config.trId] = df[field_config.trId].astype(str)
 
     # 3. Downsample (Account-based)
     if 0.0 < args.downsample < 1.0:
