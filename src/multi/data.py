@@ -1,9 +1,12 @@
+import logging
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
 from multi.config import MultiExpConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MultiTransactionDataset(Dataset):
@@ -17,17 +20,28 @@ class MultiTransactionDataset(Dataset):
         if 'patternId' not in df.columns:
             df['patternId'] = -1
 
-        # 1. Filter out long cycles (if they exist)
-        df = df[~df['patternCycle'].isin(['Annual', 'SemiAnnual'])].copy()
+        # 1. Normalize 'patternCycle' to handle NaNs as 'None' (Non-recurring)
+        # This ensures we don't accidentally drop rows just because cycle is missing
+        df['patternCycle'] = df['patternCycle'].fillna('None')
 
-        # 2. Encode Pattern IDs (Extracted to method for cleanliness)
+        # 2. Filter out any cycle NOT in the config map
+        valid_cycles = set(config.cycle_map.keys())
+        mask = df['patternCycle'].isin(valid_cycles)
+
+        if not mask.all():
+            removed_df = df[~mask]
+            counts = removed_df['patternCycle'].value_counts().to_dict()
+            logger.info(f"Filtering out {len(removed_df)} rows with unknown cycles: {counts}")
+            df = df[mask].copy()
+
+        # 3. Encode Pattern IDs (Extracted to method for cleanliness)
         df = self._encode_pattern_ids(df)
 
-        # 3. Create Direction Column
+        # 4. Create Direction Column
         df['direction'] = np.sign(df['amount'])
         df = df[df['direction'] != 0]
 
-        # 4. Group by Account AND Direction
+        # 5. Group by Account AND Direction
         self.groups = [group for _, group in df.groupby(['accountId', 'direction'])]
 
         # Only shuffle if training
