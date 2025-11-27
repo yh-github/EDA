@@ -83,11 +83,13 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
     )
 
     batch_size = len(batch)
-    text_emb_dim = encodings['input_ids'].shape[1]
+    seq_len = encodings['input_ids'].shape[1]  # Renamed from text_emb_dim
 
     # Initialize Tensors
-    batched_input_ids = torch.zeros((batch_size, max_len_in_batch, text_emb_dim), dtype=torch.long)
-    batched_attention_mask = torch.zeros((batch_size, max_len_in_batch, text_emb_dim), dtype=torch.long)
+    # Shape is (Batch, N_Txns, Seq_Len)
+    batched_input_ids = torch.zeros((batch_size, max_len_in_batch, seq_len), dtype=torch.long)
+    batched_attention_mask = torch.zeros((batch_size, max_len_in_batch, seq_len), dtype=torch.long)
+
     batched_amounts = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     batched_days = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     batched_cycles = torch.zeros((batch_size, max_len_in_batch), dtype=torch.long)

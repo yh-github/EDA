@@ -1,6 +1,9 @@
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import argparse
 import logging
-import os
+
 import pandas as pd
 import torch
 import random
@@ -27,7 +30,8 @@ def mock_data_generator(num_accounts=100):
             cycle = random.choice(['monthly', 'onceAWeek']) if is_rec else 'None'
             pat_id = random.randint(1, 5) if is_rec else None
             amount = 15.99 if is_rec else random.uniform(5, 100)
-            if random.random() > 0.8: amount *= -1
+            if random.random() > 0.5:
+                amount *= -1
 
             data.append({
                 'accountId': acc_id,
