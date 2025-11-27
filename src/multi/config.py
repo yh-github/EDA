@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import torch
 from common.config import EmbModel
 
+
 @dataclass(frozen=True)
 class MultiFieldConfig:
     date: str = 'date'
@@ -12,7 +13,7 @@ class MultiFieldConfig:
     trId: str = 'trId'
     patternId: str = 'patternId'
     patternCycle: str = 'patternCycle'
-    counter_party:str = 'counterParty'
+    counter_party: str = 'counterParty'
     bank_name: str = 'bank_name'
 
 
@@ -34,14 +35,16 @@ class MultiExpConfig:
     dropout: float = 0.1
 
     # Training Hyperparameters
-    batch_size: int = 16  # Accounts per batch
+    batch_size: int = 16
     learning_rate: float = 1e-4
     num_epochs: int = 10
-    max_seq_len: int = 200  # Cap N to avoid OOM on extreme outliers
+    max_seq_len: int = 200
+
+    # Tokenizer Limits
+    max_text_length: int = 32  # Raw description
+    max_cp_length: int = 16    # Counter party (usually shorter)
 
     # Cycle Labels
-    # We ignore 'Annual'/'SemiAnnual'.
-    # 0 is reserved for 'None' (non-recurring).
     cycle_map: dict = field(default_factory=lambda: {
         'None': 0,
         'monthly': 1,
