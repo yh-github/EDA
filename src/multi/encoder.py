@@ -1,3 +1,4 @@
+from common.embedder import EmbeddingService
 import torch.nn as nn
 from transformers import AutoModel
 from .config import MultiExpConfig
@@ -7,8 +8,8 @@ class TransactionEncoder(nn.Module):
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         # 1. Text Encoder
-        self.bert = AutoModel.from_pretrained(config.text_encoder_model)
-        text_dim = self.bert.config.hidden_size
+        self.embedder = AutoModel.from_pretrained(config.text_encoder_model)
+        text_dim = self.embedder.config.hidden_size
 
         # 2. Feature Projection
         self.text_proj = nn.Linear(text_dim, config.hidden_dim)
@@ -23,7 +24,7 @@ class TransactionEncoder(nn.Module):
         flat_input_ids = input_ids.view(b * n, seq_len)
         flat_mask = attention_mask.view(b * n, seq_len)
 
-        bert_out = self.bert(flat_input_ids, attention_mask=flat_mask).last_hidden_state[:, 0, :]
+        bert_out = self.embedder(flat_input_ids, attention_mask=flat_mask).last_hidden_state[:, 0, :]
 
         text_emb = self.text_proj(bert_out).view(b, n, -1)
         amt_emb = self.amount_proj(amounts)
