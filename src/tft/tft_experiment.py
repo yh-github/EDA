@@ -74,7 +74,7 @@ class TFTTuningExperiment:
 
         logger.info("Loading data...")
         field_config = FieldConfig()
-        full_df = deduplicate(pd.read_csv(self.data_path).dropna(
+        full_df = deduplicate(pd.read_csv(self.data_path, low_memory=False).dropna(
             subset=[field_config.date, field_config.amount, field_config.text]
         ))
 

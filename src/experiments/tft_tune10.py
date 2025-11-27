@@ -31,7 +31,7 @@ if __name__ == "__main__":
             use_continuous_amount=True, use_categorical_amount=False, k_top=0, n_bins=0,
             use_behavioral_features=True
         ),
-        emb_params = EmbeddingService.Params(model_name=EmbModel.MPNET, max_length=64)
+        emb_params = EmbeddingService.Params(model_name=EmbModel.MPNET, max_length=32)
 
     )
     experiment.run()
