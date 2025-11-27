@@ -10,7 +10,6 @@ def bcubed_precision_recall(true_ids, pred_ids):
     n = len(true_ids)
     if n == 0: return 0.0, 0.0
 
-    # Map each ID to indices
     def get_clusters(id_list):
         clusters = {}
         for idx, val in enumerate(id_list):
@@ -42,27 +41,30 @@ def bcubed_precision_recall(true_ids, pred_ids):
     return precision_sum / n, recall_sum / n
 
 
-def evaluate_run(data_path, model_path, embedder_model_name):
+def evaluate_run(data_path, model_path):
     # 1. Setup
+    # Note: Model architecture/tokenizer is loaded from the checkpoint in MultiPredictor
     config = MultiExpConfig()
 
-    # 2. Predictor (Embedder removed from init, handled internally)
+    # 2. Predictor
     predictor = MultiPredictor(model_path, config)
 
-
-    # 2. Predict
+    # 3. Predict
     print(f"Loading data from {data_path}...")
     df = pd.read_csv(data_path)
     print("Running Inference...")
     pred_df = predictor.predict(df)
 
-    # 3. Metrics
+    # 4. Metrics
     print("\n--- Evaluation Results ---")
 
     # A. Level 1: Binary Detection
     y_true_bin = df['isRecurring'].fillna(False).astype(int)
+    # Re-index pred_df to match input df order if sort_index was used
+    pred_df = pred_df.reindex(df.index)
+
     y_pred_bin = pred_df['pred_isRecurring'].fillna(False).astype(int)
-    y_pred_prob = pred_df['pred_recurring_prob'].fillna(0.0)  # Continuous score
+    y_pred_prob = pred_df['pred_recurring_prob'].fillna(0.0)
 
     bin_f1 = f1_score(y_true_bin, y_pred_bin)
     bin_prauc = average_precision_score(y_true_bin, y_pred_prob)
@@ -74,6 +76,7 @@ def evaluate_run(data_path, model_path, embedder_model_name):
     b_precisions = []
     b_recalls = []
 
+    # Use original df grouping to ensure we catch all accounts
     for acc_id, group in df.groupby('accountId'):
         pred_group = pred_df.loc[group.index]
         p, r = bcubed_precision_recall(
@@ -83,8 +86,8 @@ def evaluate_run(data_path, model_path, embedder_model_name):
         b_precisions.append(p)
         b_recalls.append(r)
 
-    avg_bp = np.mean(b_precisions)
-    avg_br = np.mean(b_recalls)
+    avg_bp = np.mean(b_precisions) if b_precisions else 0.0
+    avg_br = np.mean(b_recalls) if b_recalls else 0.0
     b_f1 = 2 * (avg_bp * avg_br) / (avg_bp + avg_br + 1e-8)
 
     print(f"Level 2 - Clustering B-Cubed F1: {b_f1:.4f} (P: {avg_bp:.4f}, R: {avg_br:.4f})")
@@ -105,7 +108,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--emb_model", default="sentence-transformers/all-MiniLM-L6-v2")
+    # Removed misleading --emb_model arg since it's loaded from checkpoint
     args = parser.parse_args()
 
-    evaluate_run(args.data, args.model, args.emb_model)
+    evaluate_run(args.data, args.model)

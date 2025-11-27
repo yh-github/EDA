@@ -1,4 +1,6 @@
 import logging
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # FIX: Prevent tokenizer deadlocks
 
 import torch
 import numpy as np
@@ -6,11 +8,12 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from transformers import AutoTokenizer
-from multi.config import MultiExpConfig
+from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
 from multi.data import collate_fn
 
 logger = logging.getLogger(__name__)
+
 
 class MultiPredictor:
     def __init__(self, model_path: str, runtime_config: MultiExpConfig = None):
@@ -20,36 +23,28 @@ class MultiPredictor:
             runtime_config: Optional config to override runtime params (like batch_size),
                             but ARCHITECTURE params will be loaded from the checkpoint.
         """
-        # Default config if none passed (just for device/paths)
         if runtime_config is None:
             runtime_config = MultiExpConfig()
 
         self.device = runtime_config.device
+        self.field_config = MultiFieldConfig()
 
         logger.info(f"Loading checkpoint from {model_path}...")
         checkpoint = torch.load(model_path, map_location=self.device)
 
-        # --- LOAD LOGIC ---
         if isinstance(checkpoint, dict) and "config" in checkpoint:
-            # Robust Load: Use the saved config to define model structure
             saved_config = checkpoint["config"]
             state_dict = checkpoint["state_dict"]
-
-            # (Optional) Allow runtime config to override non-structural params
-            # e.g. use the batch_size requested at runtime, not training time
+            # Allow runtime config to override batch_size
             saved_config.batch_size = runtime_config.batch_size
             self.config = saved_config
         else:
             raise Exception('checkpoint not a dict')
 
-        # 1. Initialize Tokenizer (from the config found in checkpoint)
         logger.info(f"Loading Tokenizer: {self.config.text_encoder_model}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.text_encoder_model)
 
-        # 2. Initialize Model (with correct structure)
         self.model = TransactionTransformer(self.config)
-
-        # 3. Load Weights
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
@@ -57,13 +52,20 @@ class MultiPredictor:
         self.idx_to_cycle = {v: k for k, v in self.config.cycle_map.items()}
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        fc = self.field_config
+
+        # Validation
+        req_cols = [fc.accountId, fc.date, fc.amount, fc.text]
+        for col in req_cols:
+            if col not in df.columns:
+                raise KeyError(f"Input DataFrame missing required column: {col}")
+
         # Prepare Groups
-        df['direction'] = np.sign(df['amount'])
-        # Filter 0 amounts
+        df['direction'] = np.sign(df[fc.amount])
         df = df[df['direction'] != 0].copy()
 
-        # Sort to ensure order matches grouping
-        groups = [group for _, group in df.groupby(['accountId', 'direction'])]
+        # Group processing
+        groups = [group for _, group in df.groupby([fc.accountId, 'direction'])]
 
         results = []
         batch_size = self.config.batch_size
@@ -74,7 +76,6 @@ class MultiPredictor:
 
             if not batch_data: continue
 
-            # FIX: Pass self.tokenizer, NOT embedding_service
             batch = collate_fn(batch_data, self.tokenizer, self.config)
             batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
 
@@ -89,28 +90,31 @@ class MultiPredictor:
         return pd.concat(results).sort_index()
 
     def _prepare_batch_data(self, groups):
+        fc = self.field_config
         batch_list = []
+
         for group in groups:
-            # Sort by date for temporal consistency
-            group = group.sort_values('date')
+            group = group.sort_values(fc.date)
 
-            # Text Features
-            texts = (group['bankRawDescription'].fillna('') + " " + group['counter_party'].fillna('')).tolist()
+            # handle missing counter_party
+            desc = group[fc.text].fillna('')
+            if fc.counter_party in group.columns:
+                cp = group[fc.counter_party].fillna('')
+                texts = (desc + " " + cp).tolist()
+            else:
+                texts = desc.tolist()
 
-            # Amount Features
-            amounts = group['amount'].values.astype(np.float32)
+            amounts = group[fc.amount].values.astype(np.float32)
             log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
 
-            # Date Features
-            dates = pd.to_datetime(group['date'])
+            dates = pd.to_datetime(group[fc.date])
             days = (dates - dates.min()).dt.days.values.astype(np.float32)
 
-            # Dummy targets for inference (required by collate_fn shapes)
             batch_list.append({
                 "texts": texts,
                 "amounts": log_amounts,
                 "days": days,
-                "pattern_ids": np.zeros(len(group)) - 1,  # -1 indicates no pattern/unknown
+                "pattern_ids": np.zeros(len(group)) - 1,
                 "cycles": np.zeros(len(group)),
             })
         return batch_list
@@ -123,14 +127,12 @@ class MultiPredictor:
             n = len(group)
             if n == 0: continue
 
-            # Extract sub-matrices for this group
             adj = probs[b_idx, :n, :n]
             node_cycles = cycle_softmax[b_idx, :n, :]
 
-            # Recurring Score = Prob that cycle is NOT 'None'
+            # Probability that cycle is NOT 'None' (index 0)
             recurring_scores = 1.0 - node_cycles[:, 0]
 
-            # Clustering Logic
             adj_binary = (adj > 0.5).astype(int)
             np.fill_diagonal(adj_binary, 0)
             graph = csr_matrix(adj_binary)
@@ -143,20 +145,17 @@ class MultiPredictor:
             for cluster_id in range(n_components):
                 indices = np.where(labels == cluster_id)[0]
 
-                # Single nodes are noise unless strongly cyclic?
-                # For now, enforce size > 1 for a cluster
                 if len(indices) < 2:
                     continue
 
-                # Vote on Cycle
                 cluster_sum_probs = node_cycles[indices].sum(axis=0)
                 best_cycle_idx = cluster_sum_probs.argmax()
 
-                # If best cycle is 0 ('None'), it's a cluster of noise
                 is_recurring = (best_cycle_idx != 0)
 
                 if is_recurring:
-                    pid_str = f"{group['accountId'].iloc[0]}_{group['direction'].iloc[0]}_{cluster_id}"
+                    # Generate unique pattern ID for this specific cluster
+                    pid_str = f"{group[self.field_config.accountId].iloc[0]}_{group['direction'].iloc[0]}_{cluster_id}"
                     cycle_str = self.idx_to_cycle.get(best_cycle_idx, "None")
 
                     for idx in indices:
@@ -164,7 +163,6 @@ class MultiPredictor:
                         final_cycles[idx] = cycle_str
                         final_is_rec[idx] = True
 
-            # Assign results back to dataframe
             res_df = group.copy()
             res_df['pred_isRecurring'] = final_is_rec
             res_df['pred_recurring_prob'] = recurring_scores
