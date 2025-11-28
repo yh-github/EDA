@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
 import logging
-import torch.nn.functional as F
+import torch.nn.functional as fnn
 from multi.config import MultiExpConfig
 
 # Configure logging
@@ -29,7 +29,7 @@ class SupervisedContrastiveLoss(nn.Module):
         device = features.device
         batch_size, seq_len, _ = features.shape
 
-        features = F.normalize(features, dim=-1)
+        features = fnn.normalize(features, dim=-1)
 
         total_loss = 0.0
         n_valid_batches = 0
@@ -83,7 +83,7 @@ class MultiTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=2, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=2 # no `verbose` parameter
         )
 
         if hasattr(torch.amp, 'GradScaler'):
