@@ -78,7 +78,10 @@ class TransactionEncoder(nn.Module):
             for param in embedder.pooler.parameters():
                 param.requires_grad = True
 
-        embedder.gradient_checkpointing_enable()
+        try:
+            embedder.gradient_checkpointing_enable()
+        except ValueError as ve:
+            logger.warning(f'{str(ve)}')
         return embedder
 
     def __init__(self, config: MultiExpConfig):
