@@ -5,12 +5,9 @@ import signal
 import pickle
 import re
 from pathlib import Path
-
 import optuna
 import pandas as pd
-import numpy as np
 import torch
-
 from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
@@ -196,11 +193,11 @@ def main():
     parser.add_argument("--data_path", type=str, default="data/all_data.csv")
     parser.add_argument("--output_dir", type=str, default="checkpoints/tuning")
     parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
-    parser.add_argument("--n_trials", type=int, default=20)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--n_trials", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--random_state", type=int, default=112025)
-    parser.add_argument("--downsample", type=float, default=0.3)
+    parser.add_argument("--downsample", type=float, default=0.5)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     args = parser.parse_args()
 
