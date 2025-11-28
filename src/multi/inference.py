@@ -25,7 +25,7 @@ class MultiPredictor:
         self.field_config = MultiFieldConfig()
 
         logger.info(f"Loading checkpoint from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
 
         if isinstance(checkpoint, dict) and "config" in checkpoint:
             saved_config = checkpoint["config"]
