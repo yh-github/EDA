@@ -52,21 +52,30 @@ class TransactionEncoder(nn.Module):
             return embedder
 
         # config.unfreeze_last_n_layers > 0:
-        # Freeze everything first
+        # Freeze everything first (Redundant but safe)
         for param in embedder.parameters():
             param.requires_grad = False
 
         # Unfreeze the specific top layers (Encoder + Pooler)
-        # This depends on the specific architecture (BERT/MiniLM usually have .encoder.layer)
-        # This is a generic way to grab the last N modules
-        encoder_layers = embedder.encoder.layer
+        # FIX: Robustly find the encoder layers regardless of BERT vs DistilBERT
+        if hasattr(embedder, 'encoder') and hasattr(embedder.encoder, 'layer'):
+            # BERT / MPNET / ALBERT
+            encoder_layers = embedder.encoder.layer
+        elif hasattr(embedder, 'transformer') and hasattr(embedder.transformer, 'layer'):
+            # DistilBERT
+            encoder_layers = embedder.transformer.layer
+        else:
+            # Fallback: Just print warning and skip specific layer unfreezing
+            print("Warning: Could not locate encoder layers for unfreezing (architecture unknown). Keeping frozen.")
+            encoder_layers = []
+
         for layer in encoder_layers[-config.unfreeze_last_n_layers:]:
             for param in layer.parameters():
                 param.requires_grad = True
 
         # Always unfreeze the pooler if it exists
-        if hasattr(self.embedder, 'pooler') and self.embedder.pooler is not None:
-            for param in self.embedder.pooler.parameters():
+        if hasattr(embedder, 'pooler') and embedder.pooler is not None:
+            for param in embedder.pooler.parameters():
                 param.requires_grad = True
 
         embedder.gradient_checkpointing_enable()
@@ -168,7 +177,13 @@ class TransactionTransformer(nn.Module):
         # Compute Adjacency
         h_i = h.unsqueeze(2).expand(-1, -1, h.size(1), -1)
         h_j = h.unsqueeze(1).expand(-1, h.size(1), -1, -1)
+
+        # Raw Bilinear logits (Asymmetric: xWy + b)
         adj_logits = self.bilinear(h_i, h_j).squeeze(-1)
+
+        # FIX: Enforce Symmetry (A matches B implies B matches A)
+        # This helps the model converge on a valid undirected clustering solution
+        adj_logits = (adj_logits + adj_logits.transpose(1, 2)) / 2
 
         # Compute Cycles
         cycle_logits = self.cycle_head(h)
