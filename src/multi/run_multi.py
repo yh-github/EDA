@@ -186,8 +186,8 @@ def main():
                 "epoch": epoch + 1
             }
             # Handle compiled model saving
-            if args.compile and hasattr(model, '_orig_mod'):
-                checkpoint["state_dict"] = model._orig_mod.state_dict()
+            # if args.compile and hasattr(model, '_orig_mod'):
+            #     checkpoint["state_dict"] = model._orig_mod.state_dict()
 
             torch.save(checkpoint, save_path)
             logger.info(f"  --> New Best Model Saved (F1: {best_f1:.4f})")
