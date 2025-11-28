@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import pickle
+import re
 from pathlib import Path
 
 import optuna
@@ -176,16 +177,45 @@ class TuningManager:
         return best_val_f1
 
 
+def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
+    """
+    Connects to the storage, finds existing studies matching the pattern,
+    and returns the next sequential name.
+    """
+    try:
+        # We use a temporary study object to access storage backend summary
+        # or simpler: just list all study summaries.
+        summaries = optuna.study.get_all_study_summaries(storage=storage_url)
+        existing_names = [s.study_name for s in summaries]
+    except Exception:
+        # Storage might not exist yet
+        existing_names = []
+
+    # Regex to find "multi_tune_1", "multi_tune_2", etc.
+    pattern = re.compile(rf"^{base_name}_(\d+)$")
+
+    max_idx = 0
+    for name in existing_names:
+        match = pattern.match(name)
+        if match:
+            idx = int(match.group(1))
+            if idx > max_idx:
+                max_idx = idx
+
+    next_idx = max_idx + 1
+    return f"{base_name}_{next_idx}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Multi-Model Hyperparameter Tuning")
     parser.add_argument("--data_path", type=str, default="data/all_data.csv")
     parser.add_argument("--output_dir", type=str, default="checkpoints/tuning")
-    parser.add_argument("--study_name", type=str, default="multi_opt_v1")
-    parser.add_argument("--n_trials", type=int, default=20)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
+    parser.add_argument("--n_trials", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--random_state", type=int, default=112025)
-    parser.add_argument("--downsample", type=float, default=0.3)
+    parser.add_argument("--downsample", type=float, default=0.5)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     args = parser.parse_args()
 
@@ -195,15 +225,23 @@ def main():
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    # Auto-naming logic
+    if args.study_name is None:
+        study_name = get_next_study_name(storage_url)
+    else:
+        study_name = args.study_name
+
+    logger.info(f"Using Study Name: {study_name}")
+
     study = optuna.create_study(
-        study_name=args.study_name,
+        study_name=study_name,
         storage=storage_url,
         load_if_exists=True,
         direction="maximize",
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
     )
 
-    logger.info(f"Starting tuning study '{args.study_name}' with {args.n_trials} trials.")
+    logger.info(f"Starting tuning study '{study_name}' with {args.n_trials} trials.")
 
     try:
         study.optimize(manager.objective, n_trials=args.n_trials)
@@ -283,7 +321,8 @@ def main():
         logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
 
         # Save Model
-        save_path = os.path.join(args.output_dir, "best_tuned_model_final.pth")
+        # Include study name in filename to avoid overwrites
+        save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
         torch.save({
             "config": final_config,
             "state_dict": final_model.state_dict(),
