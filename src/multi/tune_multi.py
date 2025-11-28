@@ -1,22 +1,22 @@
 import argparse
 import logging
 import os
-import signal
 import pickle
 import re
+import signal
 from pathlib import Path
 
 import optuna
 import pandas as pd
-import numpy as np
 import torch
 
+from common.data import create_train_val_test_split
+from common.exp_utils import set_global_seed
 from multi.config import MultiExpConfig, MultiFieldConfig
+from multi.data import get_dataloader
+from multi.data_utils import load_and_prepare_data
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
-from multi.data import get_dataloader
-from common.data import create_train_val_test_split, clean_text
-from common.exp_utils import set_global_seed
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,11 +24,6 @@ logger = logging.getLogger("hyper_tune")
 
 
 class GracefulKiller:
-    """
-    Catches SIGINT (Ctrl+C) and SIGTERM to allow the current trial to finish
-    or the study to save its state before exiting.
-    """
-
     def __init__(self):
         self.kill_now = False
         signal.signal(signal.SIGINT, self.exit_gracefully)
@@ -51,6 +46,9 @@ class TuningManager:
         cache_key = f"{args.random_state}__{args.downsample}"
         self.cache_path = self.cache_dir / f"split_{cache_key}.pkl"
 
+        # IMPORTANT: We need to know if data processing disabled CP
+        self.data_determined_use_cp = True
+
         # Load or Create Data
         self.train_df, self.val_df, self.test_df = self._load_or_create_data()
 
@@ -59,64 +57,66 @@ class TuningManager:
             logger.info(f"Loading cached data splits from {self.cache_path}...")
             with open(self.cache_path, 'rb') as f:
                 data = pickle.load(f)
+
+            # Restore the CP decision from the cache
+            self.data_determined_use_cp = data.get('use_counter_party', True)
+            logger.info(f"Cached data indicates use_counter_party={self.data_determined_use_cp}")
+
             return data['train'], data['val'], data['test']
 
-        logger.info("Cache miss or force recreate. Loading raw data...")
-        if not os.path.exists(self.args.data_path):
-            raise FileNotFoundError(f"Data file not found: {self.args.data_path}")
+        logger.info("Cache miss or force recreate. Running data pipeline...")
 
-        df = pd.read_csv(self.args.data_path, low_memory=False)
-        field_config = MultiFieldConfig()
+        # 1. Create a temp config to pass args to the loader
+        # We assume use_counter_party is True initially, the loader might flip it
+        temp_config = MultiExpConfig(
+            data_path=self.args.data_path,
+            downsample=self.args.downsample,
+            random_state=self.args.random_state,
+            use_counter_party=True
+        )
 
-        # Basic Preprocessing
-        df[field_config.accountId] = df[field_config.accountId].astype(str)
-        df[field_config.trId] = df[field_config.trId].astype(str)
-        df[field_config.text] = clean_text(df[field_config.text])
+        # 2. Use shared utility to load, clean, downsample, and check features
+        df = load_and_prepare_data(temp_config)
 
-        # Downsample
-        if 0.0 < self.args.downsample < 1.0:
-            logger.info(f"Downsampling to {self.args.downsample:.0%} of accounts...")
-            account_ids = df[field_config.accountId].unique()
-            rng = np.random.default_rng(self.args.random_state)
-            n_select = max(1, int(len(account_ids) * self.args.downsample))
-            selected_ids = rng.choice(account_ids, size=n_select, replace=False)
-            df = df[df[field_config.accountId].isin(selected_ids)].copy()
+        # 3. Capture the CP decision made by the loader
+        self.data_determined_use_cp = temp_config.use_counter_party
 
-        # Split
+        # 4. Split
         logger.info("Splitting data...")
         train_df, val_df, test_df = create_train_val_test_split(
             test_size=0.1,
             val_size=0.1,
             full_df=df,
             random_state=self.args.random_state,
-            field_config=field_config
+            field_config=MultiFieldConfig()
         )
 
-        # Save
+        # 5. Save with metadata
         logger.info(f"Saving splits to {self.cache_path}...")
         with open(self.cache_path, 'wb') as f:
-            pickle.dump({'train': train_df, 'val': val_df, 'test': test_df}, f)
+            pickle.dump({
+                'train': train_df,
+                'val': val_df,
+                'test': test_df,
+                'use_counter_party': self.data_determined_use_cp
+            }, f)
 
         return train_df, val_df, test_df
 
     def objective(self, trial):
-        # 1. Check for Stop Signal at start of trial
         if self.killer.kill_now:
             logger.warning("Stop signal received. Stopping study.")
             trial.study.stop()
             raise optuna.TrialPruned()
 
-        # 2. Sample Hyperparameters
+        # Sample Hyperparameters
         lr = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
         dropout = trial.suggest_float("dropout", 0.1, 0.4)
         num_layers = trial.suggest_int("num_layers", 1, 4)
         num_heads = trial.suggest_categorical("num_heads", [2, 4, 8])
         hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
-
-        # Loss params
         contrastive_weight = trial.suggest_float("contrastive_weight", 0.0, 0.5)
 
-        # 3. Configure Experiment
         config = MultiExpConfig(
             learning_rate=lr,
             dropout=dropout,
@@ -125,33 +125,28 @@ class TuningManager:
             hidden_dim=hidden_dim,
             contrastive_loss_weight=contrastive_weight,
 
-            # Constants from Args
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
-            use_counter_party=True  # Can be tuned too if needed
+
+            # CRITICAL: Use the decision made during data loading
+            use_counter_party=self.data_determined_use_cp
         )
 
         set_global_seed(config.random_state)
 
-        # 4. Data Loaders (Using cached DF)
         train_loader = get_dataloader(self.train_df, config, shuffle=True)
         val_loader = get_dataloader(self.val_df, config, shuffle=False)
 
-        # 5. Model & Trainer
         model = TransactionTransformer(config)
-
-        # Calculate class weights if needed (simple heuristic for now)
-        pos_weight = 2.5  # Could calculate dynamically from train_df
+        pos_weight = 2.5
 
         trainer = MultiTrainer(model, config, pos_weight=pos_weight)
 
         best_val_f1 = 0.0
 
-        # 6. Training Loop
         for epoch in range(config.num_epochs):
-            # Check signal
             if self.killer.kill_now:
                 trainer.request_stop()
 
@@ -159,7 +154,6 @@ class TuningManager:
             metrics = trainer.evaluate(val_loader)
             val_f1 = metrics['f1']
 
-            # Report to Optuna
             trial.report(val_f1, epoch)
 
             if trial.should_prune():
@@ -167,9 +161,7 @@ class TuningManager:
 
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
-                # Optional: Save best model for this trial
 
-            # Stop early if requested
             if trainer.stop_requested:
                 logger.info(f"Trial stopped early at epoch {epoch + 1}. Returning best F1 so far.")
                 break
@@ -178,20 +170,12 @@ class TuningManager:
 
 
 def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
-    """
-    Connects to the storage, finds existing studies matching the pattern,
-    and returns the next sequential name.
-    """
     try:
-        # We use a temporary study object to access storage backend summary
-        # or simpler: just list all study summaries.
         summaries = optuna.study.get_all_study_summaries(storage=storage_url)
         existing_names = [s.study_name for s in summaries]
     except Exception:
-        # Storage might not exist yet
         existing_names = []
 
-    # Regex to find "multi_tune_1", "multi_tune_2", etc.
     pattern = re.compile(rf"^{base_name}_(\d+)$")
 
     max_idx = 0
@@ -211,21 +195,19 @@ def main():
     parser.add_argument("--data_path", type=str, default="data/all_data.csv")
     parser.add_argument("--output_dir", type=str, default="checkpoints/tuning")
     parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
-    parser.add_argument("--n_trials", type=int, default=50)
-    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--n_trials", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--random_state", type=int, default=112025)
-    parser.add_argument("--downsample", type=float, default=0.5)
+    parser.add_argument("--downsample", type=float, default=0.3)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     args = parser.parse_args()
 
     manager = TuningManager(args)
 
-    # Optuna Storage (SQLite for persistence)
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Auto-naming logic
     if args.study_name is None:
         study_name = get_next_study_name(storage_url)
     else:
@@ -254,20 +236,16 @@ def main():
     for k, v in study.best_params.items():
         logger.info(f"  {k}: {v}")
 
-    # --- FINAL EVALUATION ---
     logger.info("=" * 60)
     logger.info("STARTING FINAL MODEL TRAINING (Train + Val -> Test)")
     logger.info("=" * 60)
 
-    # 1. Merge Train and Val
     full_train_df = pd.concat([manager.train_df, manager.val_df])
     logger.info(
         f"Combined Train ({len(manager.train_df)}) + Val ({len(manager.val_df)}) = {len(full_train_df)} samples")
 
-    # 2. Reconstruct Config from Best Params + Args
     best_params = study.best_params
     final_config = MultiExpConfig(
-        # Tuned Params
         learning_rate=best_params["learning_rate"],
         dropout=best_params["dropout"],
         num_layers=best_params["num_layers"],
@@ -275,41 +253,35 @@ def main():
         hidden_dim=best_params["hidden_dim"],
         contrastive_loss_weight=best_params["contrastive_loss_weight"],
 
-        # Fixed Params
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         data_path=args.data_path,
         output_dir=args.output_dir,
-        use_counter_party=True
+
+        # Ensure final model respects data capabilities
+        use_counter_party=manager.data_determined_use_cp
     )
     set_global_seed(final_config.random_state)
 
-    # 3. Create Loaders
     logger.info("Creating DataLoaders...")
     final_train_loader = get_dataloader(full_train_df, final_config, shuffle=True)
     test_loader = get_dataloader(manager.test_df, final_config, shuffle=False)
 
-    # 4. Initialize Final Model
     logger.info(
         f"Initializing Final Model with dim={final_config.hidden_dim}, heads={final_config.num_heads}, layers={final_config.num_layers}")
     final_model = TransactionTransformer(final_config)
     final_trainer = MultiTrainer(final_model, final_config, pos_weight=2.5)
 
-    # 5. Train
-    # We allow the killer to stop this too if user hits Ctrl+C
     for epoch in range(final_config.num_epochs):
         if manager.killer.kill_now:
             logger.warning("Stop signal received during final training. Exiting.")
             break
 
         train_loss = final_trainer.train_epoch(final_train_loader, epoch + 1)
-        # We can optionally eval on test set each epoch, or just at end.
-        # Doing it each epoch helps see convergence.
         metrics = final_trainer.evaluate(test_loader)
 
         logger.info(f"Final Model Epoch {epoch + 1} | Train Loss: {train_loss:.4f} | Test F1: {metrics['f1']:.4f}")
 
-    # 6. Final Metrics
     if not manager.killer.kill_now:
         logger.info("-" * 60)
         logger.info("FINAL TEST SET RESULTS")
@@ -320,8 +292,6 @@ def main():
         logger.info(f"F1 Score:  {final_metrics['f1']:.4f}")
         logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
 
-        # Save Model
-        # Include study name in filename to avoid overwrites
         save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
         torch.save({
             "config": final_config,
