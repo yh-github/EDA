@@ -64,7 +64,7 @@ def main():
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
     config.output_dir = args.output_dir
-    config.data_path = args.data_path
+    config.data_path = args.data
     config.downsample = args.downsample
 
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
