@@ -1,4 +1,5 @@
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import argparse
@@ -9,7 +10,6 @@ import re
 from pathlib import Path
 import optuna
 import pandas as pd
-import torch
 from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
@@ -130,6 +130,9 @@ class TuningManager:
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
 
+            # Use default or tuned patience
+            early_stopping_patience=5,
+
             # CRITICAL: Use the decision made during data loading
             use_counter_party=self.data_determined_use_cp
         )
@@ -140,31 +143,22 @@ class TuningManager:
         val_loader = get_dataloader(self.val_df, config, shuffle=False)
 
         model = TransactionTransformer(config)
+        # Class weights could be dynamic, but fixed for now
         pos_weight = 2.5
 
         trainer = MultiTrainer(model, config, pos_weight=pos_weight)
 
-        best_val_f1 = 0.0
+        # Run unified training loop (handles early stopping, pruning, reporting)
+        best_val_f1 = trainer.fit(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=config.num_epochs,
+            trial=trial,
+            stop_callback=lambda: self.killer.kill_now
+        )
 
-        for epoch in range(config.num_epochs):
-            if self.killer.kill_now:
-                trainer.request_stop()
-
-            _ = trainer.train_epoch(train_loader, epoch + 1)
-            metrics = trainer.evaluate(val_loader)
-            val_f1 = metrics['f1']
-
-            trial.report(val_f1, epoch)
-
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-
-            if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
-
-            if trainer.stop_requested:
-                logger.info(f"Trial stopped early at epoch {epoch + 1}. Returning best F1 so far.")
-                break
+        if trainer.stop_requested:
+            logger.info("Trial stopped by user signal.")
 
         return best_val_f1
 
@@ -264,6 +258,7 @@ def main():
         batch_size=args.batch_size,
         data_path=args.data_path,
         output_dir=args.output_dir,
+        early_stopping_patience=5,
 
         # Ensure final model respects data capabilities
         use_counter_party=manager.data_determined_use_cp
@@ -281,20 +276,18 @@ def main():
     final_model = TransactionTransformer(final_config)
     final_trainer = MultiTrainer(final_model, final_config, pos_weight=2.5)
 
-    # 5. Train
-    # We allow the killer to stop this too if user hits Ctrl+C
-    for epoch in range(final_config.num_epochs):
-        if manager.killer.kill_now:
-            logger.warning("Stop signal received during final training. Exiting.")
-            break
-
-        train_loss = final_trainer.train_epoch(final_train_loader, epoch + 1)
-        metrics = final_trainer.evaluate(test_loader)
-
-        logger.info(f"Final Model Epoch {epoch + 1} | Train Loss: {train_loss:.4f} | Test F1: {metrics['f1']:.4f}")
-
-    # 6. Final Metrics
+    # 5. Train using unified fit method
     if not manager.killer.kill_now:
+        save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
+
+        final_trainer.fit(
+            train_loader=final_train_loader,
+            val_loader=test_loader,
+            epochs=final_config.num_epochs,
+            save_path=save_path,
+            stop_callback=lambda: manager.killer.kill_now
+        )
+
         logger.info("-" * 60)
         logger.info("FINAL TEST SET RESULTS")
         logger.info("-" * 60)
@@ -303,16 +296,6 @@ def main():
         logger.info(f"Recall:    {final_metrics['recall']:.4f}")
         logger.info(f"F1 Score:  {final_metrics['f1']:.4f}")
         logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
-
-        # Save Model
-        # Include study name in filename to avoid overwrites
-        save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
-        torch.save({
-            "config": final_config,
-            "state_dict": final_model.state_dict(),
-            "best_f1": final_metrics['f1'],
-            "params": best_params
-        }, save_path)
         logger.info(f"Final model saved to {save_path}")
 
 

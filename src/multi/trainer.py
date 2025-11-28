@@ -4,6 +4,7 @@ import torch.optim as optim
 from sklearn.metrics import f1_score, precision_score, recall_score
 import logging
 import torch.nn.functional as fnn
+import os
 from multi.config import MultiExpConfig
 
 # Configure logging
@@ -110,6 +111,90 @@ class MultiTrainer:
         logger.info("Trainer received stop request. Finishing current epoch/batch...")
         self.stop_requested = True
 
+    def fit(self, train_loader, val_loader, epochs: int, trial=None, save_path: str = None, stop_callback=None):
+        """
+        Unified training loop with Early Stopping, Optuna reporting, and Model Saving.
+
+        Args:
+            train_loader: Training DataLoader
+            val_loader: Validation DataLoader
+            epochs: Number of epochs to train
+            trial: Optuna trial object (optional)
+            save_path: Path to save the best model (optional)
+            stop_callback: Function returning bool to check for external stop signals (optional)
+
+        Returns:
+            float: Best F1 score achieved
+        """
+        # Lazy import to avoid hard dependency if not tuning
+        import optuna
+
+        best_f1 = -1.0
+        patience = self.config.early_stopping_patience
+        patience_counter = 0
+
+        logger.info(f"Starting training for {epochs} epochs. Early Stopping Patience: {patience}")
+
+        for epoch in range(1, epochs + 1):
+            # 1. Check external stop signal
+            if stop_callback and stop_callback():
+                self.request_stop()
+
+            if self.stop_requested:
+                logger.info("Stop requested. Exiting training loop.")
+                break
+
+            # 2. Train & Evaluate
+            train_loss = self.train_epoch(train_loader, epoch)
+            metrics = self.evaluate(val_loader)
+
+            val_f1 = metrics['f1']
+            val_loss = metrics['val_loss']
+
+            logger.info(
+                f"Epoch {epoch}/{epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"Val F1: {val_f1:.4f} | "
+                f"Prec: {metrics['precision']:.4f} | "
+                f"Rec: {metrics['recall']:.4f}"
+            )
+
+            # 3. Optuna Reporting
+            if trial:
+                trial.report(val_f1, epoch - 1)
+                if trial.should_prune():
+                    logger.info("Trial pruned by Optuna.")
+                    raise optuna.TrialPruned()
+
+            # 4. Early Stopping & Saving
+            if val_f1 > best_f1:
+                best_f1 = val_f1
+                patience_counter = 0
+
+                if save_path:
+                    # Ensure directory exists
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    checkpoint = {
+                        "config": self.config,
+                        "state_dict": self.model.state_dict(),
+                        "best_f1": best_f1,
+                        "epoch": epoch
+                    }
+                    torch.save(checkpoint, save_path)
+                    logger.info(f"  --> New Best Model Saved (F1: {best_f1:.4f})")
+                else:
+                    logger.info(f"  --> New Best F1: {best_f1:.4f}")
+            else:
+                patience_counter += 1
+                logger.info(f"  ... No improvement. Patience: {patience_counter}/{patience}")
+
+                if patience_counter >= patience:
+                    logger.info(f"⛔ Early stopping triggered at epoch {epoch}")
+                    break
+
+        return best_f1
+
     def _compute_loss_with_pattern_ids(self, batch, adj_logits, cycle_logits, embeddings):
         mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
         eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
@@ -144,7 +229,6 @@ class MultiTrainer:
 
         for batch_idx, batch in enumerate(dataloader):
             if self.stop_requested:
-                logger.info("Stop requested. Breaking training loop.")
                 break
 
             batch = {k: v.to(self.config.device) for k, v in batch.items()}

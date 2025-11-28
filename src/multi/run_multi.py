@@ -4,7 +4,6 @@ from datetime import datetime
 from common.exp_utils import set_global_seed
 import argparse
 import logging
-import torch
 from pathlib import Path
 from transformers import AutoTokenizer
 from multi.config import MultiExpConfig, MultiFieldConfig
@@ -68,51 +67,18 @@ def main():
 
     trainer = MultiTrainer(model, config, pos_weight=2.5)
 
-    # 7. Training Loop
-    best_f1 = -1.0
+    # 7. Training Loop using simplified `fit`
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     save_path = os.path.join(config.output_dir, f"model_{timestamp}.pth")
 
-    patience = config.early_stopping_patience
-    patience_counter = 0
+    best_f1 = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=config.num_epochs,
+        save_path=save_path
+    )
 
-    for epoch in range(config.num_epochs):
-        train_loss = trainer.train_epoch(train_loader, epoch + 1)
-        metrics = trainer.evaluate(val_loader)
-
-        val_f1 = metrics['f1']
-        val_loss = metrics['val_loss']
-
-        logger.info(
-            f"Epoch {epoch + 1}/{config.num_epochs} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Val F1: {val_f1:.4f} | "
-            f"Prec: {metrics['precision']:.4f} | "
-            f"Rec: {metrics['recall']:.4f}"
-        )
-
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            patience_counter = 0
-
-            checkpoint = {
-                "config": config,
-                "state_dict": model.state_dict(),
-                "best_f1": best_f1,
-                "epoch": epoch + 1
-            }
-            torch.save(checkpoint, save_path)
-            logger.info(f"  --> New Best Model Saved (F1: {best_f1:.4f})")
-        else:
-            patience_counter += 1
-            logger.info(f"  ... No improvement. Patience: {patience_counter}/{patience}")
-
-            if patience_counter >= patience:
-                logger.info(f"⛔ Early stopping triggered at epoch {epoch + 1}")
-                break
-
-    logger.info("Training Complete.")
+    logger.info(f"Training Complete. Best F1: {best_f1:.4f}")
 
 
 if __name__ == "__main__":
