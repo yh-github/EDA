@@ -6,7 +6,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
 import logging
 import torch
-import numpy as np
 from pathlib import Path
 from transformers import AutoTokenizer
 from multi.config import MultiExpConfig, MultiFieldConfig
