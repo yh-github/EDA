@@ -106,7 +106,7 @@ class MultiTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=2, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=2
         )
 
         if hasattr(torch.amp, 'GradScaler'):
