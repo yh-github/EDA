@@ -83,7 +83,7 @@ class MultiTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=2 # no `verbose` parameter
+            self.optimizer, mode='min', factor=0.5, patience=config.scheduler_patience
         )
 
         if hasattr(torch.amp, 'GradScaler'):
@@ -100,7 +100,15 @@ class MultiTrainer:
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
         if config.use_contrastive_loss:
-            self.contrastive_criterion = SupervisedContrastiveLoss(temperature=0.07)
+            self.contrastive_criterion = SupervisedContrastiveLoss(temperature=config.contrastive_temperature)
+
+        # Signal handling injection point
+        self.stop_requested = False
+
+    def request_stop(self):
+        """Allows external agents (like signal handlers) to request a graceful stop."""
+        logger.info("Trainer received stop request. Finishing current epoch/batch...")
+        self.stop_requested = True
 
     def _compute_loss_with_pattern_ids(self, batch, adj_logits, cycle_logits, embeddings):
         mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
@@ -132,11 +140,13 @@ class MultiTrainer:
 
         num_batches_processed = 0
         num_batches_skipped = 0
-
-        # Track pending gradients to ensure we don't step on empty gradients
         batches_since_step = 0
 
         for batch_idx, batch in enumerate(dataloader):
+            if self.stop_requested:
+                logger.info("Stop requested. Breaking training loop.")
+                break
+
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
             try:
@@ -146,31 +156,23 @@ class MultiTrainer:
                     loss, _, _, _ = self._compute_loss_with_pattern_ids(batch, adj_logits, cycle_logits, embeddings)
                     loss = loss / accumulation_steps
 
-                # If we get here, forward pass was successful.
-                # Now try backward (where gradients expand)
+                # Backward
                 self.scaler.scale(loss).backward()
-
-                # Only increment if backward was successful
                 batches_since_step += 1
 
             except torch.cuda.OutOfMemoryError:
-                # --- RECOVERY LOGIC ---
-                self.optimizer.zero_grad()  # Drop any partial gradients
-                torch.cuda.empty_cache()  # Force free memory
-
-                # Log diagnostic info to help you tune config later
+                self.optimizer.zero_grad()
+                torch.cuda.empty_cache()
                 seq_len = batch['input_ids'].shape[1]
                 logger.warning(
-                    f"⚠️ OOM detected at Epoch {epoch_idx}, Batch {batch_idx}. "
-                    f"Skipping batch with Max Seq Len: {seq_len}. "
-                    f"Mem: {torch.cuda.memory_allocated() / 1e9:.1f}GB"
+                    f"⚠️ OOM at Epoch {epoch_idx}, Batch {batch_idx}. Seq Len: {seq_len}. "
+                    f"Skipping."
                 )
                 num_batches_skipped += 1
-                continue  # Skip to next batch
+                continue
 
             except RuntimeError as e:
                 if "out of memory" in str(e):
-                    # Handle older PyTorch versions generic RuntimeError
                     self.optimizer.zero_grad()
                     torch.cuda.empty_cache()
                     logger.warning(f"⚠️ OOM (RuntimeError) at Batch {batch_idx}. Skipping.")
@@ -193,7 +195,7 @@ class MultiTrainer:
                     f"Epoch {epoch_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * accumulation_steps:.4f}")
 
         # Handle remaining gradients
-        if batches_since_step > 0:
+        if batches_since_step > 0 and not self.stop_requested:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
@@ -210,8 +212,9 @@ class MultiTrainer:
         all_true_edges = []
         total_val_loss = 0.0
 
-        # We also wrap eval in try/except just in case validation has a huge outlier
         for batch in dataloader:
+            if self.stop_requested: break
+
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
             try:
@@ -234,7 +237,10 @@ class MultiTrainer:
                 logger.warning("⚠️ OOM during Evaluation. Skipping batch.")
                 continue
 
-        avg_val_loss = total_val_loss / len(dataloader)
+        if len(dataloader) > 0:
+            avg_val_loss = total_val_loss / len(dataloader)
+        else:
+            avg_val_loss = 999.0
 
         p = precision_score(all_true_edges, all_pred_edges, zero_division=0)
         r = recall_score(all_true_edges, all_pred_edges, zero_division=0)
