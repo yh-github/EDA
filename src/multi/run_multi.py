@@ -41,7 +41,7 @@ def mock_data_generator(num_accounts=100):
                 'accountId': acc_id,
                 'transactionId': f"{acc_id}_{i}",
                 'bankRawDescription': f"PAYMENT TO {'NETFLIX' if is_rec else 'STORE'} {random.randint(1, 100)}",
-                'counterParty': 'Netflix' if is_rec else '',  # Include CP column for mock
+                'counter_party': 'Netflix' if is_rec else '',
                 'amount': amount,
                 'date': pd.Timestamp('2023-01-01') + pd.Timedelta(days=random.randint(0, 150)),
                 'isRecurring': is_rec,
