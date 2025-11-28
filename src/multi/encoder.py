@@ -20,7 +20,7 @@ class TimeEncoding(nn.Module):
 
         # Create constant 'pe' matrix with values dependent on pos and i
         # We register it as a buffer so it saves with the model but isn't a trained parameter
-        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(10000.0) / hidden_dim))
+        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(float(max_len)) / hidden_dim))
         self.register_buffer('div_term', div_term)
 
     def forward(self, days):
@@ -29,13 +29,11 @@ class TimeEncoding(nn.Module):
             days: Tensor of shape [Batch, Seq, 1] containing day offsets (float)
         """
         # Output shape: [Batch, Seq, Hidden_Dim]
-        pe = torch.zeros(days.shape[0], days.shape[1], self.hidden_dim, device=days.device)
-
         # We use the scalar 'days' values as the 'position'
         # days is [B, S, 1], div_term is [H/2]
-        # position * div_term -> [B, S, H/2]
         position = days * 1.0
 
+        pe = torch.zeros(days.shape[0], days.shape[1], self.hidden_dim, device=days.device)
         pe[:, :, 0::2] = torch.sin(position * self.div_term)
         pe[:, :, 1::2] = torch.cos(position * self.div_term)
 
@@ -61,7 +59,6 @@ class TransactionEncoder(nn.Module):
             param.requires_grad = False
 
         # Unfreeze the specific top layers (Encoder + Pooler)
-        # FIX: Robustly find the encoder layers regardless of BERT vs DistilBERT
         if hasattr(embedder, 'encoder') and hasattr(embedder.encoder, 'layer'):
             # BERT / MPNET / ALBERT
             encoder_layers = embedder.encoder.layer
@@ -91,6 +88,7 @@ class TransactionEncoder(nn.Module):
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.use_cp = config.use_counter_party
+        self.chunk_size = config.chunk_size
 
         self.embedder = self.get_embedder(config)
 
@@ -104,7 +102,7 @@ class TransactionEncoder(nn.Module):
             self.cp_proj = None
 
         self.amount_proj = nn.Linear(1, config.hidden_dim)
-        self.time_encoder = TimeEncoding(config.hidden_dim)
+        self.time_encoder = TimeEncoding(config.hidden_dim, max_len=config.time_encoding_max_len)
         self.calendar_proj = nn.Linear(4, config.hidden_dim)
         self.layer_norm = nn.LayerNorm(config.hidden_dim)
 
@@ -118,9 +116,7 @@ class TransactionEncoder(nn.Module):
         flat_ids = input_ids.view(total_seqs, seq_len)
         flat_mask = attention_mask.view(total_seqs, seq_len)
 
-        # Chunking configuration - INCREASED FOR A100 SPEED
-        # 2048 sequences * 32 tokens * float16/32 fits easily in 80GB
-        chunk_size = 2048
+        chunk_size = self.chunk_size
         embeddings = []
 
         for i in range(0, total_seqs, chunk_size):
@@ -205,9 +201,6 @@ class TransactionTransformer(nn.Module):
         h = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
 
         # Compute Adjacency (Memory Efficient)
-        # Standard Bilinear(x, y) computes xWy + b
-        # Here we do (h @ W) @ h.T to avoid expanding h to [B, N, N, D]
-
         # 1. Project: [B, N, D] @ [D, D] -> [B, N, D]
         h_transformed = self.adj_weight(h)
 
@@ -215,7 +208,6 @@ class TransactionTransformer(nn.Module):
         adj_logits = torch.matmul(h_transformed, h.transpose(1, 2)) + self.adj_bias
 
         # FIX: Enforce Symmetry (A matches B implies B matches A)
-        # This helps the model converge on a valid undirected clustering solution
         adj_logits = (adj_logits + adj_logits.transpose(1, 2)) / 2
 
         # Compute Cycles
