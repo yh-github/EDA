@@ -52,8 +52,8 @@ class MultiExpConfig:
     contrastive_loss_weight: float = 0.1  # Weight for the auxiliary loss
 
     # Tokenizer Limits
-    max_text_length: int = 32
-    max_cp_length: int = 16
+    max_text_length: int = 44
+    max_cp_length: int = 20
 
     # Cycle Labels
     cycle_map: dict = field(default_factory=lambda: {
