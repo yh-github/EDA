@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, accuracy_score, average_precision_score
-from multi.config import MultiExpConfig
+from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.inference import MultiPredictor
 
 
@@ -43,8 +43,8 @@ def bcubed_precision_recall(true_ids, pred_ids):
 
 def evaluate_run(data_path, model_path):
     # 1. Setup
-    # Note: Model architecture/tokenizer is loaded from the checkpoint in MultiPredictor
     config = MultiExpConfig()
+    fc = MultiFieldConfig()
 
     # 2. Predictor
     predictor = MultiPredictor(model_path, config)
@@ -59,8 +59,9 @@ def evaluate_run(data_path, model_path):
     print("\n--- Evaluation Results ---")
 
     # A. Level 1: Binary Detection
-    y_true_bin = df['isRecurring'].fillna(False).astype(int)
-    # Re-index pred_df to match input df order if sort_index was used
+    y_true_bin = df[fc.label].fillna(False).astype(int)
+
+    # Re-index pred_df to match input df order (handles any drops/sorts during inference)
     pred_df = pred_df.reindex(df.index)
 
     y_pred_bin = pred_df['pred_isRecurring'].fillna(False).astype(int)
@@ -77,10 +78,10 @@ def evaluate_run(data_path, model_path):
     b_recalls = []
 
     # Use original df grouping to ensure we catch all accounts
-    for acc_id, group in df.groupby('accountId'):
+    for acc_id, group in df.groupby(fc.accountId):
         pred_group = pred_df.loc[group.index]
         p, r = bcubed_precision_recall(
-            group['patternId'].tolist(),
+            group[fc.patternId].tolist(),
             pred_group['pred_patternId'].tolist()
         )
         b_precisions.append(p)
@@ -96,7 +97,7 @@ def evaluate_run(data_path, model_path):
     mask = (y_true_bin == 1) & (y_pred_bin == 1)
     if mask.sum() > 0:
         acc = accuracy_score(
-            df.loc[mask, 'patternCycle'].astype(str),
+            df.loc[mask, fc.patternCycle].astype(str),
             pred_df.loc[mask, 'pred_patternCycle'].astype(str)
         )
         print(f"Level 3 - Cycle Accuracy (TP):   {acc:.4f}")
@@ -108,7 +109,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
     parser.add_argument("--model", required=True)
-    # Removed misleading --emb_model arg since it's loaded from checkpoint
     args = parser.parse_args()
 
     evaluate_run(args.data, args.model)
