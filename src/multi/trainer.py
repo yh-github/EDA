@@ -133,6 +133,9 @@ class MultiTrainer:
         num_batches_processed = 0
         num_batches_skipped = 0
 
+        # Track pending gradients to ensure we don't step on empty gradients
+        batches_since_step = 0
+
         for batch_idx, batch in enumerate(dataloader):
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
@@ -146,6 +149,9 @@ class MultiTrainer:
                 # If we get here, forward pass was successful.
                 # Now try backward (where gradients expand)
                 self.scaler.scale(loss).backward()
+
+                # Only increment if backward was successful
+                batches_since_step += 1
 
             except torch.cuda.OutOfMemoryError:
                 # --- RECOVERY LOGIC ---
@@ -173,10 +179,11 @@ class MultiTrainer:
                 raise e
 
             # Accumulation Step
-            if (batch_idx + 1) % accumulation_steps == 0:
+            if batches_since_step >= accumulation_steps:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
+                batches_since_step = 0
 
             total_loss += loss.item() * accumulation_steps
             num_batches_processed += 1
@@ -186,9 +193,10 @@ class MultiTrainer:
                     f"Epoch {epoch_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * accumulation_steps:.4f}")
 
         # Handle remaining gradients
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad()
+        if batches_since_step > 0:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
         if num_batches_skipped > 0:
             logger.info(f"⚠️ Warning: Skipped {num_batches_skipped} batches due to OOM this epoch.")
