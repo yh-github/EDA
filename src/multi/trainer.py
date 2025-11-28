@@ -20,6 +20,12 @@ class MultiTrainer:
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
+        # Improvement 5: Add Learning Rate Scheduler
+        # Reduce LR if validation loss stops improving
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=2
+        )
+
         # --- Mixed Precision Scaler ---
         # Updated to new API if available, or fallback
         if hasattr(torch.amp, 'GradScaler'):
@@ -36,6 +42,29 @@ class MultiTrainer:
 
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
+    def _compute_loss(self, batch, adj_logits, cycle_logits):
+        """Shared loss computation logic."""
+        # 1. Adjacency Loss
+        mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
+
+        # Exclude self-loops (diagonal) from loss
+        eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
+        mask_2d = mask_2d & (eye == 0)
+
+        adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
+        adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
+
+        # 2. Cycle Loss
+        cycle_loss = self.cycle_criterion(
+            cycle_logits.view(-1, self.config.num_classes),
+            batch['cycle_target'].view(-1)
+        )
+        mask_1d = batch['padding_mask'].view(-1)
+        cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
+
+        loss = adj_loss + cycle_loss
+        return loss, adj_loss, cycle_loss
+
     def train_epoch(self, dataloader, epoch_idx):
         self.model.train()
         total_loss = 0
@@ -47,31 +76,9 @@ class MultiTrainer:
             self.optimizer.zero_grad()
 
             # --- Mixed Precision Context ---
-            # Fix: Use torch.amp.autocast for newer PyTorch versions
             with torch.amp.autocast('cuda'):
                 adj_logits, cycle_logits = self.model(batch)
-
-                # --- LOSS CALCULATION ---
-                # 1. Adjacency Loss
-                mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-
-                # Exclude self-loops (diagonal) from loss
-                # This prevents the model from learning the trivial "I am me" connection
-                eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
-                mask_2d = mask_2d & (eye == 0)
-
-                adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
-                adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
-
-                # 2. Cycle Loss
-                cycle_loss = self.cycle_criterion(
-                    cycle_logits.view(-1, self.config.num_classes),
-                    batch['cycle_target'].view(-1)
-                )
-                mask_1d = batch['padding_mask'].view(-1)
-                cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
-
-                loss = adj_loss + cycle_loss
+                loss, _, _ = self._compute_loss(batch, adj_logits, cycle_logits)
 
             # --- Mixed Precision Backward ---
             self.scaler.scale(loss).backward()
@@ -91,11 +98,16 @@ class MultiTrainer:
         all_pred_edges = []
         all_true_edges = []
 
+        total_val_loss = 0.0
+
         for batch in dataloader:
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
             with torch.amp.autocast('cuda'):
-                adj_logits, _ = self.model(batch)
+                adj_logits, cycle_logits = self.model(batch)
+                loss, _, _ = self._compute_loss(batch, adj_logits, cycle_logits)
+
+            total_val_loss += loss.item()
 
             preds = (torch.sigmoid(adj_logits) > 0.5).float()
 
@@ -106,8 +118,18 @@ class MultiTrainer:
             all_pred_edges.extend(preds[mask_2d].cpu().numpy())
             all_true_edges.extend(batch['adjacency_target'][mask_2d].cpu().numpy())
 
+        avg_val_loss = total_val_loss / len(dataloader)
+
         p = precision_score(all_true_edges, all_pred_edges, zero_division=0)
         r = recall_score(all_true_edges, all_pred_edges, zero_division=0)
         f1 = f1_score(all_true_edges, all_pred_edges, zero_division=0)
 
-        return {"precision": p, "recall": r, "f1": f1}
+        # Update Scheduler
+        self.scheduler.step(avg_val_loss)
+
+        return {
+            "val_loss": avg_val_loss,
+            "precision": p,
+            "recall": r,
+            "f1": f1
+        }

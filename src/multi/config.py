@@ -44,6 +44,7 @@ class MultiExpConfig:
     learning_rate: float = 1e-4
     num_epochs: int = 10
     max_seq_len: int = 200
+    early_stopping_patience: int = 5  # Stop if Val F1 doesn't improve for N epochs
 
     # Tokenizer Limits
     max_text_length: int = 32
