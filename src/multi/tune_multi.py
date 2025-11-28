@@ -1,22 +1,23 @@
 import argparse
 import logging
 import os
+import signal
 import pickle
 import re
-import signal
 from pathlib import Path
 
 import optuna
 import pandas as pd
+import numpy as np
 import torch
 
-from common.data import create_train_val_test_split
-from common.exp_utils import set_global_seed
 from multi.config import MultiExpConfig, MultiFieldConfig
-from multi.data import get_dataloader
-from multi.data_utils import load_and_prepare_data
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
+from multi.data import get_dataloader
+from multi.data_utils import load_and_prepare_data
+from common.data import create_train_val_test_split
+from common.exp_utils import set_global_seed
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -205,9 +206,11 @@ def main():
 
     manager = TuningManager(args)
 
+    # Optuna Storage (SQLite for persistence)
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    # Auto-naming logic
     if args.study_name is None:
         study_name = get_next_study_name(storage_url)
     else:
@@ -236,16 +239,20 @@ def main():
     for k, v in study.best_params.items():
         logger.info(f"  {k}: {v}")
 
+    # --- FINAL EVALUATION ---
     logger.info("=" * 60)
     logger.info("STARTING FINAL MODEL TRAINING (Train + Val -> Test)")
     logger.info("=" * 60)
 
+    # 1. Merge Train and Val
     full_train_df = pd.concat([manager.train_df, manager.val_df])
     logger.info(
         f"Combined Train ({len(manager.train_df)}) + Val ({len(manager.val_df)}) = {len(full_train_df)} samples")
 
+    # 2. Reconstruct Config from Best Params + Args
     best_params = study.best_params
     final_config = MultiExpConfig(
+        # Tuned Params
         learning_rate=best_params["learning_rate"],
         dropout=best_params["dropout"],
         num_layers=best_params["num_layers"],
@@ -253,6 +260,7 @@ def main():
         hidden_dim=best_params["hidden_dim"],
         contrastive_loss_weight=best_params["contrastive_loss_weight"],
 
+        # Fixed Params
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         data_path=args.data_path,
@@ -263,15 +271,19 @@ def main():
     )
     set_global_seed(final_config.random_state)
 
+    # 3. Create Loaders
     logger.info("Creating DataLoaders...")
     final_train_loader = get_dataloader(full_train_df, final_config, shuffle=True)
     test_loader = get_dataloader(manager.test_df, final_config, shuffle=False)
 
+    # 4. Initialize Final Model
     logger.info(
         f"Initializing Final Model with dim={final_config.hidden_dim}, heads={final_config.num_heads}, layers={final_config.num_layers}")
     final_model = TransactionTransformer(final_config)
     final_trainer = MultiTrainer(final_model, final_config, pos_weight=2.5)
 
+    # 5. Train
+    # We allow the killer to stop this too if user hits Ctrl+C
     for epoch in range(final_config.num_epochs):
         if manager.killer.kill_now:
             logger.warning("Stop signal received during final training. Exiting.")
@@ -282,6 +294,7 @@ def main():
 
         logger.info(f"Final Model Epoch {epoch + 1} | Train Loss: {train_loss:.4f} | Test F1: {metrics['f1']:.4f}")
 
+    # 6. Final Metrics
     if not manager.killer.kill_now:
         logger.info("-" * 60)
         logger.info("FINAL TEST SET RESULTS")
@@ -292,6 +305,8 @@ def main():
         logger.info(f"F1 Score:  {final_metrics['f1']:.4f}")
         logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
 
+        # Save Model
+        # Include study name in filename to avoid overwrites
         save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
         torch.save({
             "config": final_config,

@@ -25,7 +25,7 @@ def mock_data_generator(num_accounts=100) -> pd.DataFrame:
 
             data.append({
                 'accountId': acc_id,
-                'trId': f"{acc_id}_{i}",  # Fixed key name to match config default
+                'trId': f"{acc_id}_{i}",
                 'bankRawDescription': f"PAYMENT TO {'NETFLIX' if is_rec else 'STORE'} {random.randint(1, 100)}",
                 'counter_party': 'Netflix' if is_rec else '',
                 'amount': amount,
