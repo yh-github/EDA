@@ -1,10 +1,11 @@
 import math
-
+import logging
 import torch
 import torch.nn as nn
 from transformers import AutoModel
 from multi.config import MultiExpConfig
 
+logger = logging.getLogger(__name__)
 
 class TimeEncoding(nn.Module):
     """
