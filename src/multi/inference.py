@@ -11,7 +11,7 @@ from scipy.sparse.csgraph import connected_components
 from transformers import AutoTokenizer
 from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
-from multi.data import collate_fn
+from multi.data import get_dataloader  # Use shared data pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,12 @@ class MultiPredictor:
         self.field_config = MultiFieldConfig()
 
         logger.info(f"Loading checkpoint from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(model_path, map_location=self.device)
 
         if isinstance(checkpoint, dict) and "config" in checkpoint:
             saved_config = checkpoint["config"]
             state_dict = checkpoint["state_dict"]
+            # Override batch size with runtime request
             saved_config.batch_size = runtime_config.batch_size
             self.config = saved_config
         else:
@@ -48,136 +49,129 @@ class MultiPredictor:
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         fc = self.field_config
 
+        # 1. Prepare DataFrame (Validation)
         req_cols = [fc.accountId, fc.date, fc.amount, fc.text]
         for col in req_cols:
             if col not in df.columns:
                 raise KeyError(f"Input DataFrame missing required column: {col}")
 
-        df['direction'] = np.sign(df[fc.amount])
-        df = df[df['direction'] != 0].copy()
+        # Ensure dummy columns exist for Dataset compatibility
+        if fc.patternCycle not in df.columns:
+            df[fc.patternCycle] = 'None'
+        if fc.patternId not in df.columns:
+            df[fc.patternId] = -1
 
-        groups = [group for _, group in df.groupby([fc.accountId, 'direction'])]
+        # 2. Create DataLoader (Fast, Pre-tokenized)
+        logger.info("Initializing DataLoader for inference...")
+        loader = get_dataloader(df, self.config, shuffle=False)
 
-        results = []
-        batch_size = self.config.batch_size
+        # 3. Prepare Result Columns
+        # We will fill these arrays using the original indices
+        n_rows = len(df)
+        res_is_rec = np.zeros(n_rows, dtype=bool)
+        res_probs = np.zeros(n_rows, dtype=np.float32)
+        res_pids = np.array([None] * n_rows, dtype=object)
+        res_cycles = np.array(["None"] * n_rows, dtype=object)
 
-        for i in range(0, len(groups), batch_size):
-            batch_groups = groups[i: i + batch_size]
-            batch_data = self._prepare_batch_data(batch_groups)
+        logger.info(f"Running inference on {len(loader)} batches...")
 
-            if not batch_data: continue
+        with torch.no_grad():
+            for batch in loader:
+                # Move to device
+                batch = {k: v.to(self.device) for k, v in batch.items()}
 
-            # collate_fn handles padding and tensor conversion
-            # It now expects 'calendar_features' in the input dicts
-            batch = collate_fn(batch_data, self.tokenizer, self.config)
-            batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+                # Forward Pass
+                adj_logits, cycle_logits, _ = self.model(batch)
 
-            with torch.no_grad():
-                adj_logits, cycle_logits = self.model(batch)
+                # Extract Results
+                self._process_batch(
+                    batch, adj_logits, cycle_logits,
+                    res_is_rec, res_probs, res_pids, res_cycles
+                )
 
-            self._process_batch_results(batch_groups, adj_logits, cycle_logits, results)
+        # 4. Assign results back to dataframe
+        # Note: 'get_dataloader' creates a copy of df internally and resets index.
+        # But we captured 'original_index' from that internal DF.
+        # If the input 'df' index was 0..N, it matches.
+        # If input 'df' had custom index, we need to be careful.
+        # Ideally, we return a new dataframe aligned with the input.
 
-        if not results:
-            return pd.DataFrame()
+        # Since MultiTransactionDataset filters rows (amount=0), the loader
+        # covers a SUBSET of the original DF.
+        # We need to map results back to the specific rows processed.
 
-        return pd.concat(results).sort_index()
+        # We clone the input to avoid side effects
+        out_df = df.copy()
 
-    def _prepare_batch_data(self, groups):
-        fc = self.field_config
-        use_cp = self.config.use_counter_party
-        batch_list = []
+        # We need to align the results arrays with the original DF.
+        # The 'res_...' arrays are sized to the INPUT df (n_rows).
+        # We filled them at the indices provided by the loader.
 
-        for group in groups:
-            group = group.sort_values(fc.date)
+        out_df['pred_isRecurring'] = res_is_rec
+        out_df['pred_recurring_prob'] = res_probs
+        out_df['pred_patternId'] = res_pids
+        out_df['pred_patternCycle'] = res_cycles
 
-            texts = group[fc.text].fillna('').tolist()
+        return out_df
 
-            cps = []
-            if use_cp:
-                if fc.counter_party in group.columns:
-                    cps = group[fc.counter_party].fillna('').tolist()
-                else:
-                    cps = [""] * len(texts)
-
-            amounts = group[fc.amount].values.astype(np.float32)
-            log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
-
-            dates = pd.to_datetime(group[fc.date])
-            min_date = dates.iloc[0]
-            days = (dates - min_date).dt.days.values.astype(np.float32)
-
-            # --- NEW: Generate Calendar Features (Mirroring data.py) ---
-            # Day of Week (0=Mon, 6=Sun)
-            dow = dates.dt.dayofweek.values.astype(np.float32)
-            # Day of Month (1..31)
-            dom = dates.dt.day.values.astype(np.float32)
-
-            two_pi = 2 * np.pi
-            calendar_feats = np.stack([
-                np.sin(dow * (two_pi / 7)),
-                np.cos(dow * (two_pi / 7)),
-                np.sin(dom * (two_pi / 31)),
-                np.cos(dom * (two_pi / 31))
-            ], axis=1).astype(np.float32)
-
-            batch_list.append({
-                "texts": texts,
-                "cps": cps,
-                "amounts": log_amounts,
-                "days": days,
-                "calendar_features": calendar_feats, # <--- Added
-                "pattern_ids": np.zeros(len(group)) - 1,
-                "cycles": np.zeros(len(group)),
-            })
-        return batch_list
-
-    def _process_batch_results(self, groups, adj_logits, cycle_logits, results_list):
+    def _process_batch(self, batch, adj_logits, cycle_logits, res_is_rec, res_probs, res_pids, res_cycles):
         probs = torch.sigmoid(adj_logits).cpu().numpy()
         cycle_softmax = torch.softmax(cycle_logits, dim=-1).cpu().numpy()
 
-        for b_idx, group in enumerate(groups):
-            n = len(group)
-            if n == 0: continue
+        # Indices in the original dataframe
+        batch_indices = batch['original_index'].cpu().numpy()  # [B, Seq]
+        padding_mask = batch['padding_mask'].cpu().numpy()  # [B, Seq]
 
-            adj = probs[b_idx, :n, :n]
-            node_cycles = cycle_softmax[b_idx, :n, :]
+        # Account IDs are not directly in batch, but we can reconstruct Pid string
+        # using batch index for uniqueness within this run
 
-            recurring_scores = 1.0 - node_cycles[:, 0]
+        batch_size = probs.shape[0]
 
+        for i in range(batch_size):
+            # Extract valid sequence
+            valid_len = padding_mask[i].sum()
+            if valid_len < 2: continue
+
+            # Slice valid data
+            indices = batch_indices[i, :valid_len]
+            adj = probs[i, :valid_len, :valid_len]
+            node_cycles = cycle_softmax[i, :valid_len, :]
+
+            # 1. Detection Scores
+            rec_scores = 1.0 - node_cycles[:, 0]
+
+            # Assign scores to global arrays
+            # (Use flat indexing for numpy arrays)
+            res_probs[indices] = rec_scores
+
+            # 2. Clustering
             adj_binary = (adj > 0.5).astype(int)
             np.fill_diagonal(adj_binary, 0)
             graph = csr_matrix(adj_binary)
             n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
 
-            final_pids = [None] * n
-            final_cycles = ["None"] * n
-            final_is_rec = [False] * n
-
             for cluster_id in range(n_components):
-                indices = np.where(labels == cluster_id)[0]
+                cluster_mask = (labels == cluster_id)
+                cluster_indices = indices[cluster_mask]
 
-                # We keeping the min size 2 filter for now as requested
-                if len(indices) < 2:
+                # Filter small noise
+                if len(cluster_indices) < 2:
                     continue
 
-                cluster_sum_probs = node_cycles[indices].sum(axis=0)
+                # 3. Cycle Determination
+                # Sum probs for this cluster
+                cluster_sum_probs = node_cycles[cluster_mask].sum(axis=0)
                 best_cycle_idx = cluster_sum_probs.argmax()
 
                 is_recurring = (best_cycle_idx != 0)
 
                 if is_recurring:
-                    pid_str = f"{group[self.field_config.accountId].iloc[0]}_{group['direction'].iloc[0]}_{cluster_id}"
+                    # Construct unique ID: "idx_{first_row_index}_{cluster}"
+                    # This ensures uniqueness across the whole dataframe
+                    pid_str = f"grp_{cluster_indices[0]}_{cluster_id}"
                     cycle_str = self.idx_to_cycle.get(best_cycle_idx, "None")
 
-                    for idx in indices:
-                        final_pids[idx] = pid_str
-                        final_cycles[idx] = cycle_str
-                        final_is_rec[idx] = True
-
-            res_df = group.copy()
-            res_df['pred_isRecurring'] = final_is_rec
-            res_df['pred_recurring_prob'] = recurring_scores
-            res_df['pred_patternId'] = final_pids
-            res_df['pred_patternCycle'] = final_cycles
-
-            results_list.append(res_df)
+                    # Update Result Arrays
+                    res_is_rec[cluster_indices] = True
+                    res_pids[cluster_indices] = pid_str
+                    res_cycles[cluster_indices] = cycle_str

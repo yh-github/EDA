@@ -10,7 +10,7 @@ from multi.config import MultiExpConfig, MultiFieldConfig
 logger = logging.getLogger(__name__)
 
 
-def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = True) -> DataLoader:
+def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = True, n_workers=4) -> DataLoader:
     """
     Factory function to create a DataLoader from a DataFrame.
     """
@@ -27,7 +27,7 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
         collate_fn=collate,
         # OPTIMIZATION: Use workers to prefetch data.
         # Since we pre-tokenize, 4 workers is plenty to keep GPU saturated.
-        num_workers=4,
+        num_workers=n_workers,
         pin_memory=True if torch.cuda.is_available() else False,
         persistent_workers=True  # Keep workers alive between epochs
     )
@@ -219,7 +219,8 @@ class MultiTransactionDataset(Dataset):
             "days": days_since_start,
             "calendar_features": calendar_feats,
             "pattern_ids": pattern_ids,
-            "cycles": cycles
+            "cycles": cycles,
+            "original_index": torch.tensor(indices, dtype=torch.long)
         }
 
 
@@ -284,6 +285,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
 
     # Loop to fill batch tensors
     current_idx_inf = 0  # For inference flattened list indexing
+    b_original_index = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)
 
     for i, (item, length) in enumerate(zip(batch, account_lengths)):
 
@@ -311,6 +313,8 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         b_days[i, :length, 0] = torch.tensor(item['days'])
         b_calendar[i, :length, :] = torch.tensor(item['calendar_features'])
         b_cycles[i, :length] = torch.tensor(item['cycles'])
+        b_original_index[i, :length] = item['original_index']  # Store indices
+
 
         p_ids = item['pattern_ids']
         b_pattern_ids[i, :length] = torch.tensor(p_ids)
