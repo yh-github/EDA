@@ -57,7 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi Bank Transaction Pattern Detector")
     parser.add_argument("--epochs", type=int, default=config.num_epochs, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=config.batch_size, help="Batch size")
-    parser.add_argument("--data", type=str, default=config.data_path, help="Path to CSV data")
+    parser.add_argument("--data_path", type=str, default=config.data_path, help="Path to CSV data")
     parser.add_argument("--output_dir", type=str, default=config.output_dir, help="Dir to save model")
     parser.add_argument("--downsample", type=float, default=config.downsample,
                         help="Fraction of accounts to use (0.0-1.0)")
