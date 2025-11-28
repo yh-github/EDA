@@ -1,5 +1,5 @@
 import os
-
+from datetime import datetime
 from common.exp_utils import set_global_seed
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -50,19 +50,22 @@ def mock_data_generator(num_accounts=100):
 
 
 def main():
+    config = MultiExpConfig()
+
     parser = argparse.ArgumentParser(description="Multi Bank Transaction Pattern Detector")
-    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--data", type=str, default="data/all_data.csv", help="Path to CSV data")
-    parser.add_argument("--output_dir", type=str, default="checkpoints/multi", help="Dir to save model")
-    parser.add_argument("--downsample", type=float, default=0.3, help="Fraction of accounts to use (0.0-1.0)")
+    parser.add_argument("--epochs", type=int, default=config.num_epochs, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=config.batch_size, help="Batch size")
+    parser.add_argument("--data", type=str, default=config.data_path, help="Path to CSV data")
+    parser.add_argument("--output_dir", type=str, default=config.output_dir, help="Dir to save model")
+    parser.add_argument("--downsample", type=float, default=config.downsample, help="Fraction of accounts to use (0.0-1.0)")
     args = parser.parse_args()
 
     # 1. Config & Setup
-    config = MultiExpConfig()
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
     config.output_dir = args.output_dir
+    config.data_path = args.data_path
+    config.downsample = args.downsample
 
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     set_global_seed(config.random_state)
@@ -99,11 +102,11 @@ def main():
         config.use_counter_party = False
 
     # 4. Downsample (Account-based)
-    if 0.0 < args.downsample < 1.0:
-        logger.info(f"Downsampling to {args.downsample:.0%} of accounts...")
+    if 0.0 < config.downsample < 1.0:
+        logger.info(f"Downsampling to {config.downsample:.0%} of accounts...")
         account_ids = df[field_config.accountId].unique()
         rng = np.random.default_rng(config.random_state)
-        n_select = max(1, int(len(account_ids) * args.downsample))
+        n_select = max(1, int(len(account_ids) * config.downsample))
         selected_ids = rng.choice(account_ids, size=n_select, replace=False)
         df = df[df[field_config.accountId].isin(selected_ids)].copy()
         logger.info(f"Dataset size after downsampling: {len(df)} rows ({len(selected_ids)} accounts)")
@@ -129,7 +132,8 @@ def main():
 
     # 8. Training Loop
     best_f1 = -1.0
-    save_path = os.path.join(config.output_dir, "model.pth")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    save_path = os.path.join(config.output_dir, f"model_{timestamp}.pth")
 
     for epoch in range(config.num_epochs):
         train_loss = trainer.train_epoch(train_loader, epoch + 1)

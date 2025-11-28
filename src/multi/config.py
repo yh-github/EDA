@@ -24,8 +24,10 @@ class MultiExpConfig:
     """
     # Paths
     random_state: int = 0x5EED
-    data_path: str = "./data/transactions.csv"
-    output_dir: str = "./checkpoints"
+
+    data_path: str = "data/all_data.csv"
+    output_dir: str = "checkpoints/multi"
+    downsample: float = 0.3 # 1.0 means no downsampling
 
     # Model Hyperparameters
     text_encoder_model: str = EmbModel.MPNET.value
@@ -38,14 +40,14 @@ class MultiExpConfig:
     use_counter_party: bool = True
 
     # Training Hyperparameters
-    batch_size: int = 8
+    batch_size: int = 4
     learning_rate: float = 1e-4
     num_epochs: int = 10
     max_seq_len: int = 200
 
     # Tokenizer Limits
-    max_text_length: int = 64
-    max_cp_length: int = 32
+    max_text_length: int = 32
+    max_cp_length: int = 16
 
     # Cycle Labels
     cycle_map: dict = field(default_factory=lambda: {
