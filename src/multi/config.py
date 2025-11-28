@@ -27,7 +27,7 @@ class MultiExpConfig:
 
     data_path: str = "data/all_data.csv"
     output_dir: str = "checkpoints/multi"
-    downsample: float = 0.3 # 1.0 means no downsampling
+    downsample: float = 0.3  # 1.0 means no downsampling
 
     # Model Hyperparameters
     text_encoder_model: str = EmbModel.MPNET.value
@@ -41,10 +41,15 @@ class MultiExpConfig:
 
     # Training Hyperparameters
     batch_size: int = 4
-    learning_rate: float = 1e-4
+    learning_rate: float = 5e-5  # Lowered from 1e-4
     num_epochs: int = 10
     max_seq_len: int = 200
-    early_stopping_patience: int = 5  # Stop if Val F1 doesn't improve for N epochs
+    early_stopping_patience: int = 5
+
+    # Optimization Flags
+    gradient_accumulation_steps: int = 4  # Effective batch size = 4 * 4 = 16
+    use_contrastive_loss: bool = True
+    contrastive_loss_weight: float = 0.1  # Weight for the auxiliary loss
 
     # Tokenizer Limits
     max_text_length: int = 32

@@ -10,11 +10,13 @@ import torch
 import random
 import numpy as np
 from pathlib import Path
+from transformers import AutoTokenizer
 from multi.config import MultiExpConfig, MultiFieldConfig
-from multi.data import get_dataloader
+from multi.data import get_dataloader, analyze_token_distribution
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
 from common.data import create_train_val_test_split
+from common.log_utils import flush_logger
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -57,15 +59,20 @@ def main():
     parser.add_argument("--batch_size", type=int, default=config.batch_size, help="Batch size")
     parser.add_argument("--data", type=str, default=config.data_path, help="Path to CSV data")
     parser.add_argument("--output_dir", type=str, default=config.output_dir, help="Dir to save model")
-    parser.add_argument("--downsample", type=float, default=config.downsample, help="Fraction of accounts to use (0.0-1.0)")
+    parser.add_argument("--downsample", type=float, default=config.downsample,
+                        help="Fraction of accounts to use (0.0-1.0)")
+    parser.add_argument("--accumulate", type=int, default=config.gradient_accumulation_steps,
+                        help="Gradient accumulation steps")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile")
     args = parser.parse_args()
 
     # 1. Config & Setup
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
     config.output_dir = args.output_dir
-    config.data_path = args.data
+    config.data_path = args.data_path
     config.downsample = args.downsample
+    config.gradient_accumulation_steps = args.accumulate
 
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     set_global_seed(config.random_state)
@@ -85,8 +92,6 @@ def main():
 
     # 3. Feature Availability Check
     if field_config.counter_party in df.columns:
-        # Check coverage (non-empty)
-        # We treat empty strings and NaNs as "missing"
         valid_cp = df[field_config.counter_party].replace('', np.nan).notna()
         coverage = valid_cp.sum() / len(df)
         logger.info(f"Counter Party Coverage: {coverage:.2%}")
@@ -111,6 +116,13 @@ def main():
         df = df[df[field_config.accountId].isin(selected_ids)].copy()
         logger.info(f"Dataset size after downsampling: {len(df)} rows ({len(selected_ids)} accounts)")
 
+    # --- 4b. TOKEN STATS REPORT ---
+    logger.info("Running Token Stats Analysis...")
+    tokenizer_for_stats = AutoTokenizer.from_pretrained(config.text_encoder_model)
+    analyze_token_distribution(df, tokenizer_for_stats, config)
+    # Ensure logs are printed before potentially heavy processing
+    flush_logger()
+
     # 5. Split Data
     logger.info("Splitting data into Train/Val/Test...")
     train_df, val_df, test_df = create_train_val_test_split(
@@ -128,6 +140,15 @@ def main():
     # 7. Model Initialization
     logger.info(f"Initializing model on {config.device} (use_cp={config.use_counter_party})...")
     model = TransactionTransformer(config)
+
+    # Optional: Compile
+    if args.compile:
+        try:
+            logger.info("Compiling model with torch.compile...")
+            model = torch.compile(model)
+        except Exception as e:
+            logger.warning(f"torch.compile failed: {e}. Proceeding without compilation.")
+
     trainer = MultiTrainer(model, config, pos_weight=2.5)
 
     # 8. Training Loop
@@ -135,20 +156,51 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     save_path = os.path.join(config.output_dir, f"model_{timestamp}.pth")
 
+    # Early Stopping Variables
+    patience = config.early_stopping_patience
+    patience_counter = 0
+
     for epoch in range(config.num_epochs):
         train_loss = trainer.train_epoch(train_loader, epoch + 1)
         metrics = trainer.evaluate(val_loader)
 
-        logger.info(f"Epoch {epoch + 1}/{config.num_epochs} | Loss: {train_loss:.4f} | Val F1: {metrics['f1']:.4f}")
+        val_f1 = metrics['f1']
+        val_loss = metrics['val_loss']
 
-        if metrics['f1'] > best_f1:
-            best_f1 = metrics['f1']
+        # Improved Logging
+        logger.info(
+            f"Epoch {epoch + 1}/{config.num_epochs} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_loss:.4f} | "
+            f"Val F1: {val_f1:.4f} | "
+            f"Prec: {metrics['precision']:.4f} | "
+            f"Rec: {metrics['recall']:.4f}"
+        )
+
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            patience_counter = 0  # Reset patience
+
             checkpoint = {
                 "config": config,
-                "state_dict": model.state_dict()
+                "state_dict": model.state_dict(),
+                # Note: if compiled, might need ._orig_mod.state_dict() in some versions
+                "best_f1": best_f1,
+                "epoch": epoch + 1
             }
+            # Handle compiled model saving
+            if args.compile and hasattr(model, '_orig_mod'):
+                checkpoint["state_dict"] = model._orig_mod.state_dict()
+
             torch.save(checkpoint, save_path)
-            logger.info(f"  --> New Best Model Saved to {save_path}")
+            logger.info(f"  --> New Best Model Saved (F1: {best_f1:.4f})")
+        else:
+            patience_counter += 1
+            logger.info(f"  ... No improvement. Patience: {patience_counter}/{patience}")
+
+            if patience_counter >= patience:
+                logger.info(f"⛔ Early stopping triggered at epoch {epoch + 1}")
+                break
 
     logger.info("Training Complete.")
 

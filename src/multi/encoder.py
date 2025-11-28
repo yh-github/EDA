@@ -5,13 +5,14 @@ import torch.nn as nn
 from transformers import AutoModel
 from multi.config import MultiExpConfig
 
+
 class TimeEncoding(nn.Module):
     """
     Sinusoidal Positional Encoding for time (days).
     Allows the model to learn periodicity (e.g., 7 days, 30 days).
     """
 
-    def __init__(self, hidden_dim:int, max_len:int=10000):
+    def __init__(self, hidden_dim: int, max_len: int = 10000):
         super().__init__()
         self.hidden_dim = hidden_dim
 
@@ -40,45 +41,42 @@ class TimeEncoding(nn.Module):
 
 
 class TransactionEncoder(nn.Module):
-    class TransactionEncoder(nn.Module):
-        def get_embedder(self, config: MultiExpConfig):
-            embedder = AutoModel.from_pretrained(config.text_encoder_model)
+    def get_embedder(self, config: MultiExpConfig):
+        embedder = AutoModel.from_pretrained(config.text_encoder_model)
 
-            # Logic to handle freezing/unfreezing
-            for param in embedder.parameters():
-                param.requires_grad = False
+        # Logic to handle freezing/unfreezing
+        for param in embedder.parameters():
+            param.requires_grad = False
 
-            if config.unfreeze_last_n_layers == 0:
-                return embedder
-
-            # config.unfreeze_last_n_layers > 0:
-            # Freeze everything first
-            for param in embedder.parameters():
-                param.requires_grad = False
-
-            # Unfreeze the specific top layers (Encoder + Pooler)
-            # This depends on the specific architecture (BERT/MiniLM usually have .encoder.layer)
-            # This is a generic way to grab the last N modules
-            encoder_layers = embedder.encoder.layer
-            for layer in encoder_layers[-config.unfreeze_last_n_layers:]:
-                for param in layer.parameters():
-                    param.requires_grad = True
-
-            # Always unfreeze the pooler if it exists
-            if hasattr(self.embedder, 'pooler') and self.embedder.pooler is not None:
-                for param in self.embedder.pooler.parameters():
-                    param.requires_grad = True
-
-            embedder.gradient_checkpointing_enable()
+        if config.unfreeze_last_n_layers == 0:
             return embedder
+
+        # config.unfreeze_last_n_layers > 0:
+        # Freeze everything first
+        for param in embedder.parameters():
+            param.requires_grad = False
+
+        # Unfreeze the specific top layers (Encoder + Pooler)
+        # This depends on the specific architecture (BERT/MiniLM usually have .encoder.layer)
+        # This is a generic way to grab the last N modules
+        encoder_layers = embedder.encoder.layer
+        for layer in encoder_layers[-config.unfreeze_last_n_layers:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+
+        # Always unfreeze the pooler if it exists
+        if hasattr(self.embedder, 'pooler') and self.embedder.pooler is not None:
+            for param in self.embedder.pooler.parameters():
+                param.requires_grad = True
+
+        embedder.gradient_checkpointing_enable()
+        return embedder
 
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.use_cp = config.use_counter_party
 
-        self.embedder = AutoModel.from_pretrained(config.text_encoder_model)
-        for param in self.embedder.parameters():
-            param.requires_grad = False
+        self.embedder = self.get_embedder(config)
 
         text_dim = self.embedder.config.hidden_size
 
@@ -132,7 +130,6 @@ class TransactionEncoder(nn.Module):
             cp_emb = self._encode_text_stream(cp_input_ids, cp_attention_mask, self.cp_proj)
             fused = fused + cp_emb
 
-
         return self.layer_norm(fused)
 
 
@@ -146,14 +143,15 @@ class TransactionTransformer(nn.Module):
             nhead=config.num_heads,
             dim_feedforward=config.hidden_dim * 4,
             dropout=config.dropout,
-            batch_first=True
+            batch_first=True,
+            norm_first=True  # Usually stabilizes training
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=config.num_layers)
 
         self.bilinear = nn.Bilinear(config.hidden_dim, config.hidden_dim, 1)
         self.cycle_head = nn.Linear(config.hidden_dim, config.num_classes)
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.encoder(
             batch['input_ids'],
             batch['attention_mask'],
@@ -167,10 +165,13 @@ class TransactionTransformer(nn.Module):
         src_key_padding_mask = ~batch['padding_mask']
         h = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
 
+        # Compute Adjacency
         h_i = h.unsqueeze(2).expand(-1, -1, h.size(1), -1)
         h_j = h.unsqueeze(1).expand(-1, h.size(1), -1, -1)
-
         adj_logits = self.bilinear(h_i, h_j).squeeze(-1)
+
+        # Compute Cycles
         cycle_logits = self.cycle_head(h)
 
-        return adj_logits, cycle_logits
+        # Return h for Contrastive Loss
+        return adj_logits, cycle_logits, h

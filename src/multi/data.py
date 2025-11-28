@@ -2,8 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
+from torch.utils.data import Dataset
 from multi.config import MultiExpConfig, MultiFieldConfig
 
 logger = logging.getLogger(__name__)
@@ -57,8 +56,6 @@ def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConf
     if config.use_counter_party and fields.counter_party in df.columns:
         logger.info("Analyzing 'counter_party'...")
         all_cps = df[fields.counter_party].fillna("").astype(str).tolist()
-        # Filter out empty strings if CP is sparse, to get stats on *actual* CPs?
-        # Usually better to analyze all non-empty CPs
         non_empty_cps = [x for x in all_cps if x.strip()]
         if non_empty_cps:
             report_stats("CounterParty (Non-Empty)", non_empty_cps, config.max_cp_length)
@@ -110,6 +107,8 @@ class MultiTransactionDataset(Dataset):
         group = self.groups[idx]
         f = self.fields
 
+        # Split long histories if needed (for training)
+        # Note: Dynamic sequence truncation happens in collate_fn, this is just hard capping
         if len(group) > self.config.max_seq_len:
             group = group.sort_values(f.date, ascending=True).iloc[-self.config.max_seq_len:]
         else:
@@ -129,21 +128,12 @@ class MultiTransactionDataset(Dataset):
 
         dates = pd.to_datetime(group[f.date])
         min_date = dates.iloc[0]
-        # 1. Existing Relative Time (For Frequency/Intervals)
         days_since_start = (dates - min_date).dt.days.values.astype(np.float32)
 
-        # 2. NEW: Calendar Features (For Phase/Seasonality)
-        # Day of Week (0=Mon, 6=Sun)
         dow = dates.dt.dayofweek.values.astype(np.float32)
-        # Day of Month (1..31)
         dom = dates.dt.day.values.astype(np.float32)
 
-        # Normalize to [0, 2π]
-        # We use 7 days for week, 31 days for month to ensure coverage
         two_pi = 2 * np.pi
-
-        # 4 Dimensions: Sin/Cos Week, Sin/Cos Month
-        # Shape: [Seq_Len, 4]
         calendar_feats = np.stack([
             np.sin(dow * (two_pi / 7)),
             np.cos(dow * (two_pi / 7)),
@@ -168,10 +158,10 @@ class MultiTransactionDataset(Dataset):
 def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
     all_texts = [t for item in batch for t in item['texts']]
     account_lengths = [len(item['texts']) for item in batch]
+    # Dynamic Batch Padding: Max length in THIS batch, not global max
     max_len_in_batch = max(account_lengths)
     batch_size = len(batch)
 
-    # 1. Main Text Tokenization
     enc_text = tokenizer(
         all_texts,
         padding=True,
@@ -180,7 +170,6 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         return_tensors="pt"
     )
 
-    # 2. Counter Party Tokenization (Conditional)
     enc_cp = None
     if config.use_counter_party:
         all_cps = [t for item in batch for t in item['cps']]
@@ -192,7 +181,6 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
             return_tensors="pt"
         )
 
-    # Initialize Tensors
     seq_len_text = enc_text['input_ids'].shape[1]
     b_input_ids = torch.zeros((batch_size, max_len_in_batch, seq_len_text), dtype=torch.long)
     b_attn_mask = torch.zeros((batch_size, max_len_in_batch, seq_len_text), dtype=torch.long)
@@ -207,11 +195,11 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
 
     b_amounts = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     b_days = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
-    # New: Calendar Buffer [Batch, Max_Len, 4]
     b_calendar = torch.zeros((batch_size, max_len_in_batch, 4), dtype=torch.float32)
 
     b_cycles = torch.zeros((batch_size, max_len_in_batch), dtype=torch.long)
     b_adjacency = torch.zeros((batch_size, max_len_in_batch, max_len_in_batch), dtype=torch.float32)
+    b_pattern_ids = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)  # New: For SupCon
     padding_mask = torch.zeros((batch_size, max_len_in_batch), dtype=torch.bool)
 
     current_idx = 0
@@ -228,13 +216,15 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         # Scalars
         b_amounts[i, :length, 0] = torch.tensor(item['amounts'])
         b_days[i, :length, 0] = torch.tensor(item['days'])
-        # Calendar
         b_calendar[i, :length, :] = torch.tensor(item['calendar_features'])
 
         b_cycles[i, :length] = torch.tensor(item['cycles'])
 
-        # Adjacency
+        # New: Pass pattern_ids for Contrastive Loss
         p_ids = item['pattern_ids']
+        b_pattern_ids[i, :length] = torch.tensor(p_ids)
+
+        # Adjacency
         if np.any(p_ids != -1):
             p_ids_tensor = torch.tensor(p_ids).unsqueeze(1)
             matches = (p_ids_tensor == p_ids_tensor.T) & (p_ids_tensor != -1)
@@ -251,6 +241,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         "calendar_features": b_calendar,
         "adjacency_target": b_adjacency,
         "cycle_target": b_cycles,
+        "pattern_ids": b_pattern_ids,  # Added
         "padding_mask": padding_mask
     }
 
@@ -259,14 +250,3 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         result["cp_attention_mask"] = b_cp_mask
 
     return result
-
-
-def get_dataloader(df, config: MultiExpConfig, shuffle=True):
-    tokenizer = AutoTokenizer.from_pretrained(config.text_encoder_model)
-    ds = MultiTransactionDataset(df, config, tokenizer)
-    return DataLoader(
-        ds,
-        batch_size=config.batch_size,
-        shuffle=shuffle,
-        collate_fn=lambda x: collate_fn(x, tokenizer, config)
-    )
