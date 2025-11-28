@@ -15,7 +15,7 @@ from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.data import get_dataloader, analyze_token_distribution
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
-from common.data import create_train_val_test_split
+from common.data import create_train_val_test_split, clean_text
 from common.log_utils import flush_logger
 
 # Setup Logging
@@ -115,6 +115,9 @@ def main():
         selected_ids = rng.choice(account_ids, size=n_select, replace=False)
         df = df[df[field_config.accountId].isin(selected_ids)].copy()
         logger.info(f"Dataset size after downsampling: {len(df)} rows ({len(selected_ids)} accounts)")
+
+
+    df[field_config.text] = clean_text(df[field_config.text])
 
     # --- 4b. TOKEN STATS REPORT ---
     logger.info("Running Token Stats Analysis...")
