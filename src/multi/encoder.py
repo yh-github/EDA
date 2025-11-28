@@ -118,8 +118,9 @@ class TransactionEncoder(nn.Module):
         flat_ids = input_ids.view(total_seqs, seq_len)
         flat_mask = attention_mask.view(total_seqs, seq_len)
 
-        # Chunking configuration
-        chunk_size = 64
+        # Chunking configuration - INCREASED FOR A100 SPEED
+        # 2048 sequences * 32 tokens * float16/32 fits easily in 80GB
+        chunk_size = 2048
         embeddings = []
 
         for i in range(0, total_seqs, chunk_size):
