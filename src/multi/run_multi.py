@@ -139,12 +139,12 @@ def main():
     model = TransactionTransformer(config)
 
     # Optional: Compile
-    if args.compile:
-        try:
-            logger.info("Compiling model with torch.compile...")
-            model = torch.compile(model)
-        except Exception as e:
-            logger.warning(f"torch.compile failed: {e}. Proceeding without compilation.")
+    # if args.compile:
+    #     try:
+    #         logger.info("Compiling model with torch.compile...")
+    #         model = torch.compile(model)
+    #     except Exception as e:
+    #         logger.warning(f"torch.compile failed: {e}. Proceeding without compilation.")
 
     trainer = MultiTrainer(model, config, pos_weight=2.5)
 
