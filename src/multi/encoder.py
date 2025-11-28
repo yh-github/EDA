@@ -7,6 +7,7 @@ from multi.config import MultiExpConfig
 
 logger = logging.getLogger(__name__)
 
+
 class TimeEncoding(nn.Module):
     """
     Sinusoidal Positional Encoding for time (days).
@@ -42,7 +43,9 @@ class TimeEncoding(nn.Module):
 
 
 class TransactionEncoder(nn.Module):
-    def get_embedder(self, config: MultiExpConfig):
+
+    @staticmethod
+    def get_embedder(config: MultiExpConfig):
         embedder = AutoModel.from_pretrained(config.text_encoder_model)
 
         # Logic to handle freezing/unfreezing
@@ -106,12 +109,31 @@ class TransactionEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(config.hidden_dim)
 
     def _encode_text_stream(self, input_ids, attention_mask, projector):
+        """
+        Encodes text in chunks to save memory.
+        """
         b, n, seq_len = input_ids.shape
-        flat_ids = input_ids.view(b * n, seq_len)
-        flat_mask = attention_mask.view(b * n, seq_len)
+        total_seqs = b * n
 
-        bert_out = self.embedder(flat_ids, attention_mask=flat_mask).last_hidden_state[:, 0, :]
-        return projector(bert_out).view(b, n, -1)
+        flat_ids = input_ids.view(total_seqs, seq_len)
+        flat_mask = attention_mask.view(total_seqs, seq_len)
+
+        # Chunking configuration
+        chunk_size = 64
+        embeddings = []
+
+        for i in range(0, total_seqs, chunk_size):
+            chunk_ids = flat_ids[i: i + chunk_size]
+            chunk_mask = flat_mask[i: i + chunk_size]
+
+            # Forward pass for chunk
+            bert_out = self.embedder(chunk_ids, attention_mask=chunk_mask).last_hidden_state[:, 0, :]
+            proj_out = projector(bert_out)
+            embeddings.append(proj_out)
+
+        # Concatenate and reshape
+        full_embedding = torch.cat(embeddings, dim=0)
+        return full_embedding.view(b, n, -1)
 
     def forward(
             self,
@@ -161,7 +183,10 @@ class TransactionTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=config.num_layers)
 
-        self.bilinear = nn.Bilinear(config.hidden_dim, config.hidden_dim, 1)
+        # Replaced Bilinear with explicit weights for memory efficient matmul
+        self.adj_weight = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.adj_bias = nn.Parameter(torch.zeros(1))
+
         self.cycle_head = nn.Linear(config.hidden_dim, config.num_classes)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -178,12 +203,15 @@ class TransactionTransformer(nn.Module):
         src_key_padding_mask = ~batch['padding_mask']
         h = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
 
-        # Compute Adjacency
-        h_i = h.unsqueeze(2).expand(-1, -1, h.size(1), -1)
-        h_j = h.unsqueeze(1).expand(-1, h.size(1), -1, -1)
+        # Compute Adjacency (Memory Efficient)
+        # Standard Bilinear(x, y) computes xWy + b
+        # Here we do (h @ W) @ h.T to avoid expanding h to [B, N, N, D]
 
-        # Raw Bilinear logits (Asymmetric: xWy + b)
-        adj_logits = self.bilinear(h_i, h_j).squeeze(-1)
+        # 1. Project: [B, N, D] @ [D, D] -> [B, N, D]
+        h_transformed = self.adj_weight(h)
+
+        # 2. Dot Product: [B, N, D] @ [B, D, N] -> [B, N, N]
+        adj_logits = torch.matmul(h_transformed, h.transpose(1, 2)) + self.adj_bias
 
         # FIX: Enforce Symmetry (A matches B implies B matches A)
         # This helps the model converge on a valid undirected clustering solution

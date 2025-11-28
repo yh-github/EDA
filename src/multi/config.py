@@ -40,14 +40,14 @@ class MultiExpConfig:
     use_counter_party: bool = True
 
     # Training Hyperparameters
-    batch_size: int = 4
+    batch_size: int = 2
     learning_rate: float = 5e-5  # Lowered from 1e-4
     num_epochs: int = 10
     max_seq_len: int = 200
     early_stopping_patience: int = 5
 
     # Optimization Flags
-    gradient_accumulation_steps: int = 4  # Effective batch size = 4 * 4 = 16
+    gradient_accumulation_steps: int = 8 # Effective batch size = 2 * 8 = 16
     use_contrastive_loss: bool = True
     contrastive_loss_weight: float = 0.1  # Weight for the auxiliary loss
 
