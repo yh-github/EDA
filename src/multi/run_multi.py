@@ -57,22 +57,16 @@ def main():
     parser = argparse.ArgumentParser(description="Multi Bank Transaction Pattern Detector")
     parser.add_argument("--epochs", type=int, default=config.num_epochs, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=config.batch_size, help="Batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=config.gradient_accumulation_steps, help="gradient_accumulation_steps")
     parser.add_argument("--data_path", type=str, default=config.data_path, help="Path to CSV data")
     parser.add_argument("--output_dir", type=str, default=config.output_dir, help="Dir to save model")
     parser.add_argument("--downsample", type=float, default=config.downsample,
                         help="Fraction of accounts to use (0.0-1.0)")
-    parser.add_argument("--accumulate", type=int, default=config.gradient_accumulation_steps,
-                        help="Gradient accumulation steps")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
     args = parser.parse_args()
 
     # 1. Config & Setup
-    config.num_epochs = args.epochs
-    config.batch_size = args.batch_size
-    config.output_dir = args.output_dir
-    config.data_path = args.data_path
-    config.downsample = args.downsample
-    config.gradient_accumulation_steps = args.accumulate
+    config = MultiExpConfig(**vars(args))
 
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     set_global_seed(config.random_state)
