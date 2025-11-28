@@ -1,8 +1,10 @@
 import logging
+from functools import partial
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer
 from multi.config import MultiExpConfig, MultiFieldConfig
 
 logger = logging.getLogger(__name__)
@@ -250,3 +252,22 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         result["cp_attention_mask"] = b_cp_mask
 
     return result
+
+def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = True) -> DataLoader:
+    """
+    Factory function to create a DataLoader from a DataFrame.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(config.text_encoder_model)
+    dataset = MultiTransactionDataset(df, config, tokenizer)
+
+    # Bind tokenizer and config to the collate function
+    collate = partial(collate_fn, tokenizer=tokenizer, config=config)
+
+    return DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=shuffle,
+        collate_fn=collate,
+        num_workers=0,  # Set to 4 for production linux envs, 0 for debugging
+        pin_memory=True if torch.cuda.is_available() else False
+    )
