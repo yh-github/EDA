@@ -39,17 +39,23 @@ class MultiExpConfig:
     dropout: float = 0.1
     use_counter_party: bool = True
 
+    # Encoder internals
+    chunk_size: int = 2048  # For memory efficient encoding
+    time_encoding_max_len: int = 10000
+
     # Training Hyperparameters
     batch_size: int = 64
-    learning_rate: float = 5e-5  # Lowered from 1e-4
+    learning_rate: float = 5e-5
     num_epochs: int = 10
     max_seq_len: int = 200
     early_stopping_patience: int = 5
+    scheduler_patience: int = 2
 
     # Optimization Flags
-    gradient_accumulation_steps: int = 1 # Effective batch size = batch_size * gradient_accumulation_steps
+    gradient_accumulation_steps: int = 1
     use_contrastive_loss: bool = True
-    contrastive_loss_weight: float = 0.1  # Weight for the auxiliary loss
+    contrastive_loss_weight: float = 0.1
+    contrastive_temperature: float = 0.07
 
     # Tokenizer Limits
     max_text_length: int = 44
