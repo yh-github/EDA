@@ -78,12 +78,12 @@ def main():
     set_global_seed(config.random_state)
 
     # 2. Load Data
-    if args.data and args.data.lower() == "mock":
+    if config.data_path.lower() == "mock":
         df = mock_data_generator()
-    elif args.data and os.path.exists(args.data):
-        df = pd.read_csv(args.data, low_memory=False)
+    elif config.data_path and os.path.exists(config.data_path):
+        df = pd.read_csv(config.data_path, low_memory=False)
     else:
-        raise Exception(f"No CSV found path={args.data}")
+        raise Exception(f"No CSV found path={config.data_path}")
 
     logger.info(f"Loaded {len(df)} transactions.")
     field_config = MultiFieldConfig()
