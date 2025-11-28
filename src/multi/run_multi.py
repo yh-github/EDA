@@ -1,8 +1,7 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from datetime import datetime
 from common.exp_utils import set_global_seed
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
 import logging
 import torch

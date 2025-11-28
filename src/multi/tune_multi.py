@@ -1,6 +1,8 @@
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import argparse
 import logging
-import os
 import signal
 import pickle
 import re
