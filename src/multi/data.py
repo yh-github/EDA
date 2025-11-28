@@ -9,6 +9,64 @@ from multi.config import MultiExpConfig, MultiFieldConfig
 logger = logging.getLogger(__name__)
 
 
+def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConfig):
+    """
+    Analyzes and logs statistics about token lengths for text and counter_party.
+    """
+    fields = MultiFieldConfig()
+
+    logger.info("=" * 60)
+    logger.info("📊 TOKEN DISTRIBUTION ANALYSIS")
+    logger.info("=" * 60)
+
+    def report_stats(name, texts, max_len):
+        if not texts:
+            logger.info(f"Feature '{name}' is empty or disabled.")
+            return
+
+        # Tokenize all (disable progress bar for speed if needed, usually fast enough)
+        encodings = tokenizer(texts, truncation=False, padding=False)
+        lengths = [len(ids) for ids in encodings['input_ids']]
+        lengths_np = np.array(lengths)
+
+        logger.info(f"--- {name} (Max Limit: {max_len}) ---")
+        logger.info(f"  Min: {np.min(lengths_np)}")
+        logger.info(f"  Max: {np.max(lengths_np)}")
+        logger.info(f"  Avg: {np.mean(lengths_np):.2f}")
+        logger.info(f"  Std: {np.std(lengths_np):.2f}")
+        logger.info(f"  Median: {np.median(lengths_np)}")
+
+        # Percentage not truncated
+        not_truncated = np.sum(lengths_np <= max_len)
+        pct_kept = (not_truncated / len(lengths_np)) * 100
+        logger.info(f"  ✅ Not Truncated (<={max_len}): {pct_kept:.2f}%")
+
+        # Percentiles
+        p95 = np.percentile(lengths_np, 95)
+        p99 = np.percentile(lengths_np, 99)
+        logger.info(f"  95th Percentile: {p95}")
+        logger.info(f"  99th Percentile: {p99}")
+        print("")
+
+    # 1. Analyze Text
+    logger.info("Analyzing 'bankRawDescription'...")
+    all_texts = df[fields.text].fillna("").astype(str).tolist()
+    report_stats("Text", all_texts, config.max_text_length)
+
+    # 2. Analyze Counter Party
+    if config.use_counter_party and fields.counter_party in df.columns:
+        logger.info("Analyzing 'counter_party'...")
+        all_cps = df[fields.counter_party].fillna("").astype(str).tolist()
+        # Filter out empty strings if CP is sparse, to get stats on *actual* CPs?
+        # Usually better to analyze all non-empty CPs
+        non_empty_cps = [x for x in all_cps if x.strip()]
+        if non_empty_cps:
+            report_stats("CounterParty (Non-Empty)", non_empty_cps, config.max_cp_length)
+        else:
+            logger.info("CounterParty column exists but contains no data.")
+    logger.info("=" * 60)
+
+
 class MultiTransactionDataset(Dataset):
     def __init__(self, df: pd.DataFrame, config: MultiExpConfig, tokenizer):
         self.config = config
