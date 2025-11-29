@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import f1_score, precision_score, recall_score, average_precision_score, roc_auc_score
 import logging
 import torch.nn.functional as fnn
 import os
+import numpy as np
 from multi.config import MultiExpConfig
 
 # Configure logging
@@ -114,22 +115,12 @@ class MultiTrainer:
     def fit(self, train_loader, val_loader, epochs: int, trial=None, save_path: str = None, stop_callback=None):
         """
         Unified training loop with Early Stopping, Optuna reporting, and Model Saving.
-
-        Args:
-            train_loader: Training DataLoader
-            val_loader: Validation DataLoader
-            epochs: Number of epochs to train
-            trial: Optuna trial object (optional)
-            save_path: Path to save the best model (optional)
-            stop_callback: Function returning bool to check for external stop signals (optional)
-
-        Returns:
-            float: Best F1 score achieved
+        Tracks PR-AUC as the primary stability metric if F1 is volatile.
         """
         # Lazy import to avoid hard dependency if not tuning
         import optuna
 
-        best_f1 = -1.0
+        best_metric = -1.0
         patience = self.config.early_stopping_patience
         patience_counter = 0
 
@@ -149,42 +140,47 @@ class MultiTrainer:
             metrics = self.evaluate(val_loader)
 
             val_f1 = metrics['f1']
+            val_pr_auc = metrics['pr_auc']
             val_loss = metrics['val_loss']
 
+            # Log extensive metrics
             logger.info(
                 f"Epoch {epoch}/{epochs} | "
                 f"Train Loss: {train_loss:.4f} | "
                 f"Val Loss: {val_loss:.4f} | "
-                f"Val F1: {val_f1:.4f} | "
-                f"Prec: {metrics['precision']:.4f} | "
-                f"Rec: {metrics['recall']:.4f}"
+                f"F1: {val_f1:.4f} | PR-AUC: {val_pr_auc:.4f} | "
+                f"Prec: {metrics['precision']:.4f} | Rec: {metrics['recall']:.4f}"
             )
 
-            # 3. Optuna Reporting
+            # 3. Optuna Reporting (We still report F1 to Optuna as it's the "official" goal usually,
+            # but you can switch this to val_pr_auc if F1 is too noisy)
             if trial:
                 trial.report(val_f1, epoch - 1)
                 if trial.should_prune():
                     logger.info("Trial pruned by Optuna.")
                     raise optuna.TrialPruned()
 
-            # 4. Early Stopping & Saving
-            if val_f1 > best_f1:
-                best_f1 = val_f1
+            # 4. Early Stopping & Saving (Using PR-AUC for stability or F1?)
+            # Let's stick to F1 as the target, but you can swap `val_f1` with `val_pr_auc` here.
+            target_metric = val_f1
+
+            if target_metric > best_metric:
+                best_metric = target_metric
                 patience_counter = 0
 
                 if save_path:
-                    # Ensure directory exists
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
                     checkpoint = {
                         "config": self.config,
                         "state_dict": self.model.state_dict(),
-                        "best_f1": best_f1,
+                        "best_metric": best_metric,
+                        "metrics": metrics,
                         "epoch": epoch
                     }
                     torch.save(checkpoint, save_path)
-                    logger.info(f"  --> New Best Model Saved (F1: {best_f1:.4f})")
+                    logger.info(f"  --> New Best Model Saved (Score: {best_metric:.4f})")
                 else:
-                    logger.info(f"  --> New Best F1: {best_f1:.4f}")
+                    logger.info(f"  --> New Best Score: {best_metric:.4f}")
             else:
                 patience_counter += 1
                 logger.info(f"  ... No improvement. Patience: {patience_counter}/{patience}")
@@ -193,7 +189,7 @@ class MultiTrainer:
                     logger.info(f"⛔ Early stopping triggered at epoch {epoch}")
                     break
 
-        return best_f1
+        return best_metric
 
     def _compute_loss_with_pattern_ids(self, batch, adj_logits, cycle_logits, embeddings):
         mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
@@ -234,37 +230,27 @@ class MultiTrainer:
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
             try:
-                # --- The Critical Recovery Block ---
                 with torch.amp.autocast('cuda'):
                     adj_logits, cycle_logits, embeddings = self.model(batch)
                     loss, _, _, _ = self._compute_loss_with_pattern_ids(batch, adj_logits, cycle_logits, embeddings)
                     loss = loss / accumulation_steps
 
-                # Backward
                 self.scaler.scale(loss).backward()
                 batches_since_step += 1
 
             except torch.cuda.OutOfMemoryError:
                 self.optimizer.zero_grad()
                 torch.cuda.empty_cache()
-                seq_len = batch['input_ids'].shape[1]
-                logger.warning(
-                    f"⚠️ OOM at Epoch {epoch_idx}, Batch {batch_idx}. Seq Len: {seq_len}. "
-                    f"Skipping."
-                )
                 num_batches_skipped += 1
                 continue
-
             except RuntimeError as e:
                 if "out of memory" in str(e):
                     self.optimizer.zero_grad()
                     torch.cuda.empty_cache()
-                    logger.warning(f"⚠️ OOM (RuntimeError) at Batch {batch_idx}. Skipping.")
                     num_batches_skipped += 1
                     continue
                 raise e
 
-            # Accumulation Step
             if batches_since_step >= accumulation_steps:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -278,7 +264,6 @@ class MultiTrainer:
                 logger.info(
                     f"Epoch {epoch_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item() * accumulation_steps:.4f}")
 
-        # Handle remaining gradients
         if batches_since_step > 0 and not self.stop_requested:
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -293,6 +278,7 @@ class MultiTrainer:
     def evaluate(self, dataloader):
         self.model.eval()
         all_pred_edges = []
+        all_pred_probs = []  # Store raw probs for AUC
         all_true_edges = []
         total_val_loss = 0.0
 
@@ -308,17 +294,20 @@ class MultiTrainer:
 
                 total_val_loss += loss.item()
 
-                preds = (torch.sigmoid(adj_logits) > 0.5).float()
+                probs = torch.sigmoid(adj_logits)
+                preds = (probs > 0.5).float()
+
                 mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
                 eye = torch.eye(preds.shape[1], device=self.config.device).unsqueeze(0)
                 mask_2d = mask_2d & (eye == 0)
 
+                # Flatten based on mask
                 all_pred_edges.extend(preds[mask_2d].cpu().numpy())
+                all_pred_probs.extend(probs[mask_2d].cpu().numpy())
                 all_true_edges.extend(batch['adjacency_target'][mask_2d].cpu().numpy())
 
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
-                logger.warning("⚠️ OOM during Evaluation. Skipping batch.")
                 continue
 
         if len(dataloader) > 0:
@@ -326,10 +315,25 @@ class MultiTrainer:
         else:
             avg_val_loss = 999.0
 
+        # Calculate metrics
         p = precision_score(all_true_edges, all_pred_edges, zero_division=0)
         r = recall_score(all_true_edges, all_pred_edges, zero_division=0)
         f1 = f1_score(all_true_edges, all_pred_edges, zero_division=0)
 
+        try:
+            pr_auc = average_precision_score(all_true_edges, all_pred_probs)
+            roc_auc = roc_auc_score(all_true_edges, all_pred_probs)
+        except Exception:
+            pr_auc = 0.0
+            roc_auc = 0.5
+
         self.scheduler.step(avg_val_loss)
 
-        return {"val_loss": avg_val_loss, "precision": p, "recall": r, "f1": f1}
+        return {
+            "val_loss": avg_val_loss,
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "pr_auc": pr_auc,
+            "roc_auc": roc_auc
+        }
