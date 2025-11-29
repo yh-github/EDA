@@ -280,6 +280,13 @@ class MultiTrainer:
                 self.scaler.scale(loss).backward()
                 batches_since_step += 1
 
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    logger.warning(f"⚠️ NaN loss detected at Epoch {epoch_idx}, Batch {batch_idx}. Skipping step.")
+                    self.optimizer.zero_grad()
+                    batches_since_step = 0 # Reset accumulation
+                    continue
+
             except torch.cuda.OutOfMemoryError:
                 self.optimizer.zero_grad()
                 torch.cuda.empty_cache()
@@ -302,6 +309,12 @@ class MultiTrainer:
 
             # Accumulation Step
             if batches_since_step >= accumulation_steps:
+                # Unscale before clipping
+                self.scaler.unscale_(self.optimizer)
+                
+                # Gradient Clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
@@ -316,6 +329,8 @@ class MultiTrainer:
 
         # Handle remaining gradients
         if batches_since_step > 0 and not self.stop_requested:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()

@@ -18,21 +18,38 @@ def load_pickle_data(pickle_path):
         data = pickle.load(f)
     return data
 
-def load_model(model_path, config):
+def load_model_and_config(model_path, device_override=None):
     logger.info(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, map_location=config.device)
+    # Load checkpoint
+    checkpoint = torch.load(model_path, map_location='cpu')
     
-    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-        # If config is saved, we could use it, but we'll use the passed config for now 
-        # (assuming it matches or we want to override)
-    else:
-        state_dict = checkpoint
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError("Checkpoint format not recognized (expected dict with 'state_dict')")
 
+    # 1. Recover Config
+    if "config" in checkpoint:
+        config = checkpoint["config"]
+        logger.info("✅ Loaded config from checkpoint.")
+    else:
+        logger.warning("⚠️ Config not found in checkpoint! Using default config (risky).")
+        config = MultiExpConfig()
+
+    # Override device if needed
+    if device_override:
+        # We can't easily change the config object if it's frozen, but we can use the device for moving the model
+        device = device_override
+    else:
+        device = config.device
+
+    # 2. Initialize Model
     model = TransactionTransformer(config)
-    model.load_state_dict(state_dict)
-    model.to(config.device)
-    return model
+    
+    # 3. Load Weights
+    model.load_state_dict(checkpoint["state_dict"])
+    model.to(device)
+    model.eval()
+    
+    return model, config
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze Model Mistakes")
@@ -52,26 +69,22 @@ def main():
     use_cp = data.get('use_counter_party', True)
     logger.info(f"Loaded {len(df)} rows for split '{args.split}'. use_counter_party={use_cp}")
 
-    # 2. Config
-    # We need to ensure the config matches what the model expects
-    # Ideally we load it from the checkpoint, but for now we create a default and update key params
-    config = MultiExpConfig()
-    config.use_counter_party = use_cp
+    # 2. Load Model & Config
+    # We load the model first to get the correct config used during training
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, config = load_model_and_config(args.model_path, device_override=device)
+
+    # 3. Override Data Params if needed (e.g. use_counter_party from data split)
+    # The model architecture is fixed by the loaded config, but we need to ensure
+    # the data processing matches what the model expects.
+    # Ideally, the saved config matches the data, but if we forced CP off in data,
+    # we should check if model expects it.
     
-    # Try to load config from checkpoint if possible
-    try:
-        checkpoint = torch.load(args.model_path, map_location='cpu')
-        if "config" in checkpoint:
-            saved_config = checkpoint["config"]
-            # Update critical runtime params
-            config = saved_config
-            logger.info("Loaded config from checkpoint.")
-    except Exception as e:
-        logger.warning(f"Could not load config from checkpoint: {e}. Using default.")
-
-    # 3. Load Model
-    model = load_model(args.model_path, config)
-
+    if config.use_counter_party != use_cp:
+        logger.warning(f"⚠️ Config mismatch! Model expects use_counter_party={config.use_counter_party}, but data has {use_cp}.")
+        # If model expects CP but data doesn't have it, we might crash.
+        # If model doesn't expect CP but data has it, we just ignore data.
+        
     # 4. Run Analysis
     analyze_mistakes(model, df, config, num_examples=args.num_examples)
 

@@ -67,6 +67,7 @@ class MultiExpConfig:
     scheduler_type: str = 'cosine' # 'plateau' or 'cosine'
     scheduler_t0: int = 5
     scheduler_t_mult: int = 2
+    max_grad_norm: float = 1.0
 
     # Tokenizer Limits
     max_text_length: int = 44
