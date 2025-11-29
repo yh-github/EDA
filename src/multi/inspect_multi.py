@@ -25,7 +25,8 @@ def inspect_clusters(data_path, model_path, n_samples=2000):
     # Take a random sample of accounts to keep it fast
     unique_accs = df[fc.accountId].unique()
     if len(unique_accs) > 100:
-        sample_accs = np.random.choice(unique_accs, 100, replace=False)
+        n_select = min(len(unique_accs), 100)
+        sample_accs = np.random.choice(unique_accs, n_select, replace=False)
         df = df[df[fc.accountId].isin(sample_accs)].copy()
         logger.info(f"Sampled down to {len(df)} transactions (100 accounts) for inspection.")
 

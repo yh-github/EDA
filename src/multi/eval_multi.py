@@ -54,6 +54,9 @@ def evaluate_run(data_path, model_path):
     df = pd.read_csv(data_path)
     print("Running Inference...")
     pred_df = predictor.predict(df)
+    if pred_df is None or pred_df.empty:
+        print("Error: No predictions returned.")
+        return
 
     # 4. Metrics
     print("\n--- Evaluation Results ---")
