@@ -21,7 +21,7 @@ def load_pickle_data(pickle_path):
 def load_model_and_config(model_path, device_override=None):
     logger.info(f"Loading model from {model_path}...")
     # Load checkpoint
-    checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     
     if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
         raise ValueError("Checkpoint format not recognized (expected dict with 'state_dict')")
