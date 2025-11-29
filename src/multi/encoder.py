@@ -124,8 +124,16 @@ class TransactionEncoder(nn.Module):
             chunk_mask = flat_mask[i: i + chunk_size]
 
             # Forward pass for chunk
-            bert_out = self.embedder(chunk_ids, attention_mask=chunk_mask).last_hidden_state[:, 0, :]
-            proj_out = projector(bert_out)
+            outputs = self.embedder(chunk_ids, attention_mask=chunk_mask)
+            last_hidden_state = outputs.last_hidden_state # [Batch, Seq, Dim]
+
+            # Mean Pooling
+            input_mask_expanded = chunk_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+            sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            mean_pooled = sum_embeddings / sum_mask
+
+            proj_out = projector(mean_pooled)
             embeddings.append(proj_out)
 
         # Concatenate and reshape

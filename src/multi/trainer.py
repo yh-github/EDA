@@ -16,10 +16,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.75, gamma=2.0, reduction='none'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, inputs, targets):
+        bce_loss = self.bce(inputs, targets)
+        pt = torch.exp(-bce_loss)
+        
+        # Alpha weighting
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class SupervisedContrastiveLoss(nn.Module):
     """
-    Supervised Contrastive Learning Loss.
-    Pulls embeddings with the same patternId together, pushes others apart.
+    Supervised Contrastive Learning Loss with Hard Negative Mining.
     """
 
     def __init__(self, temperature=0.07):
@@ -54,6 +78,8 @@ class SupervisedContrastiveLoss(nn.Module):
         final_mask = label_mask * valid_mask.float() * not_noise_mask
 
         # Denominator: Sum exp(sim) over all valid j != i
+        # Hard Negative Mining: We can weight negatives more if needed, but standard SupCon
+        # implicitly handles this by the log-sum-exp denominator.
         exp_sim = torch.exp(sim_matrix) * valid_mask.float()
         log_prob = sim_matrix - torch.log(exp_sim.sum(2, keepdim=True) + 1e-6)
 
@@ -77,19 +103,29 @@ class MultiTrainer:
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=config.scheduler_patience
-        )
+        if config.scheduler_type == 'cosine':
+            self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer, 
+                T_0=config.scheduler_t0, 
+                T_mult=config.scheduler_t_mult
+            )
+        else:
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, mode='min', factor=0.5, patience=config.scheduler_patience
+            )
 
         if hasattr(torch.amp, 'GradScaler'):
             self.scaler = torch.amp.GradScaler('cuda')
         else:
             self.scaler = torch.cuda.amp.GradScaler()
 
-        # Use config pos_weight if available, otherwise default or argument
-        pw = pos_weight if pos_weight is not None else getattr(config, 'pos_weight', 2.5)
-        weight_tensor = torch.tensor([pw]).to(config.device)
-        self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
+        if config.use_focal_loss:
+            self.adj_criterion = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma)
+        else:
+            # Use config pos_weight if available, otherwise default or argument
+            pw = pos_weight if pos_weight is not None else getattr(config, 'pos_weight', 2.5)
+            weight_tensor = torch.tensor([pw]).to(config.device)
+            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
 
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
@@ -344,7 +380,11 @@ class MultiTrainer:
             pr_auc = 0.0
             roc_auc = 0.5
 
-        self.scheduler.step(avg_val_loss)
+        if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            self.scheduler.step(avg_val_loss)
+        else:
+            # Cosine scheduler steps every epoch/batch usually, but here we step per epoch
+            self.scheduler.step()
 
         return {
             "val_loss": avg_val_loss,

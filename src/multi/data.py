@@ -29,7 +29,7 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
         # Since we pre-tokenize, 4 workers is plenty to keep GPU saturated.
         num_workers=n_workers,
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=True  # Keep workers alive between epochs
+        persistent_workers=(n_workers > 0)  # Keep workers alive between epochs only if workers exist
     )
 
 

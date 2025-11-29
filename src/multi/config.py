@@ -58,6 +58,16 @@ class MultiExpConfig:
     contrastive_temperature: float = 0.07
     pos_weight: float = 2.5
 
+    # Focal Loss
+    use_focal_loss: bool = True
+    focal_gamma: float = 2.0
+    focal_alpha: float = 0.75
+
+    # Scheduler
+    scheduler_type: str = 'cosine' # 'plateau' or 'cosine'
+    scheduler_t0: int = 5
+    scheduler_t_mult: int = 2
+
     # Tokenizer Limits
     max_text_length: int = 44
     max_cp_length: int = 20
