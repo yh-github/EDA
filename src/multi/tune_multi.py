@@ -105,23 +105,6 @@ class TuningManager:
         return train_df, val_df, test_df
 
     def objective(self, trial):
-        if self.killer.kill_now:
-            logger.warning("Stop signal received. Stopping study.")
-            trial.study.stop()
-            raise optuna.TrialPruned()
-
-        # Sample Hyperparameters
-        lr = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
-        dropout = trial.suggest_float("dropout", 0.1, 0.4)
-        num_layers = trial.suggest_int("num_layers", 1, 4)
-        num_heads = trial.suggest_categorical("num_heads", [2, 4, 8])
-        hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
-        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.0, 0.5)
-
-        defaults = MultiExpConfig()
-        config = MultiExpConfig(
-            learning_rate=lr,
-            dropout=dropout,
             num_layers=num_layers,
             num_heads=num_heads,
             hidden_dim=hidden_dim,
