@@ -355,6 +355,7 @@ def main():
     # FIX: Handle potential missing keys if tuning space changes, or mapping keys
     cw_param = best_params.get("contrastive_weight") or best_params.get("contrastive_loss_weight") or 0.1
 
+    defaults = MultiExpConfig()
     final_config = MultiExpConfig(
         # Tuned Params
         learning_rate=best_params["learning_rate"],
@@ -371,7 +372,7 @@ def main():
         batch_size=args.batch_size,
         data_path=args.data_path,
         output_dir=args.output_dir,
-        early_stopping_patience=5,
+        early_stopping_patience=defaults.early_stopping_patience,
 
         # Ensure final model respects data capabilities
         use_counter_party=manager.data_determined_use_cp
@@ -399,7 +400,8 @@ def main():
             val_loader=test_loader,
             epochs=final_config.num_epochs,
             save_path=save_path,
-            stop_callback=lambda: manager.killer.kill_now
+            stop_callback=lambda: manager.killer.kill_now,
+            metric_to_track='pr_auc'
         )
 
         # 6. Final Metrics
