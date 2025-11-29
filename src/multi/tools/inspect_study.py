@@ -19,7 +19,8 @@ def inspect_study(db_path, study_name=None):
 
         print(f"Found {len(summaries)} studies in {db_path}:")
         for s in summaries:
-            print(f"  - {s.study_name} (Trials: {s.n_trials}, Best: {s.value})")
+            best_val = s.best_trial.value if s.best_trial else "N/A"
+            print(f"  - {s.study_name} (Trials: {s.n_trials}, Best: {best_val})")
         
         if not summaries:
             return
