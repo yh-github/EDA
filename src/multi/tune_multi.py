@@ -92,27 +92,6 @@ class TuningManager:
             field_config=MultiFieldConfig()
         )
 
-        # 5. Save with metadata
-        logger.info(f"Saving splits to {self.cache_path}...")
-        with open(self.cache_path, 'wb') as f:
-            pickle.dump({
-                'train': train_df,
-                'val': val_df,
-            num_epochs=self.args.epochs,
-            batch_size=self.args.batch_size,
-            data_path=self.args.data_path,
-            output_dir=self.args.output_dir,
-
-            # Use default or tuned patience
-            early_stopping_patience=defaults.early_stopping_patience,
-
-            # CRITICAL: Use the decision made during data loading
-            use_counter_party=self.data_determined_use_cp
-        )
-
-        set_global_seed(config.random_state)
-
-        train_loader = get_dataloader(self.train_df, config, shuffle=True)
         val_loader = get_dataloader(self.val_df, config, shuffle=False)
 
 
