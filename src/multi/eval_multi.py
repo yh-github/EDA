@@ -51,7 +51,20 @@ def evaluate_run(data_path, model_path):
 
     # 3. Predict
     print(f"Loading data from {data_path}...")
-    df = pd.read_csv(data_path)
+    print(f"Loading data from {data_path}...")
+    if data_path.endswith('.pkl'):
+        import pickle
+        with open(data_path, 'rb') as f:
+            data_dict = pickle.load(f)
+        
+        if isinstance(data_dict, dict) and 'test' in data_dict:
+            print("Detected cached split file. Loading 'test' set...")
+            df = data_dict['test']
+        else:
+            # Fallback if it's just a dataframe pickled
+            df = data_dict
+    else:
+        df = pd.read_csv(data_path)
     print("Running Inference...")
     pred_df = predictor.predict(df)
     if pred_df is None or pred_df.empty:

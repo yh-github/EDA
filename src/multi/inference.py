@@ -52,20 +52,6 @@ class MultiPredictor:
         # 1. Prepare DataFrame (Validation)
         req_cols = [fc.accountId, fc.date, fc.amount, fc.text]
         for col in req_cols:
-            if col not in df.columns:
-                raise KeyError(f"Input DataFrame missing required column: {col}")
-
-        # Ensure dummy columns exist for Dataset compatibility
-        if fc.patternCycle not in df.columns:
-            df[fc.patternCycle] = 'None'
-        if fc.patternId not in df.columns:
-            df[fc.patternId] = -1
-
-        # 2. Create DataLoader (Fast, Pre-tokenized)
-        logger.info("Initializing DataLoader for inference...")
-        loader = get_dataloader(df, self.config, shuffle=False)
-
-        # 3. Prepare Result Columns
         # We will fill these arrays using the original indices
         n_rows = len(df)
         res_is_rec = np.zeros(n_rows, dtype=bool)
