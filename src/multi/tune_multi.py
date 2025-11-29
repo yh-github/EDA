@@ -144,25 +144,6 @@ class TuningManager:
         train_loader = get_dataloader(self.train_df, config, shuffle=True)
         val_loader = get_dataloader(self.val_df, config, shuffle=False)
 
-        model = TransactionTransformer(config)
-        pos_weight = 2.5
-
-        trainer = MultiTrainer(model, config, pos_weight=pos_weight)
-
-        # Run unified training loop (handles early stopping, pruning, reporting)
-        best_val_score = trainer.fit(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=config.num_epochs,
-            trial=trial,
-            stop_callback=lambda: self.killer.kill_now
-        )
-
-        if trainer.stop_requested:
-            logger.info("Trial stopped by user signal.")
-
-        return best_val_score
-
 
 def analyze_mistakes(model, val_df, config, num_examples=5):
     """
