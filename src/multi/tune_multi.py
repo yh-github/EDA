@@ -98,18 +98,6 @@ class TuningManager:
             pickle.dump({
                 'train': train_df,
                 'val': val_df,
-                'test': test_df,
-                'use_counter_party': self.data_determined_use_cp
-            }, f)
-
-        return train_df, val_df, test_df
-
-    def objective(self, trial):
-            num_layers=num_layers,
-            num_heads=num_heads,
-            hidden_dim=hidden_dim,
-            contrastive_loss_weight=contrastive_loss_weight,
-
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
