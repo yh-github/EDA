@@ -146,9 +146,7 @@ class TuningManager:
         val_loader = get_dataloader(self.val_df, config, shuffle=False)
 
         model = TransactionTransformer(config)
-        pos_weight = 2.5
-
-        trainer = MultiTrainer(model, config, pos_weight=pos_weight)
+        trainer = MultiTrainer(model, config)
 
         # Run unified training loop (handles early stopping, pruning, reporting)
         best_val_score = trainer.fit(
@@ -189,50 +187,61 @@ def analyze_mistakes(model, val_df, config, num_examples=5):
             adj_logits, _, _ = model(batch_gpu)
             probs = torch.sigmoid(adj_logits)
 
-            # CPU conversion
-            probs_np = probs.cpu().numpy()
-            targets_np = batch['adjacency_target'].numpy()
-            indices_np = batch['original_index'].numpy()
-            mask_np = batch['padding_mask'].numpy()
-
-            batch_size = probs_np.shape[0]
-
-            for b in range(batch_size):
-                # Valid sequence length
-                seq_len = int(mask_np[b].sum())
-
-                # Get the sub-matrices for valid items
-                p_mat = probs_np[b, :seq_len, :seq_len]
-                t_mat = targets_np[b, :seq_len, :seq_len]
-                idxs = indices_np[b, :seq_len]
-
-                # Iterate all pairs (upper triangle to avoid dupes/self)
-                for i in range(seq_len):
-                    for j in range(i + 1, seq_len):
-                        prob = float(p_mat[i, j])
-                        truth = int(t_mat[i, j])
-                        pred = 1 if prob > 0.5 else 0
-
-                        # Identify Mistakes
-                        if pred == 1 and truth == 0:
-                            # False Positive: Model thinks i and j are same pattern
-                            row_i = val_df.iloc[idxs[i]]
-                            row_j = val_df.iloc[idxs[j]]
-                            fps.append({
-                                'prob': prob,
-                                'txt1': row_i[fc.text], 'amt1': row_i[fc.amount],
-                                'txt2': row_j[fc.text], 'amt2': row_j[fc.amount]
-                            })
-
-                        elif pred == 0 and truth == 1:
-                            # False Negative: Model missed the connection
-                            row_i = val_df.iloc[idxs[i]]
-                            row_j = val_df.iloc[idxs[j]]
-                            fns.append({
-                                'prob': prob,
-                                'txt1': row_i[fc.text], 'amt1': row_i[fc.amount],
-                                'txt2': row_j[fc.text], 'amt2': row_j[fc.amount]
-                            })
+            # Vectorized Mismatch Finding
+            probs = torch.sigmoid(adj_logits)
+            preds = (probs > 0.5).float()
+            targets = batch_gpu['adjacency_target']
+            
+            # Create masks
+            b_size, s_len, _ = probs.shape
+            triu_mask = torch.triu(torch.ones(s_len, s_len, device=device), diagonal=1).bool()
+            triu_mask = triu_mask.unsqueeze(0).expand(b_size, -1, -1)
+            
+            valid_mask = batch_gpu['padding_mask'].unsqueeze(1) & batch_gpu['padding_mask'].unsqueeze(2)
+            final_mask = triu_mask & valid_mask
+            
+            # Find mismatches: (Pred != Target) & Valid & UpperTri
+            mismatches = (preds != targets) & final_mask
+            
+            # Get indices of mismatches
+            b_indices, i_indices, j_indices = torch.where(mismatches)
+            
+            if len(b_indices) == 0:
+                continue
+                
+            # Move necessary data to CPU for logging
+            b_indices = b_indices.cpu().numpy()
+            i_indices = i_indices.cpu().numpy()
+            j_indices = j_indices.cpu().numpy()
+            
+            probs_np = probs.detach().cpu().numpy()
+            targets_np = targets.cpu().numpy()
+            indices_np = batch['original_index'].numpy() # CPU already
+            
+            for k in range(len(b_indices)):
+                b, i, j = b_indices[k], i_indices[k], j_indices[k]
+                
+                prob = float(probs_np[b, i, j])
+                truth = int(targets_np[b, i, j])
+                pred = 1 if prob > 0.5 else 0
+                
+                # Get original DF indices
+                idx_i = indices_np[b, i]
+                idx_j = indices_np[b, j]
+                
+                row_i = val_df.iloc[idx_i]
+                row_j = val_df.iloc[idx_j]
+                
+                item = {
+                    'prob': prob,
+                    'txt1': row_i[fc.text], 'amt1': row_i[fc.amount],
+                    'txt2': row_j[fc.text], 'amt2': row_j[fc.amount]
+                }
+                
+                if pred == 1 and truth == 0:
+                    fps.append(item)
+                elif pred == 0 and truth == 1:
+                    fns.append(item)
 
     # Sort and Log
     logger.info("-" * 50)
@@ -389,7 +398,7 @@ def main():
     logger.info(
         f"Initializing Final Model with dim={final_config.hidden_dim}, heads={final_config.num_heads}, layers={final_config.num_layers}")
     final_model = TransactionTransformer(final_config)
-    final_trainer = MultiTrainer(final_model, final_config, pos_weight=2.5)
+    final_trainer = MultiTrainer(final_model, final_config)
 
     # 5. Train
     # We allow the killer to stop this too if user hits Ctrl+C

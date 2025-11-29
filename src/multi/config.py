@@ -56,6 +56,7 @@ class MultiExpConfig:
     use_contrastive_loss: bool = True
     contrastive_loss_weight: float = 0.1
     contrastive_temperature: float = 0.07
+    pos_weight: float = 2.5
 
     # Tokenizer Limits
     max_text_length: int = 44

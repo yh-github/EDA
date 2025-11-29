@@ -32,48 +32,42 @@ class SupervisedContrastiveLoss(nn.Module):
 
         features = fnn.normalize(features, dim=-1)
 
-        total_loss = 0.0
-        n_valid_batches = 0
+        # [B, S, S]
+        sim_matrix = torch.bmm(features, features.transpose(1, 2)) / self.temperature
 
-        for i in range(batch_size):
-            valid_mask = padding_mask[i]
-            feat = features[i][valid_mask]
-            lbl = labels[i][valid_mask]
+        # Mask out self-contrast (diagonal) and padding
+        mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
+        eye = torch.eye(seq_len, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+        valid_mask = mask_2d & (eye == 0)
 
-            if len(lbl) < 2:
-                continue
+        # Numerical stability
+        sim_matrix_max, _ = torch.max(sim_matrix, dim=2, keepdim=True)
+        sim_matrix = sim_matrix - sim_matrix_max.detach()
 
-            sim_matrix = torch.matmul(feat, feat.T) / self.temperature
-            sim_matrix_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-            sim_matrix = sim_matrix - sim_matrix_max.detach()
+        # [B, S, S] -> 1 if labels[i] == labels[j]
+        label_mask = torch.eq(labels.unsqueeze(2), labels.unsqueeze(1)).float()
 
-            label_mask = torch.eq(lbl.unsqueeze(1), lbl.unsqueeze(0)).float()
+        # Filter noise (-1)
+        not_noise_mask = (labels != -1).float().unsqueeze(2)
 
-            logits_mask = torch.scatter(
-                torch.ones_like(label_mask),
-                1,
-                torch.arange(len(lbl)).view(-1, 1).to(device),
-                0
-            )
+        # Final Positive Mask: Same Label AND Valid AND Not Diagonal AND Not Noise
+        final_mask = label_mask * valid_mask.float() * not_noise_mask
 
-            not_noise = (lbl != -1).float().unsqueeze(1)
-            label_mask = label_mask * logits_mask * not_noise
+        # Denominator: Sum exp(sim) over all valid j != i
+        exp_sim = torch.exp(sim_matrix) * valid_mask.float()
+        log_prob = sim_matrix - torch.log(exp_sim.sum(2, keepdim=True) + 1e-6)
 
-            has_positives = label_mask.sum(1) > 0
-            if has_positives.sum() == 0:
-                continue
+        # Mean log prob of positives
+        sum_log_prob_pos = (final_mask * log_prob).sum(2)
+        num_pos = final_mask.sum(2)
 
-            exp_sim = torch.exp(sim_matrix) * logits_mask
-            log_prob = sim_matrix - torch.log(exp_sim.sum(1, keepdim=True) + 1e-6)
+        mean_log_prob_pos = sum_log_prob_pos / (num_pos + 1e-6)
 
-            mean_log_prob_pos = (label_mask * log_prob).sum(1) / (label_mask.sum(1) + 1e-6)
-
-            loss = - mean_log_prob_pos[has_positives].mean()
-            total_loss += loss
-            n_valid_batches += 1
-
-        if n_valid_batches > 0:
-            return total_loss / n_valid_batches
+        # Loss is -mean over anchors that have positives
+        has_positives = num_pos > 0
+        if has_positives.sum() > 0:
+            return -mean_log_prob_pos[has_positives].mean()
+        
         return torch.tensor(0.0, device=device, requires_grad=True)
 
 
@@ -92,11 +86,10 @@ class MultiTrainer:
         else:
             self.scaler = torch.cuda.amp.GradScaler()
 
-        if pos_weight:
-            weight_tensor = torch.tensor([pos_weight]).to(config.device)
-            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
-        else:
-            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none')
+        # Use config pos_weight if available, otherwise default or argument
+        pw = pos_weight if pos_weight is not None else getattr(config, 'pos_weight', 2.5)
+        weight_tensor = torch.tensor([pw]).to(config.device)
+        self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
 
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
