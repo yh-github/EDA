@@ -335,7 +335,8 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         "adjacency_target": b_adjacency,
         "cycle_target": b_cycles,
         "pattern_ids": b_pattern_ids,
-        "padding_mask": padding_mask
+        "padding_mask": padding_mask,
+        "original_index": b_original_index
     }
 
     if config.use_counter_party:

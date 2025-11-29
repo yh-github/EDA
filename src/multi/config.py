@@ -56,6 +56,7 @@ class MultiExpConfig:
     use_contrastive_loss: bool = True
     contrastive_loss_weight: float = 0.1
     contrastive_temperature: float = 0.07
+    hard_negative_weight: float = 1.0
     pos_weight: float = 2.5
 
     # Focal Loss

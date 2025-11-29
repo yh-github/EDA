@@ -46,9 +46,10 @@ class SupervisedContrastiveLoss(nn.Module):
     Supervised Contrastive Learning Loss with Hard Negative Mining.
     """
 
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.07, hard_negative_weight=1.0):
         super().__init__()
         self.temperature = temperature
+        self.hard_negative_weight = hard_negative_weight
 
     def forward(self, features: torch.Tensor, labels: torch.Tensor, padding_mask: torch.Tensor):
         device = features.device
@@ -78,9 +79,22 @@ class SupervisedContrastiveLoss(nn.Module):
         final_mask = label_mask * valid_mask.float() * not_noise_mask
 
         # Denominator: Sum exp(sim) over all valid j != i
-        # Hard Negative Mining: We can weight negatives more if needed, but standard SupCon
-        # implicitly handles this by the log-sum-exp denominator.
+        # Hard Negative Mining: Upweight negatives in the denominator
         exp_sim = torch.exp(sim_matrix) * valid_mask.float()
+        
+        if self.hard_negative_weight != 1.0:
+            # Negatives are valid items that are NOT positives (label_mask is 1 for pos)
+            # Note: label_mask includes self-matches if we didn't mask diagonal, but valid_mask handles diagonal.
+            # So valid negatives = valid_mask & (label_mask == 0)
+            negative_mask = valid_mask & (label_mask == 0)
+            
+            # Apply weight to negatives
+            # We multiply the exp_sim term by weight for negatives
+            # This makes the denominator larger if negatives have high similarity, reducing probability of positive
+            weight_matrix = torch.ones_like(sim_matrix)
+            weight_matrix[negative_mask.bool()] = self.hard_negative_weight
+            exp_sim = exp_sim * weight_matrix
+
         log_prob = sim_matrix - torch.log(exp_sim.sum(2, keepdim=True) + 1e-6)
 
         # Mean log prob of positives
@@ -130,7 +144,10 @@ class MultiTrainer:
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
         if config.use_contrastive_loss:
-            self.contrastive_criterion = SupervisedContrastiveLoss(temperature=config.contrastive_temperature)
+            self.contrastive_criterion = SupervisedContrastiveLoss(
+                temperature=config.contrastive_temperature,
+                hard_negative_weight=config.hard_negative_weight
+            )
 
         # Signal handling injection point
         self.stop_requested = False
