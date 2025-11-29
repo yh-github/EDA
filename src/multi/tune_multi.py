@@ -67,6 +67,8 @@ class TuningManager:
 
         logger.info("Cache miss or force recreate. Running data pipeline...")
 
+        # 1. Create a temp config to pass args to the loader
+        # We assume use_counter_party is True initially, the loader might flip it
         temp_config = MultiExpConfig(
             data_path=self.args.data_path,
             downsample=self.args.downsample,
@@ -74,9 +76,13 @@ class TuningManager:
             use_counter_party=True
         )
 
+        # 2. Use shared utility to load, clean, downsample, and check features
         df = load_and_prepare_data(temp_config)
+
+        # 3. Capture the CP decision made by the loader
         self.data_determined_use_cp = temp_config.use_counter_party
 
+        # 4. Split
         logger.info("Splitting data...")
         train_df, val_df, test_df = create_train_val_test_split(
             test_size=0.1,
@@ -86,6 +92,7 @@ class TuningManager:
             field_config=MultiFieldConfig()
         )
 
+        # 5. Save with metadata
         logger.info(f"Saving splits to {self.cache_path}...")
         with open(self.cache_path, 'wb') as f:
             pickle.dump({
@@ -109,20 +116,26 @@ class TuningManager:
         num_layers = trial.suggest_int("num_layers", 1, 4)
         num_heads = trial.suggest_categorical("num_heads", [2, 4, 8])
         hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
-        contrastive_weight = trial.suggest_float("contrastive_weight", 0.0, 0.5)
+        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.0, 0.5)
 
+        defaults = MultiExpConfig()
         config = MultiExpConfig(
             learning_rate=lr,
             dropout=dropout,
             num_layers=num_layers,
             num_heads=num_heads,
             hidden_dim=hidden_dim,
-            contrastive_loss_weight=contrastive_weight,
+            contrastive_loss_weight=contrastive_loss_weight,
+
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
-            early_stopping_patience=4,
+
+            # Use default or tuned patience
+            early_stopping_patience=defaults.early_stopping_patience,
+
+            # CRITICAL: Use the decision made during data loading
             use_counter_party=self.data_determined_use_cp
         )
 
@@ -133,8 +146,10 @@ class TuningManager:
 
         model = TransactionTransformer(config)
         pos_weight = 2.5
+
         trainer = MultiTrainer(model, config, pos_weight=pos_weight)
 
+        # Run unified training loop (handles early stopping, pruning, reporting)
         best_val_score = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
@@ -152,23 +167,16 @@ class TuningManager:
 def analyze_mistakes(model, val_df, config, num_examples=5):
     """
     Runs inference on Validation DF and logs the top False Positives and False Negatives.
-    Helps understand 'hard' examples.
     """
     logger.info("Running Mistake Analysis on Validation Set...")
     model.eval()
 
     # We use a non-shuffled loader to keep alignment
-    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)  # 0 workers for safety in reporting
+    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
     device = config.device
 
-    # Storage for errors
     fps = []  # False Positives (Pred=1, True=0)
     fns = []  # False Negatives (Pred=0, True=1)
-
-    # We need to access the text from the batch.
-    # The current collate_fn converts everything to tensors.
-    # To get text back, we need to use the 'original_index' stored in the batch
-    # and map it back to val_df.
 
     fc = MultiFieldConfig()
 
@@ -182,14 +190,14 @@ def analyze_mistakes(model, val_df, config, num_examples=5):
 
             # CPU conversion
             probs_np = probs.cpu().numpy()
-            targets_np = batch['adjacency_target'].numpy()  # Loader returns CPU tensor for targets usually
+            targets_np = batch['adjacency_target'].numpy()
             indices_np = batch['original_index'].numpy()
             mask_np = batch['padding_mask'].numpy()
 
             batch_size = probs_np.shape[0]
 
             for b in range(batch_size):
-                # Valid sequence length for this account
+                # Valid sequence length
                 seq_len = int(mask_np[b].sum())
 
                 # Get the sub-matrices for valid items
@@ -266,6 +274,7 @@ def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
         existing_names = []
 
     pattern = re.compile(rf"^{base_name}_(\d+)$")
+
     max_idx = 0
     for name in existing_names:
         match = pattern.match(name)
@@ -273,7 +282,9 @@ def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
             idx = int(match.group(1))
             if idx > max_idx:
                 max_idx = idx
-    return f"{base_name}_{max_idx + 1}"
+
+    next_idx = max_idx + 1
+    return f"{base_name}_{next_idx}"
 
 
 def main():
@@ -283,18 +294,20 @@ def main():
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
     parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
     parser.add_argument("--n_trials", type=int, default=100)
-    parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
-    parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
-    parser.add_argument("--random_state", type=int, default=defaults.random_state)
-    parser.add_argument("--downsample", type=float, default=defaults.downsample)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--random_state", type=int, default=112025)
+    parser.add_argument("--downsample", type=float, default=0.5)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     args = parser.parse_args()
 
     manager = TuningManager(args)
 
+    # Optuna Storage (SQLite for persistence)
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    # Auto-naming logic
     if args.study_name is None:
         study_name = get_next_study_name(storage_url)
     else:
@@ -310,47 +323,74 @@ def main():
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
     )
 
+    logger.info(f"Starting tuning study '{study_name}' with {args.n_trials} trials.")
+
     try:
         study.optimize(manager.objective, n_trials=args.n_trials)
     except KeyboardInterrupt:
-        logger.warning("KeyboardInterrupt. Saving study state...")
+        logger.warning("KeyboardInterrupt caught in main loop. Saving study state...")
 
     logger.info("Tuning Complete.")
     logger.info(f"Best Trial Score: {study.best_value}")
+    logger.info("Best Params:")
+    for k, v in study.best_params.items():
+        logger.info(f"  {k}: {v}")
 
     # --- ANALYSIS 1: Hyperparameters ---
     analyze_study_importance(study)
 
     # --- ANALYSIS 2: Best Model & Mistakes ---
     logger.info("=" * 60)
-    logger.info("FINAL EVALUATION & ERROR ANALYSIS")
+    logger.info("STARTING FINAL MODEL TRAINING (Train + Val -> Test)")
     logger.info("=" * 60)
 
+    # 1. Merge Train and Val
     full_train_df = pd.concat([manager.train_df, manager.val_df])
+    logger.info(
+        f"Combined Train ({len(manager.train_df)}) + Val ({len(manager.val_df)}) = {len(full_train_df)} samples")
+
+    # 2. Reconstruct Config from Best Params + Args
     best_params = study.best_params
 
+    # FIX: Handle potential missing keys if tuning space changes, or mapping keys
+    cw_param = best_params.get("contrastive_weight") or best_params.get("contrastive_loss_weight") or 0.1
+
     final_config = MultiExpConfig(
+        # Tuned Params
         learning_rate=best_params["learning_rate"],
         dropout=best_params["dropout"],
         num_layers=best_params["num_layers"],
         num_heads=best_params["num_heads"],
         hidden_dim=best_params["hidden_dim"],
-        contrastive_loss_weight=best_params["contrastive_loss_weight"],
+
+        # Mapped Correctly
+        contrastive_loss_weight=cw_param,
+
+        # Fixed Params
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         data_path=args.data_path,
         output_dir=args.output_dir,
         early_stopping_patience=5,
+
+        # Ensure final model respects data capabilities
         use_counter_party=manager.data_determined_use_cp
     )
     set_global_seed(final_config.random_state)
 
+    # 3. Create Loaders
+    logger.info("Creating DataLoaders...")
     final_train_loader = get_dataloader(full_train_df, final_config, shuffle=True)
     test_loader = get_dataloader(manager.test_df, final_config, shuffle=False)
 
+    # 4. Initialize Final Model
+    logger.info(
+        f"Initializing Final Model with dim={final_config.hidden_dim}, heads={final_config.num_heads}, layers={final_config.num_layers}")
     final_model = TransactionTransformer(final_config)
     final_trainer = MultiTrainer(final_model, final_config, pos_weight=2.5)
 
+    # 5. Train
+    # We allow the killer to stop this too if user hits Ctrl+C
     if not manager.killer.kill_now:
         save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
 
@@ -362,6 +402,7 @@ def main():
             stop_callback=lambda: manager.killer.kill_now
         )
 
+        # 6. Final Metrics
         logger.info("-" * 60)
         logger.info("FINAL TEST SET RESULTS")
         logger.info("-" * 60)
@@ -371,8 +412,11 @@ def main():
         logger.info(f"F1 Score:  {final_metrics['f1']:.4f}")
         logger.info(f"PR-AUC:    {final_metrics['pr_auc']:.4f}")
         logger.info(f"ROC-AUC:   {final_metrics['roc_auc']:.4f}")
+        logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
 
-        # Run Mistake Analysis on Test Set
+        logger.info(f"Final model saved to {save_path}")
+
+        # 7. Analyze Mistakes (On Test Set now)
         analyze_mistakes(final_model, manager.test_df, final_config)
 
 

@@ -5,7 +5,6 @@ from sklearn.metrics import f1_score, precision_score, recall_score, average_pre
 import logging
 import torch.nn.functional as fnn
 import os
-import numpy as np
 from multi.config import MultiExpConfig
 
 # Configure logging
@@ -160,8 +159,7 @@ class MultiTrainer:
                     logger.info("Trial pruned by Optuna.")
                     raise optuna.TrialPruned()
 
-            # 4. Early Stopping & Saving (Using PR-AUC for stability or F1?)
-            # Let's stick to F1 as the target, but you can swap `val_f1` with `val_pr_auc` here.
+            # 4. Early Stopping & Saving
             target_metric = val_f1
 
             if target_metric > best_metric:
@@ -169,6 +167,7 @@ class MultiTrainer:
                 patience_counter = 0
 
                 if save_path:
+                    # Ensure dir exists
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
                     checkpoint = {
                         "config": self.config,
