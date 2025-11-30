@@ -345,9 +345,13 @@ def main():
             model.load_state_dict(checkpoint['state_dict'])
             model.to(loaded_config.device)
 
+            # --- UPDATED: Use Loader to avoid double-tokenization ---
+            logger.info("Initializing Test Loader for Analysis...")
+            test_loader = get_dataloader(manager.test_df, loaded_config, shuffle=False, n_workers=0)
+
             # Analyze on Test Set
-            analyze_adjacency_mistakes(model, manager.test_df, loaded_config)
-            analyze_classification_mistakes(model, manager.test_df, loaded_config)
+            analyze_adjacency_mistakes(model, test_loader, loaded_config)
+            analyze_classification_mistakes(model, test_loader, loaded_config)
         else:
             logger.warning("Best model file not found. Skipping analysis.")
 

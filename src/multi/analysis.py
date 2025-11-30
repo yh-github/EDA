@@ -1,51 +1,25 @@
 import logging
 import torch
 import numpy as np
-import pandas as pd
-from multi.config import MultiFieldConfig
-from multi.data import get_dataloader
 
 logger = logging.getLogger(__name__)
 
 
-def _align_df_for_dataset(df: pd.DataFrame, fields: MultiFieldConfig) -> pd.DataFrame:
-    """
-    Simulates the filtering and indexing performed inside MultiTransactionDataset.
-    This ensures we have a 1-to-1 mapping with the DataLoader output.
-    """
-    df = df.copy()
-
-    # 1. Simulate the Dataset's filtering logic
-    df['direction'] = np.sign(df[fields.amount])
-    df = df[df['direction'] != 0]
-
-    # 2. Reset index to ensure clean iteration
-    df = df.reset_index(drop=True)
-    return df
-
-
-def analyze_classification_mistakes(model, val_df, config, num_examples=5):
+def analyze_classification_mistakes(model, loader, config, num_examples=5):
     """
     Analyzes 'isRecurring' classification errors specifically.
+    Accepts a DataLoader to avoid re-tokenizing data.
     """
     logger.info("Running Cycle/Classification Mistake Analysis...")
 
-    fc = MultiFieldConfig()
-    # PRE-ALIGNMENT: This dataframe now exactly matches the rows in the DataLoader
-    aligned_df = _align_df_for_dataset(val_df, fc)
-
     model.eval()
-    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
     device = config.device
 
     fps = []
     fns = []
 
-    # We use a global index tracker to walk through 'aligned_df'
-    current_df_idx = 0
-
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in loader:
             batch_gpu = {k: v.to(device) for k, v in batch.items()}
 
             # Forward
@@ -55,52 +29,17 @@ def analyze_classification_mistakes(model, val_df, config, num_examples=5):
             preds = torch.argmax(cycle_logits, dim=-1).cpu().numpy()
             targets = batch_gpu['cycle_target'].cpu().numpy()
             mask_np = batch_gpu['padding_mask'].cpu().numpy()
+
+            # Probs
             probs = torch.softmax(cycle_logits, dim=-1)
             max_probs, _ = torch.max(probs, dim=-1)
             probs_np = max_probs.cpu().numpy()
 
-            batch_size, seq_len = preds.shape
-
-            # To map back to the dataframe, we need to know how many valid items
-            # were in each sequence of this batch.
-            # MultiTransactionDataset groups by account. Each item in batch is one account sequence.
-            # However, the DataLoader batches these sequences.
-            # The 'aligned_df' is a flat list of transactions.
-            # The Dataset groups this flat list into accounts.
-            # This makes direct indexing tricky because the batch order depends on the groupby order.
-
-            # CRITICAL FIX: The MultiTransactionDataset logic sorts groups.
-            # We must replicate that sorting to align 'aligned_df' with the loader.
-            # BUT, re-implementing the exact sort/group logic here is fragile.
-
-            # ALTERNATIVE: The batch contains 'amounts', 'days', etc.
-            # We can use these to find the row, OR simply trust that we don't need the exact original text
-            # if we can just print the amount and date from the tensor itself!
-
-            # Let's use the tensor data directly for the report. It's robust and sufficient.
-
+            # Data for reporting
             amounts = batch['amounts'].numpy()  # Log amounts
             days = batch['days'].numpy()
 
-            # Undo log amount for display: exp(abs(x)) - 1 * sign
-            # But the tensor lost the sign... wait, input 'amounts' to model is log_abs.
-            # The raw amount is not passed?
-            # Actually MultiTransactionDataset.__getitem__ returns "amounts": log_amounts.
-            # AND it returns "days".
-
-            # If we really want the text, we need the index.
-            # Let's assume the previous `original_index` feature was useful and re-enable it
-            # would be the "correct" way, but since you want to fix this NOW without changing
-            # the training code (which requires re-training or editing the library code),
-            # we will try to infer context or just report what we have.
-
-            # WAIT! The traceback says KeyError: 'original_index'.
-            # This means `MultiTransactionDataset` is NOT returning it.
-            # I cannot edit `src/multi/data.py` easily to add it back without restarting your kernel/process.
-
-            # BEST APPROACH NOW: Use the tensor data we DO have.
-            # We can reconstruct the approximate amount.
-            # We lose the text description, which is sad, but we can analyze the math mistakes.
+            batch_size, seq_len = preds.shape
 
             for b in range(batch_size):
                 for s in range(seq_len):
@@ -111,11 +50,8 @@ def analyze_classification_mistakes(model, val_df, config, num_examples=5):
                     prob = probs_np[b, s]
 
                     # Reconstruct Amount (Approx) from Log-Abs
-                    # The model sees log(abs(x) + 1). We can't recover sign easily unless we stored it.
-                    # But typically amount is a strong identifier.
-                    log_amt = amounts[b, s, 0]  # [B, S, 1]
+                    log_amt = amounts[b, s, 0]
                     approx_amt = np.exp(log_amt) - 1
-
                     day_val = days[b, s, 0]
 
                     pred_is_rec = pred_cls > 0
@@ -125,7 +61,6 @@ def analyze_classification_mistakes(model, val_df, config, num_examples=5):
                         continue
 
                     item = {
-                        # 'txt': "N/A (Index missing)",
                         'amt': approx_amt,
                         'day': day_val,
                         'prob': prob,
@@ -142,7 +77,6 @@ def analyze_classification_mistakes(model, val_df, config, num_examples=5):
     logger.info("-" * 60)
     logger.info(f"CLASSIFICATION MISTAKES (isRecurring): FP={len(fps)}, FN={len(fns)}")
 
-    # Sort by confidence
     fps_sorted = sorted(fps, key=lambda x: x['prob'], reverse=True)[:num_examples]
     if fps_sorted:
         logger.info("\n>>> Top False Positives (Predicted Recurring, Actually Noise):")
@@ -158,21 +92,20 @@ def analyze_classification_mistakes(model, val_df, config, num_examples=5):
     logger.info("-" * 60)
 
 
-def analyze_adjacency_mistakes(model, val_df, config, num_examples=5):
+def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
     """
     Runs inference and logs Adjacency False Positives/Negatives.
     """
     logger.info("Running Adjacency Mistake Analysis...")
 
     model.eval()
-    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
     device = config.device
 
     fps = []
     fns = []
 
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in loader:
             batch_gpu = {k: v.to(device) for k, v in batch.items()}
 
             # Forward

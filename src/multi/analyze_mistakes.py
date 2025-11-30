@@ -8,6 +8,7 @@ from multi.config import MultiExpConfig
 from multi.encoder import TransactionTransformer
 from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
 from multi.tune_multi import get_data_cache_path
+from multi.data import get_dataloader
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -53,7 +54,7 @@ def main():
         logger.error("Checkpoint does not contain 'config' key.")
         return
 
-    config:MultiExpConfig = checkpoint['config']
+    config: MultiExpConfig = checkpoint['config']
 
     # Device setup
     if args.device == "auto":
@@ -71,25 +72,31 @@ def main():
 
     # 2. Load Data (Assumed saved)
     try:
-        # allow override with Path(args.data_cache)
         _, val_df, test_df = load_cached_data(config)
         logger.info(f"Data Loaded. Val: {len(val_df)}, Test: {len(test_df)}")
     except Exception as e:
         logger.error(f"Failed to load cached data: {e}")
         return
 
-    # 3. Run Analysis
+    # 3. Create Loaders (ONE TIME cost)
+    logger.info("Initializing Validation Loader (Pre-tokenizing)...")
+    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
+
+    logger.info("Initializing Test Loader (Pre-tokenizing)...")
+    test_loader = get_dataloader(test_df, config, shuffle=False, n_workers=0)
+
+    # 4. Run Analysis (Fast inference)
     logger.info("=" * 60)
     logger.info(" Analyzing VALIDATION Set Mistakes")
     logger.info("=" * 60)
-    analyze_classification_mistakes(model, val_df, config, num_examples=args.examples)
-    analyze_adjacency_mistakes(model, val_df, config, num_examples=args.examples)
+    analyze_classification_mistakes(model, val_loader, config, num_examples=args.examples)
+    analyze_adjacency_mistakes(model, val_loader, config, num_examples=args.examples)
 
     logger.info("\n" + "=" * 60)
     logger.info(" Analyzing TEST Set Mistakes")
     logger.info("=" * 60)
-    analyze_classification_mistakes(model, test_df, config, num_examples=args.examples)
-    analyze_adjacency_mistakes(model, test_df, config, num_examples=args.examples)
+    analyze_classification_mistakes(model, test_loader, config, num_examples=args.examples)
+    analyze_adjacency_mistakes(model, test_loader, config, num_examples=args.examples)
 
 
 if __name__ == "__main__":
