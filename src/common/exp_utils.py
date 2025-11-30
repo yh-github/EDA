@@ -55,7 +55,6 @@ import subprocess
 def get_git_info():
     """
     Retrieves the current Git branch and the latest commit hash.
-    Returns a tuple (branch_name, commit_hash) or (None, None) if not in a Git repo.
     """
     try:
         # Get current branch name

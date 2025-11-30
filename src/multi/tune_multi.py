@@ -1,6 +1,7 @@
 import os
 
 from common.config import EmbModel
+from common.log_utils import setup_logging
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -462,6 +463,9 @@ def main():
     else:
         study_name = args.study_name
 
+
+    setup_logging(log_dir=Path('logs/multi/'), file_prefix=study_name)
+
     logger.info(f"Using Study Name: {study_name} {get_git_info()} PID={os.getpid()}")
 
     manager = TuningManager(args, study_name)
@@ -474,7 +478,21 @@ def main():
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
     )
 
+    # Save Process Info to Study User Attributes (Overwrite to update last run info)
+    current_pid = os.getpid()
+
+    # Maintain history of PIDs
+    all_pids = study.user_attrs.get("all_pids", [])
+    if not isinstance(all_pids, list):
+        all_pids = []
+
+    if current_pid not in all_pids:
+        all_pids.append(current_pid)
+        study.set_user_attr("all_pids", all_pids)
+
     logger.info(f"Starting tuning study '{study_name}' with {args.n_trials} trials.")
+
+    study.set_user_attr("git_info", get_git_info())
 
     try:
         study.optimize(manager.objective, n_trials=args.n_trials)
