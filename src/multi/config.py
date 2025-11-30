@@ -39,6 +39,9 @@ class MultiExpConfig:
     dropout: float = 0.1
     use_counter_party: bool = True
 
+    # Normalization
+    normalization_type: str = "layer_norm"  # 'layer_norm', 'rms_norm', 'none'
+
     # Encoder internals
     chunk_size: int = 2048  # For memory efficient encoding
     time_encoding_max_len: int = 10000
@@ -65,7 +68,7 @@ class MultiExpConfig:
     focal_alpha: float = 0.75
 
     # Scheduler
-    scheduler_type: str = 'cosine' # 'plateau' or 'cosine'
+    scheduler_type: str = 'cosine'  # 'plateau' or 'cosine'
     scheduler_t0: int = 5
     scheduler_t_mult: int = 2
     max_grad_norm: float = 1.0
