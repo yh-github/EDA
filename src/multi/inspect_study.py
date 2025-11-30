@@ -1,6 +1,7 @@
 import argparse
 import optuna
 import logging
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("inspector")
@@ -17,27 +18,51 @@ def inspect_study(db_path, study_name=None):
             print(f"Error reading DB at {db_path}: {e}")
             return
 
-
         skip = []
         ok = []
+        now = datetime.now()
+
         for s in summaries:
-            if s.best_trial:
-                best_val = s.best_trial.value
-                ok.append(f"  - {s.study_name} (Trials: {s.n_trials}, Best: {best_val})")
+            # Check for stale "running" studies
+            # If a study has no trials but is older than 2 hours, it's likely abandoned/stale
+            is_stale = False
+            if s.n_trials == 0:
+                if s.datetime_start and (now - s.datetime_start) > timedelta(hours=2):
+                    is_stale = True
+
+            # Show study if it has trials OR if it's a fresh empty study (< 2 hours old)
+            if s.n_trials > 0 or (not is_stale):
+                if s.best_trial:
+                    val_str = f"{s.best_trial.value:.4f}"
+                else:
+                    val_str = "Running/Pending"
+
+                start_str = s.datetime_start.strftime("%Y-%m-%d %H:%M") if s.datetime_start else "Unknown"
+                ok.append(f"  - {s.study_name:<30} (Trials: {s.n_trials:<3}, Best: {val_str}, Start: {start_str})")
             else:
                 skip.append(s.study_name)
 
-        print(f"Found {len(ok)} studies in {db_path}:")
-        print(f" - skipped {len(skip)} empty studies: {', '.join(skip)}")
+        print(f"Found {len(ok)} active/completed studies in {db_path}:")
         for x in ok:
             print(x)
+
+        if skip:
+            print(f"\n[Skipped {len(skip)} empty/stale studies older than 2 hours]")
 
         if not summaries:
             return
 
         # Pick the most recent one by default
-        study_name = summaries[-1].study_name
-        print(f"\nDefaulting to most recent study: {study_name}")
+        # Filter summaries to find the last valid one
+        valid_summaries = [s for s in summaries if s.study_name not in skip]
+        if valid_summaries:
+            # Sort by start time just in case, though usually returned in order
+            valid_summaries.sort(key=lambda x: x.datetime_start if x.datetime_start else datetime.min)
+            study_name = valid_summaries[-1].study_name
+            print(f"\nDefaulting to most recent valid study: {study_name}")
+        else:
+            print("\nNo valid recent studies found.")
+            return
 
     study = optuna.load_study(study_name=study_name, storage=storage_url)
 
