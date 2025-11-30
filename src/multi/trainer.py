@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import f1_score, precision_score, recall_score, average_precision_score, roc_auc_score, \
+from sklearn.metrics import classification_report, f1_score, precision_score, recall_score, average_precision_score, roc_auc_score, \
     accuracy_score
 import logging
 import torch.nn.functional as fnn
@@ -202,13 +202,25 @@ class MultiTrainer:
             # Subtask Metrics
             cycle_f1 = metrics.get('cycle_f1', 0.0)
             cycle_acc = metrics.get('cycle_acc', 0.0)
+            cycle_pr_auc = metrics.get('cycle_pr_auc', 0.0)
 
             logger.info(
                 f"Epoch {epoch}/{epochs} | "
                 f"Loss: {train_loss:.3f}/{val_loss:.3f} | "
-                f"ADJ F1: {val_f1:.3f} | ADJ PR-AUC: {val_pr_auc:.3f} | "
-                f"CYC Acc: {cycle_acc:.3f} | CYC F1: {cycle_f1:.3f}"
+                f"ADJ F1: {val_f1:.3f} | ADJ PR: {val_pr_auc:.3f} | "
+                f"CYC Acc: {cycle_acc:.3f} | CYC F1: {cycle_f1:.3f} | CYC PR: {cycle_pr_auc:.3f}"
             )
+
+            # Log Detailed Class Breakdown occasionally or if requested
+            if 'cycle_report' in metrics:
+                report = metrics['cycle_report']
+                # Create a concise string for logging
+                # Assuming classes like 0:None, 1:Monthly, 2:Weekly...
+                # We want to see F1 per class to know if we are ignoring rare classes
+                breakdown_str = " | ".join([f"C{c}: {stats['f1-score']:.2f} (n={stats['support']})"
+                                            for c, stats in report.items() if
+                                            isinstance(c, (int, str)) and c != 'accuracy'])
+                logger.info(f"  [Class Breakdown] {breakdown_str}")
 
             # 3. Optuna Reporting (Report the metric we are optimizing for)
             if trial:
@@ -353,6 +365,7 @@ class MultiTrainer:
 
         # Cycle Collections
         all_cycle_preds = []
+        all_cycle_probs = []  # Store full probability distribution for PR-AUC
         all_cycle_targets = []
 
         total_val_loss = 0.0
@@ -385,13 +398,18 @@ class MultiTrainer:
                 # cycle_logits: [Batch, Seq, NumClasses]
                 # cycle_target: [Batch, Seq]
                 cycle_preds = torch.argmax(cycle_logits, dim=-1)
+                cycle_probs = torch.softmax(cycle_logits, dim=-1)  # Full probs [B, S, C]
                 mask_1d = batch['padding_mask'].view(-1)
 
                 flat_preds = cycle_preds.view(-1)[mask_1d]
                 flat_targets = batch['cycle_target'].view(-1)[mask_1d]
 
+                # Flat Probs: [TotalTokens, NumClasses]
+                flat_probs = cycle_probs.view(-1, cycle_probs.shape[-1])[mask_1d]
+
                 all_cycle_preds.extend(flat_preds.cpu().numpy())
                 all_cycle_targets.extend(flat_targets.cpu().numpy())
+                all_cycle_probs.extend(flat_probs.cpu().numpy())
 
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
@@ -416,13 +434,51 @@ class MultiTrainer:
             pr_auc = 0.0
             roc_auc = 0.5
 
-        # 2. Cycle (Classification)
-        # Convert to binary "Is Recurring" (Class > 0) vs "Noise" (Class 0)
-        bin_cycle_pred = (np.array(all_cycle_preds) > 0).astype(int)
-        bin_cycle_true = (np.array(all_cycle_targets) > 0).astype(int)
+        # 2. Cycle (Detailed Metrics)
+        cycle_targets_np = np.array(all_cycle_targets)
+        cycle_preds_np = np.array(all_cycle_preds)
+        cycle_probs_np = np.array(all_cycle_probs)
 
-        cycle_acc = accuracy_score(all_cycle_targets, all_cycle_preds)
+        # A. Basic Accuracy & Binary Detection F1 (Recurring vs Noise)
+        cycle_acc = accuracy_score(cycle_targets_np, cycle_preds_np)
+
+        bin_cycle_pred = (cycle_preds_np > 0).astype(int)
+        bin_cycle_true = (cycle_targets_np > 0).astype(int)
         cycle_f1 = f1_score(bin_cycle_true, bin_cycle_pred, zero_division=0)
+
+        # B. Macro PR-AUC (Average over all classes)
+        # We need to binarize the targets for One-vs-Rest calculation
+        # This handles the multi-class nature of the problem
+        try:
+            # Check if we have enough classes present to compute AUC
+            unique_classes = np.unique(cycle_targets_np)
+            if len(unique_classes) > 1:
+                # We use 'macro' to weight all classes equally (detecting rare weekly patterns is as important as monthly)
+                # Or 'weighted' to account for imbalance. 'macro' is usually better for diagnostics.
+                # However, sklearn requires one-hot targets for roc_auc_score/average_precision_score if multi-class
+                # The easy way: Convert targets to one-hot manually or rely on 'ovr' logic if simple
+
+                # Manual One-Hot for robustness
+                n_classes = cycle_probs_np.shape[1]
+                targets_one_hot = np.zeros((len(cycle_targets_np), n_classes))
+                targets_one_hot[np.arange(len(cycle_targets_np)), cycle_targets_np] = 1
+
+                cycle_pr_auc = average_precision_score(targets_one_hot, cycle_probs_np, average='macro')
+            else:
+                cycle_pr_auc = 0.0
+        except Exception as e:
+            # logger.warning(f"Failed to compute Cycle PR-AUC: {e}")
+            cycle_pr_auc = 0.0
+
+        # C. Detailed Breakdown (Precision/Recall/F1/Support per Class)
+        # We output this as a dict to be logged nicely
+
+        cycle_report_dict = classification_report(
+            cycle_targets_np,
+            cycle_preds_np,
+            zero_division=0,
+            output_dict=True
+        )
 
         if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
             self.scheduler.step(avg_val_loss)
@@ -438,5 +494,7 @@ class MultiTrainer:
             "roc_auc": roc_auc,
             # Subtask metrics
             "cycle_acc": cycle_acc,
-            "cycle_f1": cycle_f1
+            "cycle_f1": cycle_f1,
+            "cycle_pr_auc": cycle_pr_auc,
+            "cycle_report": cycle_report_dict
         }
