@@ -120,16 +120,9 @@ class TuningManager:
         # --- Sample Hyperparameters ---
 
         # 1. Unfreeze Layers: 0 (Frozen), 1 (Top), 2 (Top 2)
-        # Note: If CLI argument is provided (not None/Default), we might want to respect it.
-        # But for tuning, we usually want to explore. Here we default to exploration.
-        # If the user specifically passed --unfreeze_last_n_layers 1, we could lock it.
-        # For now, we let Optuna decide unless the user heavily constrained the search space manually.
         unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
 
         # 2. Conditional Learning Rate Strategy
-        # If unfreezing layers, we must use a lower LR to avoid catastrophic forgetting.
-        # If frozen, we can use a higher LR to train the new heads faster.
-
         if unfreeze > 0:
             lr_min = 1e-5
             lr_max = 1e-3
@@ -137,8 +130,6 @@ class TuningManager:
             lr_min = 1e-4
             lr_max = 1e-3
 
-        # We ignore the CLI base_lr for the range definition to let the conditional logic work,
-        # or we could scale it relative to base_lr. Here we use absolute "safe" ranges for Transformers.
         lr = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
 
         # 3. Normalization Strategy
@@ -172,6 +163,7 @@ class TuningManager:
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
             text_encoder_model=emb_str,
+            metric_to_track=self.args.metric_to_track,
             early_stopping_patience=defaults.early_stopping_patience,
             use_counter_party=self.data_determined_use_cp
         )
@@ -188,18 +180,20 @@ class TuningManager:
         trial_save_path = os.path.join(self.args.output_dir, f"temp_trial_{trial.number}.pth")
 
         # Run unified training loop
+        # We pass the metric to track here
         best_val_score = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=config.num_epochs,
             trial=trial,
             stop_callback=lambda: self.killer.kill_now,
-            save_path=trial_save_path
+            save_path=trial_save_path,
+            metric_to_track=config.metric_to_track
         )
 
         # Global Best Model Saving Logic
         if best_val_score > self.best_global_score:
-            logger.info(f"🏆 New Global Best Score: {best_val_score:.4f} (Trial {trial.number})")
+            logger.info(f"🏆 New Global Best Score ({self.args.metric_to_track}): {best_val_score:.4f} (Trial {trial.number})")
             self.best_global_score = best_val_score
             # Promote temp file to global best file
             if os.path.exists(trial_save_path):
@@ -451,6 +445,10 @@ def main():
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     parser.add_argument("--text_emb", type=str, default=defaults.text_encoder_model,
                         help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")
+
+    parser.add_argument("--metric_to_track", type=str, default="pr_auc", choices=["pr_auc", "cycle_f1"],
+                        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
+
     args = parser.parse_args()
 
     # Optuna Storage (SQLite for persistence)
@@ -463,10 +461,10 @@ def main():
     else:
         study_name = args.study_name
 
-
     setup_logging(log_dir=Path('logs/multi/'), file_prefix=study_name)
 
     logger.info(f"Using Study Name: {study_name} {get_git_info()} PID={os.getpid()}")
+    logger.info(f"Optimization Target: {args.metric_to_track}")
 
     manager = TuningManager(args, study_name)
 
@@ -493,6 +491,7 @@ def main():
     logger.info(f"Starting tuning study '{study_name}' with {args.n_trials} trials.")
 
     study.set_user_attr("git_info", get_git_info())
+    study.set_user_attr("target_metric", args.metric_to_track)
 
     try:
         study.optimize(manager.objective, n_trials=args.n_trials)
@@ -501,7 +500,7 @@ def main():
 
     logger.info("Tuning Complete.")
     if len(study.trials) > 0:
-        logger.info(f"Best Trial Score: {study.best_value}")
+        logger.info(f"Best Trial Score ({args.metric_to_track}): {study.best_value}")
         logger.info("Best Params:")
         for k, v in study.best_params.items():
             logger.info(f"  {k}: {v}")
