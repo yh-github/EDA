@@ -17,7 +17,7 @@ def inspect_study(db_path, study_name=None):
             print(f"Error reading DB at {db_path}: {e}")
             return
 
-        print(f"Found {len(summaries)} studies in {db_path}:")
+
         skip = []
         ok = []
         for s in summaries:
@@ -27,7 +27,8 @@ def inspect_study(db_path, study_name=None):
             else:
                 skip.append(s.study_name)
 
-        print("skipped: ", skip)
+        print(f"Found {len(ok)} studies in {db_path}:")
+        print(f" - skipped {len(skip)} empty studies: {', '.join(skip)}")
         for x in ok:
             print(x)
 
