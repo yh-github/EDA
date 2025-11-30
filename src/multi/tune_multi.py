@@ -113,11 +113,11 @@ class TuningManager:
         # Sample Hyperparameters
 
         lr = trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True)
-        dropout = trial.suggest_float("dropout", 0.1, 0.4)
-        num_layers = trial.suggest_int("num_layers", 1, 4)
-        num_heads = trial.suggest_categorical("num_heads", [2, 4, 8])
-        hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256])
-        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.15, 0.55)
+        dropout = trial.suggest_float("dropout", 0.2, 0.4)
+        num_layers = trial.suggest_int("num_layers", 3, 6)
+        num_heads = trial.suggest_categorical("num_heads", [4, 8])
+        hidden_dim = trial.suggest_categorical("hidden_dim", [256])
+        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.2, 0.5)
 
         defaults = MultiExpConfig()
         config = MultiExpConfig(
@@ -127,7 +127,6 @@ class TuningManager:
             num_heads=num_heads,
             hidden_dim=hidden_dim,
             contrastive_loss_weight=contrastive_loss_weight,
-
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,

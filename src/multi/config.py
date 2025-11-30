@@ -30,8 +30,8 @@ class MultiExpConfig:
     downsample: float = 0.3  # 1.0 means no downsampling
 
     # Model Hyperparameters
-    text_encoder_model: str = EmbModel.MPNET.value
-    unfreeze_last_n_layers: int = 2
+    text_encoder_model: str = EmbModel.FinE5.value
+    unfreeze_last_n_layers: int = 0
 
     hidden_dim: int = 256
     num_heads: int = 4
