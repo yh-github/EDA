@@ -1,5 +1,7 @@
 import os
 
+from common.config import EmbModel
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import argparse
@@ -120,6 +122,7 @@ class TuningManager:
         contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.2, 0.5)
 
         defaults = MultiExpConfig()
+        # noinspection PyTypeHints
         config = MultiExpConfig(
             learning_rate=lr,
             dropout=dropout,
@@ -131,6 +134,7 @@ class TuningManager:
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
+            text_encoder_model=EmbModel[self.args.text_emb].value(),
 
             # Use default or tuned patience
             early_stopping_patience=defaults.early_stopping_patience,
@@ -308,6 +312,8 @@ def main():
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
+    parser.add_argument("--text_emb", type=str, default=defaults.text_encoder_model,
+                        help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")
     args = parser.parse_args()
 
     manager = TuningManager(args)
