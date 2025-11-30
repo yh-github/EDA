@@ -128,7 +128,7 @@ class TuningManager:
         # --- Sample Hyperparameters ---
 
         # 1. Unfreeze Layers: 0 (Frozen), 1 (Top), 2 (Top 2)
-        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
+        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [1, 2])
 
         # 2. Conditional Learning Rate Strategy
         if unfreeze > 0:
@@ -144,11 +144,11 @@ class TuningManager:
         norm_type = trial.suggest_categorical("normalization_type", ["layer_norm", "rms_norm"])
 
         # 4. Standard architecture params
-        dropout = trial.suggest_float("dropout", 0.2, 0.4)
-        num_layers = trial.suggest_int("num_layers", 3, 6)
+        dropout = trial.suggest_float("dropout", 0.3, 0.45)
+        num_layers = trial.suggest_int("num_layers", 5, 8)
         num_heads = trial.suggest_categorical("num_heads", [4, 8])
         hidden_dim = trial.suggest_categorical("hidden_dim", [256])
-        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.2, 0.5)
+        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.4, 0.5)
 
         defaults = MultiExpConfig()
         # noinspection PyTypeChecker,PyTypeHints
@@ -345,7 +345,7 @@ def main():
             model.load_state_dict(checkpoint['state_dict'])
             model.to(loaded_config.device)
 
-            # --- UPDATED: Use Loader to avoid double-tokenization ---
+            # --- Use Loader to avoid double-tokenization ---
             logger.info("Initializing Test Loader for Analysis...")
             test_loader = get_dataloader(manager.test_df, loaded_config, shuffle=False, n_workers=0)
 
