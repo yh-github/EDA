@@ -25,7 +25,7 @@ def inspect_study(db_path, study_name=None):
         for s in summaries:
             # Check for stale "running" studies
             # If a study has no trials but is older than 2 hours, it's likely abandoned/stale
-            if not s.best_trial and s.datetime_start and (now - s.datetime_start) > timedelta(hours=2):
+            if not s.best_trial and s.datetime_start and (now - s.datetime_start) > timedelta(hours=1):
                 skip.append(s.study_name)
                 continue
 
