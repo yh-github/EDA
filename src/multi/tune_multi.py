@@ -9,9 +9,9 @@ import logging
 import signal
 import pickle
 import re
+import shutil
 from pathlib import Path
 import optuna
-import pandas as pd
 import torch
 from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
@@ -38,9 +38,13 @@ class GracefulKiller:
 
 
 class TuningManager:
-    def __init__(self, args):
+    def __init__(self, args, study_name):
         self.args = args
+        self.study_name = study_name
         self.killer = GracefulKiller()
+
+        self.best_global_score = -1.0
+        self.best_global_path = Path(args.output_dir) / f"best_model_{study_name}.pth"
 
         # Determine Cache Path
         self.cache_dir = Path("cache/data")
@@ -113,7 +117,6 @@ class TuningManager:
             raise optuna.TrialPruned()
 
         # Sample Hyperparameters
-
         lr = trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True)
         dropout = trial.suggest_float("dropout", 0.2, 0.4)
         num_layers = trial.suggest_int("num_layers", 3, 6)
@@ -123,7 +126,7 @@ class TuningManager:
 
         defaults = MultiExpConfig()
         # noinspection PyTypeChecker,PyTypeHints
-        emb_str=EmbModel[self.args.text_emb].value
+        emb_str = EmbModel[self.args.text_emb].value
 
         config = MultiExpConfig(
             learning_rate=lr,
@@ -137,11 +140,7 @@ class TuningManager:
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
             text_encoder_model=emb_str,
-
-            # Use default or tuned patience
             early_stopping_patience=defaults.early_stopping_patience,
-
-            # CRITICAL: Use the decision made during data loading
             use_counter_party=self.data_determined_use_cp
         )
 
@@ -153,14 +152,31 @@ class TuningManager:
         model = TransactionTransformer(config)
         trainer = MultiTrainer(model, config)
 
-        # Run unified training loop (handles early stopping, pruning, reporting)
+        # Temporary path for this specific trial
+        trial_save_path = os.path.join(self.args.output_dir, f"temp_trial_{trial.number}.pth")
+
+        # Run unified training loop
         best_val_score = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=config.num_epochs,
             trial=trial,
-            stop_callback=lambda: self.killer.kill_now
+            stop_callback=lambda: self.killer.kill_now,
+            save_path=trial_save_path
         )
+
+        # Global Best Model Saving Logic
+        if best_val_score > self.best_global_score:
+            logger.info(f"🏆 New Global Best Score: {best_val_score:.4f} (Trial {trial.number})")
+            self.best_global_score = best_val_score
+            # Promote temp file to global best file
+            if os.path.exists(trial_save_path):
+                shutil.copy(trial_save_path, self.best_global_path)
+                logger.info(f"Saved global best model to {self.best_global_path}")
+
+        # Cleanup temp file
+        if os.path.exists(trial_save_path):
+            os.remove(trial_save_path)
 
         if trainer.stop_requested:
             logger.info("Trial stopped by user signal.")
@@ -168,14 +184,105 @@ class TuningManager:
         return best_val_score
 
 
-def analyze_mistakes(model, val_df, config, num_examples=5):
+def analyze_classification_mistakes(model, val_df, config, num_examples=5):
     """
-    Runs inference on Validation DF and logs the top False Positives and False Negatives.
+    Analyzes 'isRecurring' classification errors specifically.
+    FP: Model says Recurring, Truth says None.
+    FN: Model says None, Truth says Recurring.
     """
-    logger.info("Running Mistake Analysis on Validation Set...")
+    logger.info("Running Cycle/Classification Mistake Analysis...")
+    model.eval()
+    val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
+    device = config.device
+    fc = MultiFieldConfig()
+
+    fps = []
+    fns = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            batch_gpu = {k: v.to(device) for k, v in batch.items()}
+
+            # Forward
+            _, cycle_logits, _ = model(batch_gpu)
+
+            # Predictions: [Batch, Seq]
+            preds = torch.argmax(cycle_logits, dim=-1)
+            targets = batch_gpu['cycle_target']
+            padding_mask = batch_gpu['padding_mask']
+
+            probs = torch.softmax(cycle_logits, dim=-1)
+            max_probs, _ = torch.max(probs, dim=-1)
+
+            # Move to CPU
+            preds_np = preds.cpu().numpy()
+            targets_np = targets.cpu().numpy()
+            mask_np = padding_mask.cpu().numpy()
+            indices_np = batch['original_index'].numpy()
+            probs_np = max_probs.cpu().numpy()
+
+            batch_size, seq_len = preds.shape
+
+            for b in range(batch_size):
+                for s in range(seq_len):
+                    if not mask_np[b, s]: continue
+
+                    pred_cls = preds_np[b, s]
+                    true_cls = targets_np[b, s]
+                    prob = probs_np[b, s]
+
+                    # Convert to Binary Logic: 0 is None/Noise, >0 is Recurring
+                    pred_is_rec = pred_cls > 0
+                    true_is_rec = true_cls > 0
+
+                    if pred_is_rec == true_is_rec:
+                        continue
+
+                    # Get original row
+                    orig_idx = indices_np[b, s]
+                    row = val_df.iloc[orig_idx]
+
+                    item = {
+                        'txt': row[fc.text],
+                        'amt': row[fc.amount],
+                        'prob': prob,
+                        'pred_cycle': pred_cls,
+                        'true_cycle': true_cls
+                    }
+
+                    if pred_is_rec and not true_is_rec:
+                        fps.append(item)  # False Positive (Spam marked as Recurring)
+                    elif not pred_is_rec and true_is_rec:
+                        fns.append(item)  # False Negative (Recurring missed)
+
+    # Log Results
+    logger.info("-" * 60)
+    logger.info(f"CLASSIFICATION MISTAKES (isRecurring): FP={len(fps)}, FN={len(fns)}")
+
+    # Sort by confidence (High prob = worse mistake)
+    fps_sorted = sorted(fps, key=lambda x: x['prob'], reverse=True)[:num_examples]
+    if fps_sorted:
+        logger.info("\n>>> Top False Positives (Predicted Recurring, Actually Noise):")
+        for x in fps_sorted:
+            logger.info(f"  [{x['prob']:.2f}] Amt:{x['amt']:<8} Desc:'{x['txt']}'")
+
+    # Sort by confidence (High prob of being 0 means it confidently thought it was noise)
+    fns_sorted = sorted(fns, key=lambda x: x['prob'], reverse=True)[:num_examples]
+    if fns_sorted:
+        logger.info("\n>>> Top False Negatives (Predicted Noise, Actually Recurring):")
+        for x in fns_sorted:
+            logger.info(f"  [{x['prob']:.2f}] Amt:{x['amt']:<8} Desc:'{x['txt']}' (TrueCycle: {x['true_cycle']})")
+
+    logger.info("-" * 60)
+
+
+def analyze_adjacency_mistakes(model, val_df, config, num_examples=5):
+    """
+    Runs inference on Validation DF and logs the top False Positives and False Negatives for Adjacency.
+    """
+    logger.info("Running Adjacency Mistake Analysis...")
     model.eval()
 
-    # We use a non-shuffled loader to keep alignment
     val_loader = get_dataloader(val_df, config, shuffle=False, n_workers=0)
     device = config.device
 
@@ -192,8 +299,6 @@ def analyze_mistakes(model, val_df, config, num_examples=5):
             adj_logits, _, _ = model(batch_gpu)
             probs = torch.sigmoid(adj_logits)
 
-            # Vectorized Mismatch Finding
-            probs = torch.sigmoid(adj_logits)
             preds = (probs > 0.5).float()
             targets = batch_gpu['adjacency_target']
 
@@ -221,7 +326,7 @@ def analyze_mistakes(model, val_df, config, num_examples=5):
 
             probs_np = probs.detach().cpu().numpy()
             targets_np = targets.cpu().numpy()
-            indices_np = batch['original_index'].numpy() # CPU already
+            indices_np = batch['original_index'].numpy()  # CPU already
 
             for k in range(len(b_indices)):
                 b, i, j = b_indices[k], i_indices[k], j_indices[k]
@@ -248,22 +353,18 @@ def analyze_mistakes(model, val_df, config, num_examples=5):
                 elif pred == 0 and truth == 1:
                     fns.append(item)
 
-    # Sort and Log
     logger.info("-" * 50)
-    logger.info(f"MISTAKE REPORT (Found {len(fps)} FPs, {len(fns)} FNs)")
+    logger.info(f"ADJACENCY MISTAKES (Found {len(fps)} FPs, {len(fns)} FNs)")
 
-    # 1. Top False Positives (High Confidence, Wrong)
     fps_sorted = sorted(fps, key=lambda z: z['prob'], reverse=True)[:num_examples]
     if fps_sorted:
-        logger.info("\n>>> Top False Positives (Model thought these were same):")
+        logger.info("\n>>> Top Adjacency FPs (Model thought these were same):")
         for x in fps_sorted:
             logger.info(f"  [{x['prob']:.4f}] '{x['txt1']}' (${x['amt1']}) <--> '{x['txt2']}' (${x['amt2']})")
 
-    # 2. Top False Negatives (Low Confidence, Wrong)
-    # We sort by prob ascending (closest to 0)
     fns_sorted = sorted(fns, key=lambda z: z['prob'])[:num_examples]
     if fns_sorted:
-        logger.info("\n>>> Top False Negatives (Model missed these):")
+        logger.info("\n>>> Top Adjacency FNs (Model missed these):")
         for x in fns_sorted:
             logger.info(f"  [{x['prob']:.4f}] '{x['txt1']}' (${x['amt1']}) <--> '{x['txt2']}' (${x['amt2']})")
 
@@ -318,8 +419,6 @@ def main():
                         help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")
     args = parser.parse_args()
 
-    manager = TuningManager(args)
-
     # Optuna Storage (SQLite for persistence)
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -331,6 +430,8 @@ def main():
         study_name = args.study_name
 
     logger.info(f"Using Study Name: {study_name} {get_git_info()} PID={os.getpid()}")
+
+    manager = TuningManager(args, study_name)
 
     study = optuna.create_study(
         study_name=study_name,
@@ -348,95 +449,39 @@ def main():
         logger.warning("KeyboardInterrupt caught in main loop. Saving study state...")
 
     logger.info("Tuning Complete.")
-    logger.info(f"Best Trial Score: {study.best_value}")
-    logger.info("Best Params:")
-    for k, v in study.best_params.items():
-        logger.info(f"  {k}: {v}")
+    if len(study.trials) > 0:
+        logger.info(f"Best Trial Score: {study.best_value}")
+        logger.info("Best Params:")
+        for k, v in study.best_params.items():
+            logger.info(f"  {k}: {v}")
 
-    # --- ANALYSIS 1: Hyperparameters ---
-    analyze_study_importance(study)
+        # --- ANALYSIS 1: Hyperparameters ---
+        analyze_study_importance(study)
 
-    # --- ANALYSIS 2: Best Model & Mistakes ---
-    logger.info("=" * 60)
-    logger.info("STARTING FINAL MODEL TRAINING (Train + Val -> Test)")
-    logger.info("=" * 60)
+        # --- ANALYSIS 2: Re-Load Best Model for Detailed Analysis ---
+        logger.info("=" * 60)
+        logger.info("LOADING BEST MODEL FOR DETAILED ANALYSIS")
+        logger.info("=" * 60)
 
-    # 1. Merge Train and Val
-    full_train_df = pd.concat([manager.train_df, manager.val_df])
-    logger.info(
-        f"Combined Train ({len(manager.train_df)}) + Val ({len(manager.val_df)}) = {len(full_train_df)} samples")
+        if manager.best_global_path.exists():
+            # Create a basic config just to initialize the predictor/analysis tools
+            # The saved checkpoint contains the exact config
+            checkpoint = torch.load(manager.best_global_path, map_location=torch.device('cpu'), weights_only=False)
+            loaded_config = checkpoint['config']
+            loaded_config.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 2. Reconstruct Config from Best Params + Args
-    best_params = study.best_params
+            model = TransactionTransformer(loaded_config)
+            model.load_state_dict(checkpoint['state_dict'])
+            model.to(loaded_config.device)
 
-    # FIX: Handle potential missing keys if tuning space changes, or mapping keys
-    cw_param = best_params.get("contrastive_weight") or best_params.get("contrastive_loss_weight") or 0.1
+            # Analyze on Test Set
+            analyze_adjacency_mistakes(model, manager.test_df, loaded_config)
+            analyze_classification_mistakes(model, manager.test_df, loaded_config)
+        else:
+            logger.warning("Best model file not found. Skipping analysis.")
 
-    defaults = MultiExpConfig()
-    final_config = MultiExpConfig(
-        # Tuned Params
-        learning_rate=best_params["learning_rate"],
-        dropout=best_params["dropout"],
-        num_layers=best_params["num_layers"],
-        num_heads=best_params["num_heads"],
-        hidden_dim=best_params["hidden_dim"],
-
-        # Mapped Correctly
-        contrastive_loss_weight=cw_param,
-
-        # Fixed Params
-        num_epochs=args.epochs,
-        batch_size=args.batch_size,
-        data_path=args.data_path,
-        output_dir=args.output_dir,
-        early_stopping_patience=defaults.early_stopping_patience,
-
-        # Ensure final model respects data capabilities
-        use_counter_party=manager.data_determined_use_cp
-    )
-    set_global_seed(final_config.random_state)
-
-    # 3. Create Loaders
-    logger.info("Creating DataLoaders...")
-    final_train_loader = get_dataloader(full_train_df, final_config, shuffle=True)
-    test_loader = get_dataloader(manager.test_df, final_config, shuffle=False)
-
-    # 4. Initialize Final Model
-    logger.info(
-        f"Initializing Final Model with dim={final_config.hidden_dim}, heads={final_config.num_heads}, layers={final_config.num_layers}")
-    final_model = TransactionTransformer(final_config)
-    final_trainer = MultiTrainer(final_model, final_config)
-
-    # 5. Train
-    # We allow the killer to stop this too if user hits Ctrl+C
-    if not manager.killer.kill_now:
-        save_path = os.path.join(args.output_dir, f"best_model_{study_name}.pth")
-
-        final_trainer.fit(
-            train_loader=final_train_loader,
-            val_loader=test_loader,
-            epochs=final_config.num_epochs,
-            save_path=save_path,
-            stop_callback=lambda: manager.killer.kill_now,
-            metric_to_track='pr_auc'
-        )
-
-        # 6. Final Metrics
-        logger.info("-" * 60)
-        logger.info("FINAL TEST SET RESULTS")
-        logger.info("-" * 60)
-        final_metrics = final_trainer.evaluate(test_loader)
-        logger.info(f"Precision: {final_metrics['precision']:.4f}")
-        logger.info(f"Recall:    {final_metrics['recall']:.4f}")
-        logger.info(f"F1 Score:  {final_metrics['f1']:.4f}")
-        logger.info(f"PR-AUC:    {final_metrics['pr_auc']:.4f}")
-        logger.info(f"ROC-AUC:   {final_metrics['roc_auc']:.4f}")
-        logger.info(f"Loss:      {final_metrics['val_loss']:.4f}")
-
-        logger.info(f"Final model saved to {save_path}")
-
-        # 7. Analyze Mistakes (On Test Set now)
-        analyze_mistakes(final_model, manager.test_df, final_config)
+    else:
+        logger.warning("No trials completed.")
 
 
 if __name__ == "__main__":
