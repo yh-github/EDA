@@ -25,22 +25,15 @@ def inspect_study(db_path, study_name=None):
         for s in summaries:
             # Check for stale "running" studies
             # If a study has no trials but is older than 2 hours, it's likely abandoned/stale
-            is_stale = False
-            if s.n_trials == 0:
-                if s.datetime_start and (now - s.datetime_start) > timedelta(hours=2):
-                    is_stale = True
-
-            # Show study if it has trials OR if it's a fresh empty study (< 2 hours old)
-            if s.n_trials > 0 or (not is_stale):
-                if s.best_trial:
-                    val_str = f"{s.best_trial.value:.4f}"
-                else:
-                    val_str = "Running/Pending"
-
-                start_str = s.datetime_start.strftime("%Y-%m-%d %H:%M") if s.datetime_start else "Unknown"
-                ok.append(f"  - {s.study_name:<30} (Trials: {s.n_trials:<3}, Best: {val_str}, Start: {start_str})")
-            else:
+            if not s.best_trial and s.datetime_start and (now - s.datetime_start) > timedelta(hours=2):
                 skip.append(s.study_name)
+                continue
+
+            if s.best_trial:
+                val_str = f"{s.best_trial.value:.4f}"
+            else:
+                val_str = "Running/Pending"
+            ok.append(f"  - {s.study_name:<30} (Trials: {s.n_trials:<3}, Best: {val_str})")
 
         print(f"Found {len(ok)} active/completed studies in {db_path}:")
         for x in ok:
