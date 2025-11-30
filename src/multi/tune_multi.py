@@ -126,7 +126,7 @@ class TuningManager:
 
         defaults = MultiExpConfig()
         # noinspection PyTypeChecker,PyTypeHints
-        emb_str = EmbModel[self.args.text_emb].value
+        emb_str:str = EmbModel[self.args.text_emb].value
 
         config = MultiExpConfig(
             learning_rate=lr,
@@ -141,7 +141,8 @@ class TuningManager:
             output_dir=self.args.output_dir,
             text_encoder_model=emb_str,
             early_stopping_patience=defaults.early_stopping_patience,
-            use_counter_party=self.data_determined_use_cp
+            use_counter_party=self.data_determined_use_cp,
+            unfreeze_last_n_layers=self.args.unfreeze_last_n_layers
         )
 
         set_global_seed(config.random_state)
@@ -410,6 +411,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
     parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
     parser.add_argument("--n_trials", type=int, default=100)
+    parser.add_argument("--n_unfreeze_last_n_layers", type=int, default=defaults.unfreeze_last_n_layers)
     parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
