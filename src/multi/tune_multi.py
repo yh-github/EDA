@@ -411,7 +411,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
     parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
     parser.add_argument("--n_trials", type=int, default=100)
-    parser.add_argument("--n_unfreeze_last_n_layers", type=int, default=defaults.unfreeze_last_n_layers)
+    parser.add_argument("--unfreeze_last_n_layers", type=int, default=defaults.unfreeze_last_n_layers)
     parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
