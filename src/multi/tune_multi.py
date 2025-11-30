@@ -267,7 +267,7 @@ def main():
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
     parser.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
-    parser.add_argument("--text_emb", type=str, default=EmbModel.MPNET.value, # TODO fix in config
+    parser.add_argument("--text_emb", type=str, default="MPNET", # TODO fix in config
                         help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")
 
     parser.add_argument("--metric_to_track", type=str, default="pr_auc", choices=["pr_auc", "cycle_f1"],
