@@ -4,6 +4,7 @@ import pickle
 from pathlib import Path
 import torch
 
+from common.config import get_device
 from multi.config import MultiExpConfig
 from multi.encoder import TransactionTransformer
 from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
@@ -57,12 +58,8 @@ def main():
     config: MultiExpConfig = checkpoint['config']
 
     # Device setup
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
+    device = get_device()
 
-    config.device = device
 
     logger.info(f"Running on {device}")
 
