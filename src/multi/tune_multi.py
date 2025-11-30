@@ -117,7 +117,7 @@ class TuningManager:
             raise optuna.TrialPruned()
 
         # Sample Hyperparameters
-        lr = trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True)
+        lr = trial.suggest_float("learning_rate", self.args.learning_rate/5, self.args.learning_rate*5, log=True)
         dropout = trial.suggest_float("dropout", 0.2, 0.4)
         num_layers = trial.suggest_int("num_layers", 3, 6)
         num_heads = trial.suggest_categorical("num_heads", [4, 8])
@@ -416,6 +416,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
+    parser.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     parser.add_argument("--text_emb", type=str, default=defaults.text_encoder_model,
                         help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")

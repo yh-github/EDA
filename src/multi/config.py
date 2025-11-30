@@ -45,7 +45,7 @@ class MultiExpConfig:
 
     # Training Hyperparameters
     batch_size: int = 64
-    learning_rate: float = 5e-5
+    learning_rate: float = 1e-4
     num_epochs: int = 15
     max_seq_len: int = 200
     early_stopping_patience: int = 4
