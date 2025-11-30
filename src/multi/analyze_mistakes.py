@@ -7,29 +7,25 @@ import torch
 from multi.config import MultiExpConfig
 from multi.encoder import TransactionTransformer
 from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
+from multi.tune_multi import get_data_cache_path
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger("analyze_mistakes")
 
 
-def load_cached_data(cache_dir: Path):
+def load_cached_data(config: MultiExpConfig):
     """
     Finds the most recent split pickle in the cache directory.
     """
-    if not cache_dir.exists():
-        raise FileNotFoundError(f"Cache directory {cache_dir} does not exist.")
+    data_cache_path = get_data_cache_path(
+        random_state=config.random_state, downsample=config.downsample
+    )
 
-    files = list(cache_dir.glob("split_*.pkl"))
-    if not files:
-        raise FileNotFoundError(f"No split_*.pkl files found in {cache_dir}")
+    if not data_cache_path.exists():
+        raise FileNotFoundError(f"Cache directory {data_cache_path} does not exist.")
 
-    # Sort by modification time (newest first)
-    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    latest_file = files[0]
-
-    logger.info(f"Loading data from cached split: {latest_file}")
-    with open(latest_file, 'rb') as f:
+    with open(data_cache_path, 'rb') as f:
         data = pickle.load(f)
 
     return data['train'], data['val'], data['test']
@@ -38,7 +34,7 @@ def load_cached_data(cache_dir: Path):
 def main():
     parser = argparse.ArgumentParser(description="Analyze mistakes of a trained Multi model.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the .pth checkpoint file.")
-    parser.add_argument("--cache_dir", type=str, default="cache/data", help="Directory containing split_*.pkl")
+    parser.add_argument("--data_cache", type=str, default="cache/data", help="Directory containing split_*.pkl")
     parser.add_argument("--device", type=str, default="auto", help="cpu or cuda")
     parser.add_argument("--examples", type=int, default=10, help="Number of examples to show per error type")
 
@@ -75,7 +71,8 @@ def main():
 
     # 2. Load Data (Assumed saved)
     try:
-        _, val_df, test_df = load_cached_data(Path(args.cache_dir))
+        # allow override with Path(args.data_cache)
+        _, val_df, test_df = load_cached_data(config)
         logger.info(f"Data Loaded. Val: {len(val_df)}, Test: {len(test_df)}")
     except Exception as e:
         logger.error(f"Failed to load cached data: {e}")

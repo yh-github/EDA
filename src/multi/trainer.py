@@ -117,7 +117,7 @@ class SupervisedContrastiveLoss(nn.Module):
 
 
 class MultiTrainer:
-    def __init__(self, model, config: MultiExpConfig, pos_weight: float = None):
+    def __init__(self, model, config: MultiExpConfig):
         self.model = model.to(config.device)
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
@@ -144,9 +144,7 @@ class MultiTrainer:
         if config.use_focal_loss:
             self.adj_criterion = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma)
         else:
-            # Use config pos_weight if available, otherwise default or argument
-            pw = pos_weight if pos_weight is not None else getattr(config, 'pos_weight', 2.5)
-            weight_tensor = torch.tensor([pw]).to(config.device)
+            weight_tensor = torch.tensor([config.pos_weight]).to(config.device)
             self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
 
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')

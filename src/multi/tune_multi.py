@@ -38,8 +38,15 @@ class GracefulKiller:
         logger.warning(f"Received signal {signum}. Finishing current step/trial and exiting...")
         self.kill_now = True
 
+DATA_CACHE_BASE = Path("cache/data")
+
+def get_data_cache_path(random_state:int, downsample:float, base:Path = DATA_CACHE_BASE) -> Path:
+    cache_key = f"{random_state}__{downsample}"
+    return base/f"split_{cache_key}.pkl"
+
 
 class TuningManager:
+
     def __init__(self, args, study_name):
         self.args = args
         self.study_name = study_name
@@ -49,11 +56,11 @@ class TuningManager:
         self.best_global_path = Path(args.output_dir) / f"best_model_{study_name}.pth"
 
         # Determine Cache Path
-        self.cache_dir = Path("cache/data")
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        DATA_CACHE_BASE.mkdir(parents=True, exist_ok=True)
 
-        cache_key = f"{args.random_state}__{args.downsample}"
-        self.cache_path = self.cache_dir / f"split_{cache_key}.pkl"
+        self.cache_path = get_data_cache_path(
+            random_state=args.random_state, downsample=args.downsample
+        )
 
         # IMPORTANT: We need to know if data processing disabled CP
         self.data_determined_use_cp = True
