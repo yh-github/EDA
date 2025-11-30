@@ -49,3 +49,27 @@ def exclude_none(data: Any) -> Any:
 
     # Base case: return value as-is (int, str, bool, etc.)
     return data
+
+import subprocess
+
+def get_git_info():
+    """
+    Retrieves the current Git branch and the latest commit hash.
+    Returns a tuple (branch_name, commit_hash) or (None, None) if not in a Git repo.
+    """
+    try:
+        # Get current branch name
+        branch_name = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.PIPE
+        ).strip().decode('utf-8')
+
+        # Get latest commit hash
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.PIPE
+        ).strip().decode('utf-8')
+
+        return f"{branch_name=} {commit_hash=}"
+    except subprocess.CalledProcessError:
+        raise Exception("Not in a Git repository.")

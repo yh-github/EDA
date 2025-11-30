@@ -17,7 +17,7 @@ from multi.trainer import MultiTrainer
 from multi.data import get_dataloader
 from multi.data_utils import load_and_prepare_data
 from common.data import create_train_val_test_split
-from common.exp_utils import set_global_seed
+from common.exp_utils import set_global_seed, get_git_info
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -323,7 +323,7 @@ def main():
     else:
         study_name = args.study_name
 
-    logger.info(f"Using Study Name: {study_name}")
+    logger.info(f"Using Study Name: {study_name} {get_git_info()}")
 
     study = optuna.create_study(
         study_name=study_name,
