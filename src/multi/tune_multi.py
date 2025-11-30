@@ -118,13 +118,29 @@ class TuningManager:
 
         # --- Sample Hyperparameters ---
 
-        # 1. Learning Rate: User's logic (Dynamic centering)
-        lr = trial.suggest_float("learning_rate", self.args.learning_rate / 5, self.args.learning_rate * 5, log=True)
-
-        # 2. Unfreeze Layers: Tune this instead of hardcoding, to find the "Goldilocks" zone
+        # 1. Unfreeze Layers: 0 (Frozen), 1 (Top), 2 (Top 2)
+        # Note: If CLI argument is provided (not None/Default), we might want to respect it.
+        # But for tuning, we usually want to explore. Here we default to exploration.
+        # If the user specifically passed --unfreeze_last_n_layers 1, we could lock it.
+        # For now, we let Optuna decide unless the user heavily constrained the search space manually.
         unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
 
-        # 3. Normalization Strategy (New)
+        # 2. Conditional Learning Rate Strategy
+        # If unfreezing layers, we must use a lower LR to avoid catastrophic forgetting.
+        # If frozen, we can use a higher LR to train the new heads faster.
+
+        if unfreeze > 0:
+            lr_min = 1e-5
+            lr_max = 1e-3
+        else:
+            lr_min = 1e-4
+            lr_max = 1e-3
+
+        # We ignore the CLI base_lr for the range definition to let the conditional logic work,
+        # or we could scale it relative to base_lr. Here we use absolute "safe" ranges for Transformers.
+        lr = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
+
+        # 3. Normalization Strategy
         norm_type = trial.suggest_categorical("normalization_type", ["layer_norm", "rms_norm"])
 
         # 4. Standard architecture params
