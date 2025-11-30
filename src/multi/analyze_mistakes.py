@@ -49,7 +49,7 @@ def main():
         return
 
     logger.info(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, map_location=torch.device('cpu'))  # Load to CPU first
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
 
     if 'config' not in checkpoint:
         logger.error("Checkpoint does not contain 'config' key.")
