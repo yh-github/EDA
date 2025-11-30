@@ -3,6 +3,8 @@ import logging
 import pickle
 from pathlib import Path
 import torch
+
+from multi.config import MultiExpConfig
 from multi.encoder import TransactionTransformer
 from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
 
@@ -55,7 +57,7 @@ def main():
         logger.error("Checkpoint does not contain 'config' key.")
         return
 
-    config = checkpoint['config']
+    config:MultiExpConfig = checkpoint['config']
 
     # Device setup
     if args.device == "auto":
@@ -63,7 +65,6 @@ def main():
     else:
         device = torch.device(args.device)
 
-    config.device = device  # Update config with current runtime device
     logger.info(f"Running on {device}")
 
     # Initialize Model
