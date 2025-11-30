@@ -25,11 +25,9 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
         batch_size=config.batch_size,
         shuffle=shuffle,
         collate_fn=collate,
-        # OPTIMIZATION: Use workers to prefetch data.
-        # Since we pre-tokenize, 4 workers is plenty to keep GPU saturated.
         num_workers=n_workers,
         pin_memory=True if torch.cuda.is_available() else False,
-        persistent_workers=(n_workers > 0)  # Keep workers alive between epochs only if workers exist
+        persistent_workers=(n_workers > 0)
     )
 
 
@@ -48,7 +46,6 @@ def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConf
             logger.info(f"Feature '{name}' is empty or disabled.")
             return
 
-        # Tokenize all (disable progress bar for speed if needed, usually fast enough)
         encodings = tokenizer(texts, truncation=False, padding=False)
         lengths = [len(ids) for ids in encodings['input_ids']]
         lengths_np = np.array(lengths)
@@ -60,24 +57,20 @@ def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConf
         logger.info(f"  Std: {np.std(lengths_np):.2f}")
         logger.info(f"  Median: {np.median(lengths_np)}")
 
-        # Percentage not truncated
         not_truncated = np.sum(lengths_np <= max_len)
         pct_kept = (not_truncated / len(lengths_np)) * 100
         logger.info(f"  ✅ Not Truncated (<={max_len}): {pct_kept:.2f}%")
 
-        # Percentiles
         p95 = np.percentile(lengths_np, 95)
         p99 = np.percentile(lengths_np, 99)
         logger.info(f"  95th Percentile: {p95}")
         logger.info(f"  99th Percentile: {p99}")
         print("")
 
-    # 1. Analyze Text
     logger.info("Analyzing 'bankRawDescription'...")
     all_texts = df[fields.text].fillna("").astype(str).tolist()
     report_stats("Text", all_texts, config.max_text_length)
 
-    # 2. Analyze Counter Party
     if config.use_counter_party and fields.counter_party in df.columns:
         logger.info("Analyzing 'counter_party'...")
         all_cps = df[fields.counter_party].fillna("").astype(str).tolist()
@@ -94,6 +87,9 @@ class MultiTransactionDataset(Dataset):
         self.config = config
         self.tokenizer = tokenizer
         self.fields = MultiFieldConfig()
+
+        # Work on a copy to avoid SettingWithCopy warnings on the input df
+        df = df.copy()
 
         # 1. Clean / Encode Labels
         if self.fields.patternCycle not in df.columns:
@@ -113,11 +109,15 @@ class MultiTransactionDataset(Dataset):
         df['direction'] = np.sign(df[self.fields.amount])
         df = df[df['direction'] != 0]
 
+        # --- KEY CHANGE: Preserve the original DataFrame Index ---
+        # We store it in a column so it survives the reset_index below.
+        # This allows us to map any sample back to the source row later.
+        df['_true_index'] = df.index
+
         # 2. Reset Index to align with Tensor indexing
         df = df.reset_index(drop=True)
 
-        # 3. OPTIMIZATION: Pre-tokenize everything!
-        # This moves CPU load from the training loop to initialization (one-time cost).
+        # 3. Pre-tokenize
         logger.info("Pre-tokenizing Description...")
         all_texts = df[self.fields.text].fillna("").astype(str).tolist()
         self.text_enc = tokenizer(
@@ -141,13 +141,10 @@ class MultiTransactionDataset(Dataset):
                     return_tensors='pt'
                 )
             else:
-                # Fallback if column missing but config enabled
                 logger.warning("CounterParty enabled but column missing. Creating empty placeholders.")
-                # We won't pre-tokenize empty strings, handled in collate or via check
-                self.config.use_counter_party = False  # Auto-disable
+                self.config.use_counter_party = False
 
         # 4. Grouping
-        # We store the groups as a list of DataFrames (views)
         self.groups = [group for _, group in df.groupby([self.fields.accountId, 'direction'])]
 
     def _encode_pattern_ids(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -168,25 +165,27 @@ class MultiTransactionDataset(Dataset):
         group = self.groups[idx]
         f = self.fields
 
-        # Truncation logic: Keep last N transactions if too long
+        # Truncation logic
         if len(group) > self.config.max_seq_len:
-            # We sort first then slice
             group = group.sort_values(f.date, ascending=True).iloc[-self.config.max_seq_len:]
         else:
             group = group.sort_values(f.date, ascending=True)
 
-        # OPTIMIZATION: Retrieve pre-tokenized tensors using dataframe index
-        indices = group.index.values
+        # Indices in the internal dataset (0..N)
+        internal_indices = group.index.values
 
-        # We return Tensors directly, not list of strings
-        text_input_ids = self.text_enc['input_ids'][indices]
-        text_attn_mask = self.text_enc['attention_mask'][indices]
+        # --- KEY CHANGE: Retrieve the REAL original indices ---
+        true_indices = group['_true_index'].values
+
+        # Text Tensors
+        text_input_ids = self.text_enc['input_ids'][internal_indices]
+        text_attn_mask = self.text_enc['attention_mask'][internal_indices]
 
         cp_input_ids = None
         cp_attn_mask = None
         if self.config.use_counter_party and self.cp_enc is not None:
-            cp_input_ids = self.cp_enc['input_ids'][indices]
-            cp_attn_mask = self.cp_enc['attention_mask'][indices]
+            cp_input_ids = self.cp_enc['input_ids'][internal_indices]
+            cp_attn_mask = self.cp_enc['attention_mask'][internal_indices]
 
         # Numeric Features
         amounts = group[f.amount].values.astype(np.float32)
@@ -220,31 +219,28 @@ class MultiTransactionDataset(Dataset):
             "calendar_features": calendar_feats,
             "pattern_ids": pattern_ids,
             "cycles": cycles,
-            "original_index": torch.tensor(indices, dtype=torch.long)
+            # We return the TRUE dataframe indices now
+            "original_index": torch.tensor(true_indices, dtype=torch.long)
         }
 
 
 def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
-    # Determine mode: Training (Tensors) or Inference (Strings from prepare_batch_data)
-    # Check first item
     is_pre_tokenized = 'text_ids' in batch[0]
-
     batch_size = len(batch)
 
     if is_pre_tokenized:
         account_lengths = [len(item['text_ids']) for item in batch]
     else:
-        # Legacy/Inference mode
         account_lengths = [len(item['texts']) for item in batch]
 
     max_len_in_batch = max(account_lengths)
 
-    # 1. Handle Text
+    # 1. Text
     seq_len_text = config.max_text_length
     b_input_ids = torch.zeros((batch_size, max_len_in_batch, seq_len_text), dtype=torch.long)
     b_attn_mask = torch.zeros((batch_size, max_len_in_batch, seq_len_text), dtype=torch.long)
 
-    # 2. Handle CP
+    # 2. CP
     b_cp_ids = None
     b_cp_mask = None
     seq_len_cp = config.max_cp_length
@@ -253,7 +249,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         b_cp_ids = torch.zeros((batch_size, max_len_in_batch, seq_len_cp), dtype=torch.long)
         b_cp_mask = torch.zeros((batch_size, max_len_in_batch, seq_len_cp), dtype=torch.long)
 
-    # 3. Handle Other Tensors
+    # 3. Other Tensors
     b_amounts = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     b_days = torch.zeros((batch_size, max_len_in_batch, 1), dtype=torch.float32)
     b_calendar = torch.zeros((batch_size, max_len_in_batch, 4), dtype=torch.float32)
@@ -262,59 +258,42 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
     b_pattern_ids = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)
     padding_mask = torch.zeros((batch_size, max_len_in_batch), dtype=torch.bool)
 
-    # --- INFERENCE SUPPORT (Lazy Tokenization) ---
-    if not is_pre_tokenized:
-        all_texts = [t for item in batch for t in item['texts']]
-        enc_text = tokenizer(
-            all_texts,
-            padding='max_length',  # Align with training logic
-            truncation=True,
-            max_length=config.max_text_length,
-            return_tensors="pt"
-        )
-
-        if config.use_counter_party:
-            all_cps = [t for item in batch for t in item['cps']]
-            enc_cp = tokenizer(
-                all_cps,
-                padding='max_length',
-                truncation=True,
-                max_length=config.max_cp_length,
-                return_tensors="pt"
-            )
-
-    # Loop to fill batch tensors
-    current_idx_inf = 0  # For inference flattened list indexing
+    # Init with -1, though real indices should be >= 0
     b_original_index = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)
 
-    for i, (item, length) in enumerate(zip(batch, account_lengths)):
+    if not is_pre_tokenized:
+        all_texts = [t for item in batch for t in item['texts']]
+        enc_text = tokenizer(all_texts, padding='max_length', truncation=True, max_length=config.max_text_length,
+                             return_tensors="pt")
+        if config.use_counter_party:
+            all_cps = [t for item in batch for t in item['cps']]
+            enc_cp = tokenizer(all_cps, padding='max_length', truncation=True, max_length=config.max_cp_length,
+                               return_tensors="pt")
 
+    current_idx_inf = 0
+
+    for i, (item, length) in enumerate(zip(batch, account_lengths)):
         if is_pre_tokenized:
-            # FAST PATH: Copy pre-computed tensors
             b_input_ids[i, :length] = item['text_ids']
             b_attn_mask[i, :length] = item['text_mask']
-
             if config.use_counter_party and item['cp_ids'] is not None:
                 b_cp_ids[i, :length] = item['cp_ids']
                 b_cp_mask[i, :length] = item['cp_mask']
         else:
-            # SLOW PATH: Copy from on-the-fly tokenization
             b_input_ids[i, :length] = enc_text['input_ids'][current_idx_inf: current_idx_inf + length]
             b_attn_mask[i, :length] = enc_text['attention_mask'][current_idx_inf: current_idx_inf + length]
-
             if config.use_counter_party:
                 b_cp_ids[i, :length] = enc_cp['input_ids'][current_idx_inf: current_idx_inf + length]
                 b_cp_mask[i, :length] = enc_cp['attention_mask'][current_idx_inf: current_idx_inf + length]
-
             current_idx_inf += length
 
-        # Scalars (Same for both paths)
         b_amounts[i, :length, 0] = torch.tensor(item['amounts'])
         b_days[i, :length, 0] = torch.tensor(item['days'])
         b_calendar[i, :length, :] = torch.tensor(item['calendar_features'])
         b_cycles[i, :length] = torch.tensor(item['cycles'])
-        b_original_index[i, :length] = item['original_index']  # Store indices
 
+        # --- KEY CHANGE: Include original_index in batch ---
+        b_original_index[i, :length] = item['original_index']
 
         p_ids = item['pattern_ids']
         b_pattern_ids[i, :length] = torch.tensor(p_ids)
@@ -335,7 +314,8 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         "adjacency_target": b_adjacency,
         "cycle_target": b_cycles,
         "pattern_ids": b_pattern_ids,
-        "padding_mask": padding_mask
+        "padding_mask": padding_mask,
+        "original_index": b_original_index  # <--- EXPOSED
     }
 
     if config.use_counter_party:

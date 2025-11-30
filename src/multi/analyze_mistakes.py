@@ -62,6 +62,8 @@ def main():
     else:
         device = torch.device(args.device)
 
+    config.device = device
+
     logger.info(f"Running on {device}")
 
     # Initialize Model
@@ -89,14 +91,15 @@ def main():
     logger.info("=" * 60)
     logger.info(" Analyzing VALIDATION Set Mistakes")
     logger.info("=" * 60)
-    analyze_classification_mistakes(model, val_loader, config, num_examples=args.examples)
-    analyze_adjacency_mistakes(model, val_loader, config, num_examples=args.examples)
+    # Pass BOTH the dataframe AND the loader
+    analyze_classification_mistakes(model, val_df, val_loader, config, num_examples=args.examples)
+    analyze_adjacency_mistakes(model, val_df, val_loader, config, num_examples=args.examples)
 
     logger.info("\n" + "=" * 60)
     logger.info(" Analyzing TEST Set Mistakes")
     logger.info("=" * 60)
-    analyze_classification_mistakes(model, test_loader, config, num_examples=args.examples)
-    analyze_adjacency_mistakes(model, test_loader, config, num_examples=args.examples)
+    analyze_classification_mistakes(model, test_df, test_loader, config, num_examples=args.examples)
+    analyze_adjacency_mistakes(model, test_df, test_loader, config, num_examples=args.examples)
 
 
 if __name__ == "__main__":

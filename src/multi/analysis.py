@@ -1,17 +1,19 @@
 import logging
 import torch
 import numpy as np
+import pandas as pd
+from multi.config import MultiFieldConfig
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_classification_mistakes(model, loader, config, num_examples=5):
+def analyze_classification_mistakes(model, df, loader, config, num_examples=5):
     """
-    Analyzes 'isRecurring' classification errors specifically.
-    Accepts a DataLoader to avoid re-tokenizing data.
+    Analyzes 'isRecurring' classification errors using direct index lookup.
     """
     logger.info("Running Cycle/Classification Mistake Analysis...")
 
+    fc = MultiFieldConfig()
     model.eval()
     device = config.device
 
@@ -29,15 +31,11 @@ def analyze_classification_mistakes(model, loader, config, num_examples=5):
             preds = torch.argmax(cycle_logits, dim=-1).cpu().numpy()
             targets = batch_gpu['cycle_target'].cpu().numpy()
             mask_np = batch_gpu['padding_mask'].cpu().numpy()
-
-            # Probs
             probs = torch.softmax(cycle_logits, dim=-1)
-            max_probs, _ = torch.max(probs, dim=-1)
-            probs_np = max_probs.cpu().numpy()
+            max_probs, _ = torch.max(probs, dim=-1).cpu().numpy()
 
-            # Data for reporting
-            amounts = batch['amounts'].numpy()  # Log amounts
-            days = batch['days'].numpy()
+            # Retrieve Indices from batch
+            indices_np = batch['original_index'].numpy()
 
             batch_size, seq_len = preds.shape
 
@@ -47,12 +45,7 @@ def analyze_classification_mistakes(model, loader, config, num_examples=5):
 
                     pred_cls = preds[b, s]
                     true_cls = targets[b, s]
-                    prob = probs_np[b, s]
-
-                    # Reconstruct Amount (Approx) from Log-Abs
-                    log_amt = amounts[b, s, 0]
-                    approx_amt = np.exp(log_amt) - 1
-                    day_val = days[b, s, 0]
+                    prob = max_probs[b, s]
 
                     pred_is_rec = pred_cls > 0
                     true_is_rec = true_cls > 0
@@ -60,18 +53,28 @@ def analyze_classification_mistakes(model, loader, config, num_examples=5):
                     if pred_is_rec == true_is_rec:
                         continue
 
-                    item = {
-                        'amt': approx_amt,
-                        'day': day_val,
-                        'prob': prob,
-                        'pred_cycle': pred_cls,
-                        'true_cycle': true_cls
-                    }
+                    # --- DIRECT LOOKUP ---
+                    true_idx = indices_np[b, s]
+                    try:
+                        row = df.loc[true_idx]
 
-                    if pred_is_rec and not true_is_rec:
-                        fps.append(item)
-                    elif not pred_is_rec and true_is_rec:
-                        fns.append(item)
+                        item = {
+                            'txt': row[fc.text],
+                            'amt': row[fc.amount],
+                            'date': row[fc.date],
+                            'prob': prob,
+                            'pred_cycle': pred_cls,
+                            'true_cycle': true_cls
+                        }
+
+                        if pred_is_rec and not true_is_rec:
+                            fps.append(item)
+                        elif not pred_is_rec and true_is_rec:
+                            fns.append(item)
+
+                    except KeyError:
+                        logger.warning(f"Index {true_idx} not found in DataFrame.")
+                        continue
 
     # Log Results
     logger.info("-" * 60)
@@ -81,23 +84,26 @@ def analyze_classification_mistakes(model, loader, config, num_examples=5):
     if fps_sorted:
         logger.info("\n>>> Top False Positives (Predicted Recurring, Actually Noise):")
         for x in fps_sorted:
-            logger.info(f"  [{x['prob']:.2f}] Amt:~${x['amt']:.2f} Day:{x['day']:.0f} (Cycle Pred: {x['pred_cycle']})")
+            txt = (str(x['txt'])[:40] + '..') if len(str(x['txt'])) > 40 else str(x['txt'])
+            logger.info(f"  [{x['prob']:.2f}] ${x['amt']:<6.2f} {x['date']} | {txt}")
 
     fns_sorted = sorted(fns, key=lambda x: x['prob'], reverse=True)[:num_examples]
     if fns_sorted:
         logger.info("\n>>> Top False Negatives (Predicted Noise, Actually Recurring):")
         for x in fns_sorted:
-            logger.info(f"  [{x['prob']:.2f}] Amt:~${x['amt']:.2f} Day:{x['day']:.0f} (TrueCycle: {x['true_cycle']})")
+            txt = (str(x['txt'])[:40] + '..') if len(str(x['txt'])) > 40 else str(x['txt'])
+            logger.info(f"  [{x['prob']:.2f}] ${x['amt']:<6.2f} {x['date']} | {txt} (True: {x['true_cycle']})")
 
     logger.info("-" * 60)
 
 
-def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
+def analyze_adjacency_mistakes(model, df, loader, config, num_examples=5):
     """
-    Runs inference and logs Adjacency False Positives/Negatives.
+    Runs inference and logs Adjacency False Positives/Negatives using direct index lookup.
     """
     logger.info("Running Adjacency Mistake Analysis...")
 
+    fc = MultiFieldConfig()
     model.eval()
     device = config.device
 
@@ -115,13 +121,10 @@ def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
             preds = (probs > 0.5).float()
             targets = batch_gpu['adjacency_target']
 
-            amounts = batch['amounts'].numpy()
-
             # Create masks
             b_size, s_len, _ = probs.shape
             triu_mask = torch.triu(torch.ones(s_len, s_len, device=device), diagonal=1).bool()
             triu_mask = triu_mask.unsqueeze(0).expand(b_size, -1, -1)
-
             valid_mask = batch_gpu['padding_mask'].unsqueeze(1) & batch_gpu['padding_mask'].unsqueeze(2)
             final_mask = triu_mask & valid_mask
 
@@ -139,6 +142,9 @@ def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
             probs_np = probs.detach().cpu().numpy()
             targets_np = targets.cpu().numpy()
 
+            # Retrieve Indices from batch
+            indices_np = batch['original_index'].numpy()
+
             for k in range(len(b_indices)):
                 b, i, j = b_indices[k], i_indices[k], j_indices[k]
 
@@ -146,19 +152,27 @@ def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
                 truth = int(targets_np[b, i, j])
                 pred = 1 if prob > 0.5 else 0
 
-                amt1 = np.exp(amounts[b, i, 0]) - 1
-                amt2 = np.exp(amounts[b, j, 0]) - 1
+                # --- DIRECT LOOKUP ---
+                idx_i = indices_np[b, i]
+                idx_j = indices_np[b, j]
 
-                item = {
-                    'prob': prob,
-                    'amt1': amt1,
-                    'amt2': amt2
-                }
+                try:
+                    row_i = df.loc[idx_i]
+                    row_j = df.loc[idx_j]
 
-                if pred == 1 and truth == 0:
-                    fps.append(item)
-                elif pred == 0 and truth == 1:
-                    fns.append(item)
+                    item = {
+                        'prob': prob,
+                        'txt1': row_i[fc.text], 'amt1': row_i[fc.amount],
+                        'txt2': row_j[fc.text], 'amt2': row_j[fc.amount]
+                    }
+
+                    if pred == 1 and truth == 0:
+                        fps.append(item)
+                    elif pred == 0 and truth == 1:
+                        fns.append(item)
+
+                except KeyError:
+                    continue
 
     logger.info("-" * 50)
     logger.info(f"ADJACENCY MISTAKES (Found {len(fps)} FPs, {len(fns)} FNs)")
@@ -167,12 +181,16 @@ def analyze_adjacency_mistakes(model, loader, config, num_examples=5):
     if fps_sorted:
         logger.info("\n>>> Top Adjacency FPs (Model thought these were same):")
         for x in fps_sorted:
-            logger.info(f"  [{x['prob']:.4f}] Amt1:~${x['amt1']:.2f} <--> Amt2:~${x['amt2']:.2f}")
+            t1 = (str(x['txt1'])[:25] + '..') if len(str(x['txt1'])) > 25 else str(x['txt1'])
+            t2 = (str(x['txt2'])[:25] + '..') if len(str(x['txt2'])) > 25 else str(x['txt2'])
+            logger.info(f"  [{x['prob']:.4f}] {t1} (${x['amt1']}) <--> {t2} (${x['amt2']})")
 
     fns_sorted = sorted(fns, key=lambda z: z['prob'])[:num_examples]
     if fns_sorted:
         logger.info("\n>>> Top Adjacency FNs (Model missed these):")
         for x in fns_sorted:
-            logger.info(f"  [{x['prob']:.4f}] Amt1:~${x['amt1']:.2f} <--> Amt2:~${x['amt2']:.2f}")
+            t1 = (str(x['txt1'])[:25] + '..') if len(str(x['txt1'])) > 25 else str(x['txt1'])
+            t2 = (str(x['txt2'])[:25] + '..') if len(str(x['txt2'])) > 25 else str(x['txt2'])
+            logger.info(f"  [{x['prob']:.4f}] {t1} (${x['amt1']}) <--> {t2} (${x['amt2']})")
 
     logger.info("-" * 50)
