@@ -8,6 +8,20 @@ from multi.config import MultiExpConfig
 logger = logging.getLogger(__name__)
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
 class TimeEncoding(nn.Module):
     """
     Sinusoidal Positional Encoding for time (days).
@@ -111,7 +125,7 @@ class TransactionEncoder(nn.Module):
                     potential_layers = getattr(base_model, attr)
                     # Check if it's iterable/ModuleList
                     if isinstance(potential_layers, (nn.ModuleList, nn.Sequential)) or (
-                    hasattr(potential_layers, 'layer')):
+                            hasattr(potential_layers, 'layer')):
                         # Handle nested encoder.layer case (BERT)
                         layers = potential_layers.layer if hasattr(potential_layers, 'layer') else potential_layers
                         break
@@ -127,7 +141,6 @@ class TransactionEncoder(nn.Module):
 
         # Attach strategy to embedder for use in forward pass
         return embedder, pooling_strategy
-
 
     def __init__(self, config: MultiExpConfig):
         super().__init__()
@@ -148,7 +161,14 @@ class TransactionEncoder(nn.Module):
         self.amount_proj = nn.Linear(1, config.hidden_dim)
         self.time_encoder = TimeEncoding(config.hidden_dim, max_len=config.time_encoding_max_len)
         self.calendar_proj = nn.Linear(4, config.hidden_dim)
-        self.layer_norm = nn.LayerNorm(config.hidden_dim)
+
+        # --- Normalization Strategy ---
+        if config.normalization_type == 'rms_norm':
+            self.layer_norm = RMSNorm(config.hidden_dim)
+        elif config.normalization_type == 'layer_norm':
+            self.layer_norm = nn.LayerNorm(config.hidden_dim)
+        else:
+            self.layer_norm = nn.Identity()
 
     def _encode_text_stream(self, input_ids, attention_mask, projector):
         b, n, seq_len = input_ids.shape
@@ -210,6 +230,10 @@ class TransactionTransformer(nn.Module):
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.encoder = TransactionEncoder(config)
+
+        # Configure Norm for Transformer Layer too?
+        # Standard nn.TransformerEncoderLayer uses LayerNorm internally.
+        # We can stick to standard there, but our custom fused embedding uses the config.
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.hidden_dim,
