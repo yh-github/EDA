@@ -43,54 +43,98 @@ class TimeEncoding(nn.Module):
 class TransactionEncoder(nn.Module):
 
     @staticmethod
+    def _pool_mean(last_hidden_state, attention_mask):
+        """Standard Mean Pooling for BERT/RoBERTa/MPNET"""
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+        sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        return sum_embeddings / sum_mask
+
+    @staticmethod
+    def _pool_last_token(last_hidden_state, attention_mask):
+        """Last Token Pooling for GPT/Llama (Causal Models)"""
+        # attention_mask is 1 for real tokens, 0 for pad.
+        # sequence_length = sum(mask)
+        # index = length - 1
+        seq_lengths = attention_mask.sum(dim=1) - 1
+        seq_lengths = seq_lengths.clamp(min=0)
+
+        # Gather [Batch, Hidden]
+        batch_indices = torch.arange(last_hidden_state.size(0), device=last_hidden_state.device)
+        return last_hidden_state[batch_indices, seq_lengths]
+
+    @staticmethod
+    def inspect_and_configure_model(model_name: str):
+        """
+        Setup-Time Check:
+        1. Loads the config to determine architecture type.
+        2. Returns the appropriate unfreezing strategy and pooling method.
+        """
+        from transformers import AutoConfig
+
+        try:
+            config = AutoConfig.from_pretrained(model_name)
+        except OSError:
+            # Fallback for local paths or testing
+            return "unknown", "mean"
+
+        arch = config.architectures[0].lower() if config.architectures else ""
+
+        # Strategy Selection
+        if any(x in arch for x in ["gpt", "opt", "bloom", "llama", "causal"]):
+            return "decoder", TransactionEncoder._pool_last_token
+        elif any(x in arch for x in ["t5", "bart"]):
+            return "encoder_decoder", TransactionEncoder._pool_mean
+        else:
+            return "encoder", TransactionEncoder._pool_mean  # Default BERT/RoBERTa behavior
+
+    @staticmethod
     def get_embedder(config: MultiExpConfig):
         embedder = AutoModel.from_pretrained(config.text_encoder_model)
 
-        # Logic to handle freezing/unfreezing
+        # --- 1. SETUP TIME CHECK ---
+        model_type, pooling_strategy = TransactionEncoder.inspect_and_configure_model(config.text_encoder_model)
+        logger.info(f"Model Architecture detected: {model_type}. Using pooling: {pooling_strategy}")
+
+        # --- 2. ROBUST UNFREEZING ---
         for param in embedder.parameters():
             param.requires_grad = False
 
-        if config.unfreeze_last_n_layers == 0:
-            return embedder
+        if config.unfreeze_last_n_layers > 0:
+            # Generic way to find layers: look for the main stack
+            # Most HF models store layers in a ModuleList named 'layer', 'layers', 'h', or 'block'
+            base_model = getattr(embedder, embedder.base_model_prefix, embedder)
 
-        # config.unfreeze_last_n_layers > 0:
-        # Freeze everything first (Redundant but safe)
-        for param in embedder.parameters():
-            param.requires_grad = False
+            layers = None
+            for attr in ['encoder', 'decoder', 'transformer', 'layers', 'h', 'blocks']:
+                if hasattr(base_model, attr):
+                    potential_layers = getattr(base_model, attr)
+                    # Check if it's iterable/ModuleList
+                    if isinstance(potential_layers, (nn.ModuleList, nn.Sequential)) or (
+                    hasattr(potential_layers, 'layer')):
+                        # Handle nested encoder.layer case (BERT)
+                        layers = potential_layers.layer if hasattr(potential_layers, 'layer') else potential_layers
+                        break
 
-        # Unfreeze the specific top layers (Encoder + Pooler)
-        if hasattr(embedder, 'encoder') and hasattr(embedder.encoder, 'layer'):
-            # BERT / MPNET / ALBERT
-            encoder_layers = embedder.encoder.layer
-        elif hasattr(embedder, 'transformer') and hasattr(embedder.transformer, 'layer'):
-            # DistilBERT
-            encoder_layers = embedder.transformer.layer
-        else:
-            # Fallback: Just print warning and skip specific layer unfreezing
-            print("Warning: Could not locate encoder layers for unfreezing (architecture unknown). Keeping frozen.")
-            encoder_layers = []
+            if layers is not None:
+                logger.info(f"Unfreezing last {config.unfreeze_last_n_layers} layers of {len(layers)} found.")
+                for layer in layers[-config.unfreeze_last_n_layers:]:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+            else:
+                logger.warning(
+                    f"Could not automatically locate layers for {config.text_encoder_model}. Keeping fully frozen.")
 
-        for layer in encoder_layers[-config.unfreeze_last_n_layers:]:
-            for param in layer.parameters():
-                param.requires_grad = True
+        # Attach strategy to embedder for use in forward pass
+        return embedder, pooling_strategy
 
-        # Always unfreeze the pooler if it exists
-        if hasattr(embedder, 'pooler') and embedder.pooler is not None:
-            for param in embedder.pooler.parameters():
-                param.requires_grad = True
-
-        try:
-            embedder.gradient_checkpointing_enable()
-        except ValueError as ve:
-            logger.warning(f'{str(ve)}')
-        return embedder
 
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.use_cp = config.use_counter_party
         self.chunk_size = config.chunk_size
 
-        self.embedder = self.get_embedder(config)
+        self.embedder, self.pool_text_fn = self.get_embedder(config)
 
         text_dim = self.embedder.config.hidden_size
 
@@ -107,9 +151,6 @@ class TransactionEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(config.hidden_dim)
 
     def _encode_text_stream(self, input_ids, attention_mask, projector):
-        """
-        Encodes text in chunks to save memory.
-        """
         b, n, seq_len = input_ids.shape
         total_seqs = b * n
 
@@ -123,12 +164,12 @@ class TransactionEncoder(nn.Module):
             chunk_ids = flat_ids[i: i + chunk_size]
             chunk_mask = flat_mask[i: i + chunk_size]
 
-            # Forward pass for chunk
-            bert_out = self.embedder(chunk_ids, attention_mask=chunk_mask).last_hidden_state[:, 0, :]
-            proj_out = projector(bert_out)
-            embeddings.append(proj_out)
+            outputs = self.embedder(chunk_ids, attention_mask=chunk_mask)
 
-        # Concatenate and reshape
+            pooled = self.pool_text_fn(outputs.last_hidden_state, chunk_mask)
+
+            embeddings.append(projector(pooled))
+
         full_embedding = torch.cat(embeddings, dim=0)
         return full_embedding.view(b, n, -1)
 

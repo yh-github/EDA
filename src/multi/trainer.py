@@ -5,6 +5,9 @@ from sklearn.metrics import f1_score, precision_score, recall_score, average_pre
 import logging
 import torch.nn.functional as fnn
 import os
+
+from torch.optim.lr_scheduler import LRScheduler
+
 from multi.config import MultiExpConfig
 
 # Configure logging
@@ -16,15 +19,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.75, gamma=2.0, reduction='none'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, inputs, targets):
+        bce_loss = self.bce(inputs, targets)
+        pt = torch.exp(-bce_loss)
+
+        # Alpha weighting
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class SupervisedContrastiveLoss(nn.Module):
     """
-    Supervised Contrastive Learning Loss.
-    Pulls embeddings with the same patternId together, pushes others apart.
+    Supervised Contrastive Learning Loss with Hard Negative Mining.
     """
 
-    def __init__(self, temperature=0.07):
+    def __init__(self, temperature=0.07, hard_negative_weight=1.0):
         super().__init__()
         self.temperature = temperature
+        self.hard_negative_weight = hard_negative_weight
 
     def forward(self, features: torch.Tensor, labels: torch.Tensor, padding_mask: torch.Tensor):
         device = features.device
@@ -32,48 +60,60 @@ class SupervisedContrastiveLoss(nn.Module):
 
         features = fnn.normalize(features, dim=-1)
 
-        total_loss = 0.0
-        n_valid_batches = 0
+        # [B, S, S] - Compute similarity for entire batch at once
+        sim_matrix = torch.bmm(features, features.transpose(1, 2)) / self.temperature
 
-        for i in range(batch_size):
-            valid_mask = padding_mask[i]
-            feat = features[i][valid_mask]
-            lbl = labels[i][valid_mask]
+        # Mask out self-contrast (diagonal) and padding
+        # mask_2d: True if both i and j are valid tokens
+        mask_2d = padding_mask.unsqueeze(1) & padding_mask.unsqueeze(2)
+        # Identity matrix for diagonal masking
+        eye = torch.eye(seq_len, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+        valid_mask = mask_2d & (eye == 0)
 
-            if len(lbl) < 2:
-                continue
+        # Numerical stability (LogSumExp trick)
+        sim_matrix_max, _ = torch.max(sim_matrix, dim=2, keepdim=True)
+        sim_matrix = sim_matrix - sim_matrix_max.detach()
 
-            sim_matrix = torch.matmul(feat, feat.T) / self.temperature
-            sim_matrix_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-            sim_matrix = sim_matrix - sim_matrix_max.detach()
+        # [B, S, S] -> 1 if labels[i] == labels[j]
+        label_mask = torch.eq(labels.unsqueeze(2), labels.unsqueeze(1)).float()
 
-            label_mask = torch.eq(lbl.unsqueeze(1), lbl.unsqueeze(0)).float()
+        # Filter noise (-1)
+        not_noise_mask = (labels != -1).float().unsqueeze(2)
 
-            logits_mask = torch.scatter(
-                torch.ones_like(label_mask),
-                1,
-                torch.arange(len(lbl)).view(-1, 1).to(device),
-                0
-            )
+        # Final Positive Mask: Same Label AND Valid AND Not Diagonal AND Not Noise
+        final_mask = label_mask * valid_mask.float() * not_noise_mask
 
-            not_noise = (lbl != -1).float().unsqueeze(1)
-            label_mask = label_mask * logits_mask * not_noise
+        # Denominator: Sum exp(sim) over all valid j != i
+        # Hard Negative Mining: Upweight negatives in the denominator
+        exp_sim = torch.exp(sim_matrix) * valid_mask.float()
 
-            has_positives = label_mask.sum(1) > 0
-            if has_positives.sum() == 0:
-                continue
+        if self.hard_negative_weight != 1.0:
+            # Negatives are valid items that are NOT positives (label_mask is 1 for pos)
+            # Note: label_mask includes self-matches if we didn't mask diagonal, but valid_mask handles diagonal.
+            # So valid negatives = valid_mask & (label_mask == 0)
+            negative_mask = valid_mask & (label_mask == 0)
 
-            exp_sim = torch.exp(sim_matrix) * logits_mask
-            log_prob = sim_matrix - torch.log(exp_sim.sum(1, keepdim=True) + 1e-6)
+            # Apply weight to negatives
+            # We multiply the exp_sim term by weight for negatives.
+            # This makes the denominator larger if negatives have high similarity,
+            # increasing the loss.
+            weight_matrix = torch.ones_like(sim_matrix)
+            weight_matrix[negative_mask.bool()] = self.hard_negative_weight
+            exp_sim = exp_sim * weight_matrix
 
-            mean_log_prob_pos = (label_mask * log_prob).sum(1) / (label_mask.sum(1) + 1e-6)
+        log_prob = sim_matrix - torch.log(exp_sim.sum(2, keepdim=True) + 1e-6)
 
-            loss = - mean_log_prob_pos[has_positives].mean()
-            total_loss += loss
-            n_valid_batches += 1
+        # Mean log prob of positives
+        sum_log_prob_pos = (final_mask * log_prob).sum(2)
+        num_pos = final_mask.sum(2)
 
-        if n_valid_batches > 0:
-            return total_loss / n_valid_batches
+        mean_log_prob_pos = sum_log_prob_pos / (num_pos + 1e-6)
+
+        # Loss is -mean over anchors that have positives
+        has_positives = num_pos > 0
+        if has_positives.sum() > 0:
+            return -mean_log_prob_pos[has_positives].mean()
+
         return torch.tensor(0.0, device=device, requires_grad=True)
 
 
@@ -83,25 +123,40 @@ class MultiTrainer:
         self.config = config
         self.optimizer = optim.AdamW(self.model.parameters(), lr=config.learning_rate)
 
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=config.scheduler_patience
-        )
+        def get_scheduler()->LRScheduler:
+            if config.scheduler_type == 'cosine':
+                return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                    self.optimizer,
+                    T_0=config.scheduler_t0,
+                    T_mult=config.scheduler_t_mult
+                )
+            else:
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    self.optimizer, mode='min', factor=0.5, patience=config.scheduler_patience
+                )
+
+        self.scheduler = get_scheduler()
 
         if hasattr(torch.amp, 'GradScaler'):
             self.scaler = torch.amp.GradScaler('cuda')
         else:
             self.scaler = torch.cuda.amp.GradScaler()
 
-        if pos_weight:
-            weight_tensor = torch.tensor([pos_weight]).to(config.device)
-            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
+        if config.use_focal_loss:
+            self.adj_criterion = FocalLoss(alpha=config.focal_alpha, gamma=config.focal_gamma)
         else:
-            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none')
+            # Use config pos_weight if available, otherwise default or argument
+            pw = pos_weight if pos_weight is not None else getattr(config, 'pos_weight', 2.5)
+            weight_tensor = torch.tensor([pw]).to(config.device)
+            self.adj_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
 
         self.cycle_criterion = nn.CrossEntropyLoss(reduction='none')
 
         if config.use_contrastive_loss:
-            self.contrastive_criterion = SupervisedContrastiveLoss(temperature=config.contrastive_temperature)
+            self.contrastive_criterion = SupervisedContrastiveLoss(
+                temperature=config.contrastive_temperature,
+                hard_negative_weight=config.hard_negative_weight
+            )
 
         # Signal handling injection point
         self.stop_requested = False
@@ -251,6 +306,13 @@ class MultiTrainer:
                 self.scaler.scale(loss).backward()
                 batches_since_step += 1
 
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    logger.warning(f"⚠️ NaN loss detected at Epoch {epoch_idx}, Batch {batch_idx}. Skipping step.")
+                    self.optimizer.zero_grad()
+                    batches_since_step = 0 # Reset accumulation
+                    continue
+
             except torch.cuda.OutOfMemoryError:
                 self.optimizer.zero_grad()
                 torch.cuda.empty_cache()
@@ -273,6 +335,12 @@ class MultiTrainer:
 
             # Accumulation Step
             if batches_since_step >= accumulation_steps:
+                # Unscale before clipping
+                self.scaler.unscale_(self.optimizer)
+
+                # Gradient Clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
@@ -287,6 +355,8 @@ class MultiTrainer:
 
         # Handle remaining gradients
         if batches_since_step > 0 and not self.stop_requested:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
@@ -351,7 +421,11 @@ class MultiTrainer:
             pr_auc = 0.0
             roc_auc = 0.5
 
-        self.scheduler.step(avg_val_loss)
+        if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            self.scheduler.step(avg_val_loss)
+        else:
+            # Cosine scheduler steps every epoch/batch usually, but here we step per epoch
+            self.scheduler.step()
 
         return {
             "val_loss": avg_val_loss,

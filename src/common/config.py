@@ -46,6 +46,8 @@ class EmbModel(StrEnum):
     MPNET = 'sentence-transformers/all-mpnet-base-v2'
     FT_MPNET1 = './ft_models/fine_tuned_mpnet/'
     BERT_TRAN = "kuro-08/bert-transaction-categorization"
+    FinE5 = "FinanceMTEB/FinE5"
+    GTE_BASE = "thenlper/gte-base"
 
 
 class ClusteringStrategy(StrEnum):
