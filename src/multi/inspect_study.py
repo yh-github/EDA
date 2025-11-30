@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("inspector")
 
 
-def inspect_study(db_path, study_name=None):
+def inspect_study(db_path, study_name=None, h=2):
     storage_url = f"sqlite:///{db_path}"
 
     # List all studies if name not provided
@@ -24,8 +24,8 @@ def inspect_study(db_path, study_name=None):
 
         for s in summaries:
             # Check for stale "running" studies
-            # If a study has no trials but is older than 2 hours, it's likely abandoned/stale
-            if not s.best_trial and s.datetime_start and (now - s.datetime_start) > timedelta(hours=1):
+            # If a study has no trials but is older than h hours, it's likely abandoned/stale
+            if not s.best_trial and s.datetime_start and (now - s.datetime_start) > timedelta(hours=h):
                 skip.append(s.study_name)
                 continue
 
@@ -40,7 +40,7 @@ def inspect_study(db_path, study_name=None):
             print(x)
 
         if skip:
-            print(f"\n[Skipped {len(skip)} empty/stale studies older than 2 hours]")
+            print(f"\n[Skipped {len(skip)} empty/stale studies older than {h} hours]")
 
         if not summaries:
             return
@@ -97,6 +97,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inspect Optuna DB")
     parser.add_argument("--db_path", help="Path to tuning.db", default="checkpoints/multi/tuning.db")
     parser.add_argument("--study", help="Specific study name to inspect", default=None)
+    parser.add_argument("--grace", type=float, help="Hours grace period", default=2)
 
     args = parser.parse_args()
-    inspect_study(args.db_path, args.study)
+    inspect_study(args.db_path, args.study, args.grace)
