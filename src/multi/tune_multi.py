@@ -330,7 +330,7 @@ def main():
     else:
         study_name = args.study_name
 
-    logger.info(f"Using Study Name: {study_name} {get_git_info()}")
+    logger.info(f"Using Study Name: {study_name} {get_git_info()} PID={os.getpid()}")
 
     study = optuna.create_study(
         study_name=study_name,
