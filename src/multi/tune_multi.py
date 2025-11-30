@@ -116,8 +116,18 @@ class TuningManager:
             trial.study.stop()
             raise optuna.TrialPruned()
 
-        # Sample Hyperparameters
-        lr = trial.suggest_float("learning_rate", self.args.learning_rate/5, self.args.learning_rate*5, log=True)
+        # --- Sample Hyperparameters ---
+
+        # 1. Learning Rate: User's logic (Dynamic centering)
+        lr = trial.suggest_float("learning_rate", self.args.learning_rate / 5, self.args.learning_rate * 5, log=True)
+
+        # 2. Unfreeze Layers: Tune this instead of hardcoding, to find the "Goldilocks" zone
+        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
+
+        # 3. Normalization Strategy (New)
+        norm_type = trial.suggest_categorical("normalization_type", ["layer_norm", "rms_norm"])
+
+        # 4. Standard architecture params
         dropout = trial.suggest_float("dropout", 0.2, 0.4)
         num_layers = trial.suggest_int("num_layers", 3, 6)
         num_heads = trial.suggest_categorical("num_heads", [4, 8])
@@ -126,7 +136,7 @@ class TuningManager:
 
         defaults = MultiExpConfig()
         # noinspection PyTypeChecker,PyTypeHints
-        emb_str:str = EmbModel[self.args.text_emb].value
+        emb_str: str = EmbModel[self.args.text_emb].value
 
         config = MultiExpConfig(
             learning_rate=lr,
@@ -135,14 +145,18 @@ class TuningManager:
             num_heads=num_heads,
             hidden_dim=hidden_dim,
             contrastive_loss_weight=contrastive_loss_weight,
+
+            # Merged Params
+            unfreeze_last_n_layers=unfreeze,
+            normalization_type=norm_type,
+
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
             text_encoder_model=emb_str,
             early_stopping_patience=defaults.early_stopping_patience,
-            use_counter_party=self.data_determined_use_cp,
-            unfreeze_last_n_layers=self.args.unfreeze_last_n_layers
+            use_counter_party=self.data_determined_use_cp
         )
 
         set_global_seed(config.random_state)
