@@ -28,6 +28,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("hyper_tune")
 
 
+# TODO create experiment files with only the 'suggested' parameters
+# TODO  n_startup_trials
+
 class GracefulKiller:
     def __init__(self):
         self.kill_now = False
