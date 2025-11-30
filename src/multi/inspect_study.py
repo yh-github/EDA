@@ -18,9 +18,18 @@ def inspect_study(db_path, study_name=None):
             return
 
         print(f"Found {len(summaries)} studies in {db_path}:")
+        skip = []
+        ok = []
         for s in summaries:
-            best_val = s.best_trial.value if s.best_trial else "N/A"
-            print(f"  - {s.study_name} (Trials: {s.n_trials}, Best: {best_val})")
+            if s.best_trial:
+                best_val = s.best_trial.value
+                ok.append(f"  - {s.study_name} (Trials: {s.n_trials}, Best: {best_val})")
+            else:
+                skip.append(s.study_name)
+
+        print("skipped: ", skip)
+        for x in ok:
+            print(x)
 
         if not summaries:
             return
@@ -67,7 +76,7 @@ def inspect_study(db_path, study_name=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inspect Optuna DB")
-    parser.add_argument("db_path", help="Path to tuning.db")
+    parser.add_argument("--db_path", help="Path to tuning.db", default="checkpoints/multi/tuning.db")
     parser.add_argument("--study", help="Specific study name to inspect", default=None)
 
     args = parser.parse_args()
