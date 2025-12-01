@@ -3,6 +3,8 @@ import logging
 import pandas as pd
 import numpy as np
 import torch
+
+from common.config import get_device
 from multi.config import MultiFieldConfig
 from multi.data import get_dataloader
 from multi.reload_utils import load_model_for_eval, load_data_for_config
@@ -16,8 +18,8 @@ def generate_report(model, df, loader, config, output_path):
     logger.info(f"Generating report for {len(df)} transactions...")
 
     model.eval()
-    # FIX: Use the model's actual device (robust against arg overrides)
-    device = next(model.parameters()).device
+    device = get_device()
+    model.to(device)
 
     fc = MultiFieldConfig()
 
@@ -83,7 +85,6 @@ def generate_report(model, df, loader, config, output_path):
     choices = ['TP', 'TN', 'FP', 'FN']
     full_report['result_type'] = np.select(conditions, choices, default='Error')
 
-    # --- FIX: Added fc.trId to the output columns ---
     cols = [
         fc.accountId, fc.trId, fc.date, fc.amount, fc.text,  # Added trId here
         fc.label, 'patternId',  # Original Labels
