@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -84,10 +87,10 @@ class TuneResult:
     broken_mean_amt: float  # Avg amount of broken groups (Diagnostic)
 
 
-def run_tuning():
+def run_tuning(df_path:Path):
     print("Loading data...")
     try:
-        df = pd.read_csv('data/rec_data2.csv')
+        df = pd.read_csv(df_path)
     except:
         print("Data not found.")
         return
@@ -184,4 +187,4 @@ def run_tuning():
 
 
 if __name__ == "__main__":
-    run_tuning()
+    run_tuning(Path(sys.argv[1]))
