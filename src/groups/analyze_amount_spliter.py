@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -59,11 +62,11 @@ def cluster_expenses_gap(numbers: list[float], ids: list[str], max_size: int, mi
 
 
 # --- 2. The Analysis Harness ---
-def analyze_splitting_impact():
+def analyze_splitting_impact(df_path:Path):
     print("Loading data...")
     # Load your dataset
     try:
-        df = pd.read_csv('data/rec_data2.csv')  # Or data/combined_transactions_flat.csv
+        df = pd.read_csv(df_path)
     except FileNotFoundError:
         print("Dataset not found. Please ensure data/rec_data2.csv exists.")
         return
@@ -162,4 +165,4 @@ def analyze_splitting_impact():
 
 
 if __name__ == "__main__":
-    analyze_splitting_impact()
+    analyze_splitting_impact(Path(sys.argv[1]))
