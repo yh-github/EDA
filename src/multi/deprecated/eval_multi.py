@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, accuracy_score, average_precision_score
 from multi.config import MultiExpConfig, MultiFieldConfig
-from multi.inference import MultiPredictor
+from multi.deprecated.inference import MultiPredictor
 
 
 def bcubed_precision_recall(true_ids, pred_ids):

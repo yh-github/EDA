@@ -3,7 +3,7 @@ import logging
 import pandas as pd
 import numpy as np
 from multi.config import MultiExpConfig, MultiFieldConfig
-from multi.inference import MultiPredictor
+from multi.deprecated.inference import MultiPredictor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')

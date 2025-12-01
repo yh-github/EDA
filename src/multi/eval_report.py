@@ -3,6 +3,8 @@ import logging
 import pandas as pd
 import numpy as np
 import torch
+
+from common.config import get_device
 from multi.config import MultiFieldConfig
 from multi.data import get_dataloader
 from multi.reload_utils import load_model_for_eval, load_data_for_config
@@ -15,9 +17,10 @@ logger = logging.getLogger("report_gen")
 def generate_report(model, df, loader, config, output_path):
     logger.info(f"Generating report for {len(df)} transactions...")
 
+    device = get_device()
+
     model.eval()
-    # FIX: Use the model's actual device (robust against arg overrides)
-    device = next(model.parameters()).device
+    model.to(device)
 
     fc = MultiFieldConfig()
 
