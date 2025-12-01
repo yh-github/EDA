@@ -1,7 +1,9 @@
 import pandas as pd
-import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass
+
+from multi.config import MultiExpConfig
+from multi.reload_utils import load_data_for_config
 
 
 # --- 1. Hybrid Splitter ---
@@ -65,13 +67,16 @@ class TuneResult:
     res: float
 
 
-def run_hybrid_tuning():
-    print("Loading data...")
-    try:
-        df = pd.read_csv('data/rec_data2.csv')
-    except:
-        print("Data not found.")
-        return
+def run_hybrid_tuning(random_state:int|None=None, downsample:float|None=None):
+    conf = MultiExpConfig()
+    if random_state is not None:
+        conf.random_state = random_state
+    if downsample is not None:
+        conf.downsample = downsample
+
+    train_df, val_df, test_df = load_data_for_config(conf)
+
+    df = train_df
 
     df = df.dropna(subset=['patternId', 'amount'])
     df = df[~df['patternId'].isin(['-1', -1, 'None', 'nan'])]
