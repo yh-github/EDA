@@ -106,10 +106,17 @@ class MultiTransactionDataset(Dataset):
 
         df = self._encode_pattern_ids(df)
 
+        # 0 amounts are treated as Negative (Outgoing) -1
         df['direction'] = np.sign(df[self.fields.amount])
-        df = df[df['direction'] != 0]
 
-        # --- KEY CHANGE: Preserve the original DataFrame Index ---
+        zeros_mask = (df['direction'] == 0)
+        if zeros_mask.any():
+            logger.warning(
+                f"Dataset contains {zeros_mask.sum()} transactions with amount=0. "
+                "Treating them as negative direction (-1) instead of filtering."
+            )
+            df.loc[zeros_mask, 'direction'] = -1
+
         # We store it in a column so it survives the reset_index below.
         # This allows us to map any sample back to the source row later.
         df['_true_index'] = df.index

@@ -8,17 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 def _align_df_for_dataset(df: pd.DataFrame, fields: MultiFieldConfig) -> pd.DataFrame:
-    """
-    Simulates the filtering and indexing performed inside MultiTransactionDataset.
-    This ensures we have a 1-to-1 mapping with the DataLoader output.
-    """
     df = df.copy()
-
-    # 1. Simulate the Dataset's filtering logic
-    df['direction'] = np.sign(df[fields.amount])
-    df = df[df['direction'] != 0]
-
-    # 2. Reset index to ensure clean iteration
     df = df.reset_index(drop=True)
     return df
 
@@ -30,32 +20,17 @@ def analyze_classification_mistakes(model, val_df, loader, config, num_examples=
     logger.info("Running Cycle/Classification Mistake Analysis...")
 
     fc = MultiFieldConfig()
-    # PRE-ALIGNMENT: This dataframe now exactly matches the rows in the DataLoader
     aligned_df = _align_df_for_dataset(val_df, fc)
 
     model.eval()
-    device = config.device
+
+    # FIX: Use the model's actual device, not the config property (which might mismatch)
+    device = next(model.parameters()).device
 
     fps = []
     fns = []
 
-    # We use a global index tracker to walk through 'aligned_df'
-    # NOTE: The DataLoader groups transactions by Account. The aligned_df is flat.
-    # The Dataset internal logic groups by Account.
-    # Therefore, row 'i' in aligned_df might NOT match row 'i' in the loader sequence
-    # because the loader yields (Batch, Seq) of grouped accounts.
-
-    # Correction: MultiTransactionDataset groups by (Account, Direction).
-    # It stores self.groups = [df_group1, df_group2, ...]
-    # The DataLoader randomizes these groups if shuffle=True.
-    # Since we use shuffle=False, the order of groups is deterministic.
-
-    # We need to replicate the Grouping logic to match the batches.
     groups = [group for _, group in aligned_df.groupby([fc.accountId, 'direction'])]
-
-    # Flatten groups back into a list of (group_idx, row_in_group) mapping?
-    # No, we just need to iterate through 'groups' in the same order the loader does.
-
     current_group_idx = 0
 
     with torch.no_grad():
@@ -71,35 +46,24 @@ def analyze_classification_mistakes(model, val_df, loader, config, num_examples=
             mask_np = batch_gpu['padding_mask'].cpu().numpy()
 
             probs = torch.softmax(cycle_logits, dim=-1)
-            # FIX: Unpack the tuple (values, indices) BEFORE calling .cpu()
             max_probs_tensor, _ = torch.max(probs, dim=-1)
             probs_np = max_probs_tensor.cpu().numpy()
 
             batch_size, seq_len = preds.shape
 
-            # The loader returns a batch of groups.
-            # batch[0] corresponds to groups[current_group_idx]
-            # batch[1] corresponds to groups[current_group_idx + 1]
-
             for b in range(batch_size):
                 if current_group_idx >= len(groups):
                     break
 
-                # Get the source dataframe slice for this group
-                # Note: The Dataset also sorts by date and truncates to max_seq_len.
                 group_df = groups[current_group_idx].sort_values(fc.date, ascending=True)
                 if len(group_df) > config.max_seq_len:
                     group_df = group_df.iloc[-config.max_seq_len:]
 
                 current_group_idx += 1
 
-                # Iterate through the sequence
                 for s in range(seq_len):
                     if not mask_np[b, s]: continue
-
-                    # Safety check: if mask is true, we should have a row
-                    if s >= len(group_df):
-                        continue
+                    if s >= len(group_df): continue
 
                     pred_cls = preds[b, s]
                     true_cls = targets[b, s]
@@ -127,16 +91,13 @@ def analyze_classification_mistakes(model, val_df, loader, config, num_examples=
                     elif not pred_is_rec and true_is_rec:
                         fns.append(item)
 
-    # Log Results
     logger.info("-" * 60)
     logger.info(f"CLASSIFICATION MISTAKES (isRecurring): FP={len(fps)}, FN={len(fns)}")
 
-    # Sort by confidence
     fps_sorted = sorted(fps, key=lambda x: x['prob'], reverse=True)[:num_examples]
     if fps_sorted:
         logger.info("\n>>> Top False Positives (Predicted Recurring, Actually Noise):")
         for x in fps_sorted:
-            # Shorten description
             txt = (str(x['txt'])[:40] + '..') if len(str(x['txt'])) > 40 else str(x['txt'])
             logger.info(f"  [{x['prob']:.2f}] ${x['amt']:<6.2f} {x['date']} | {txt}")
 
@@ -159,12 +120,13 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
     fc = MultiFieldConfig()
     aligned_df = _align_df_for_dataset(val_df, fc)
 
-    # Replicate grouping
     groups = [group for _, group in aligned_df.groupby([fc.accountId, 'direction'])]
     current_group_idx = 0
 
     model.eval()
-    device = config.device
+
+    # FIX: Use the model's actual device
+    device = next(model.parameters()).device
 
     fps = []
     fns = []
@@ -188,7 +150,6 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
             valid_mask = batch_gpu['padding_mask'].unsqueeze(1) & batch_gpu['padding_mask'].unsqueeze(2)
             final_mask = triu_mask & valid_mask
 
-            # Find mismatches
             mismatches = (preds != targets) & final_mask
             b_indices, i_indices, j_indices = torch.where(mismatches)
 
@@ -196,7 +157,6 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
                 current_group_idx += b_size
                 continue
 
-            # Move to CPU
             b_indices = b_indices.cpu().numpy()
             i_indices = i_indices.cpu().numpy()
             j_indices = j_indices.cpu().numpy()
@@ -205,13 +165,6 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
 
             for k in range(len(b_indices)):
                 b, i, j = b_indices[k], i_indices[k], j_indices[k]
-
-                # Identify Group
-                # The loop index 'b' is relative to the batch.
-                # We need to map it to the global groups list.
-                # Since we increment current_group_idx by b_size at the end of loop,
-                # the index is simply current_group_idx + b.
-                # HOWEVER, this loop iterates mismatches, so we can't increment inside.
 
                 actual_group_idx = current_group_idx + b
                 if actual_group_idx >= len(groups): break
@@ -240,7 +193,6 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
                 elif pred == 0 and truth == 1:
                     fns.append(item)
 
-            # Advance the global group pointer
             current_group_idx += b_size
 
     logger.info("-" * 50)
