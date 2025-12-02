@@ -1,5 +1,4 @@
 import os
-
 from common.config import EmbModel
 from common.log_utils import setup_logging
 
@@ -21,7 +20,6 @@ from multi.data import get_dataloader
 from multi.data_utils import load_and_prepare_data
 from common.data import create_train_val_test_split
 from common.exp_utils import set_global_seed, get_git_info
-from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -333,30 +331,27 @@ def main():
         analyze_study_importance(study)
 
         # --- ANALYSIS 2: Re-Load Best Model for Detailed Analysis ---
-        logger.info("=" * 60)
-        logger.info("LOADING BEST MODEL FOR DETAILED ANALYSIS")
-        logger.info("=" * 60)
-
-        if manager.best_global_path.exists():
-            # Create a basic config just to initialize the predictor/analysis tools
-            # The saved checkpoint contains the exact config
-            checkpoint = torch.load(manager.best_global_path, map_location=torch.device('cpu'), weights_only=False)
-            loaded_config = checkpoint['config']
-            loaded_config.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            model = TransactionTransformer(loaded_config)
-            model.load_state_dict(checkpoint['state_dict'])
-            model.to(loaded_config.device)
-
-            # --- Use Loader to avoid double-tokenization ---
-            logger.info("Initializing Test Loader for Analysis...")
-            test_loader = get_dataloader(manager.test_df, loaded_config, shuffle=False, n_workers=0)
-
-            # Analyze on Test Set
-            analyze_adjacency_mistakes(model, test_loader, loaded_config)
-            analyze_classification_mistakes(model, test_loader, loaded_config)
-        else:
-            logger.warning("Best model file not found. Skipping analysis.")
+        # logger.info("=" * 60)
+        # logger.info("LOADING BEST MODEL FOR DETAILED ANALYSIS")
+        # logger.info("=" * 60)
+        #
+        # if manager.best_global_path.exists():
+        #     # Create a basic config just to initialize the predictor/analysis tools
+        #     # The saved checkpoint contains the exact config
+        #     checkpoint = torch.load(manager.best_global_path, map_location=torch.device('cpu'), weights_only=False)
+        #     loaded_config = checkpoint['config']
+        #
+        #     model = TransactionTransformer(loaded_config)
+        #     model.load_state_dict(checkpoint['state_dict'])
+        #     model.to(get_device())
+        #
+        #     # Analyze on Test Set
+        #     logger.info("Initializing Test Loader for Analysis...")
+        #     test_loader = get_dataloader(manager.test_df, loaded_config, shuffle=False, n_workers=0)
+        #     analyze_adjacency_mistakes(model, test_loader, loaded_config)
+        #     analyze_classification_mistakes(model, test_loader, loaded_config)
+        # else:
+        #     logger.warning("Best model file not found. Skipping analysis.")
 
     else:
         logger.warning("No trials completed.")
