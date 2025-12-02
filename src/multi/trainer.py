@@ -489,6 +489,8 @@ class BinaryMultiTrainer(BaseTrainer):
             p_edges = (np.array(all_prob_edges) > 0.5).astype(int)
             metrics['pr_auc'] = average_precision_score(all_true_edges, all_prob_edges)
             metrics['adj_f1'] = f1_score(all_true_edges, p_edges)
+            metrics['adj_p'] = precision_score(all_true_edges, p_edges)
+            metrics['adj_r'] = recall_score(all_true_edges, p_edges)
 
         # B. Binary (Explicit Detection Head)
         if all_true_bin:
