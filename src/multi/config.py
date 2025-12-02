@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 import torch
-from send2trash.plat_other import get_dev
-
 from common.config import EmbModel, get_device
 
 

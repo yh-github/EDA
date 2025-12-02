@@ -21,7 +21,7 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
     # Pass a copy to ensure we don't mutate the external DF
     dataset = MultiTransactionDataset(df.copy(), config, tokenizer)
 
-    collate = partial(collate_fn, tokenizer=tokenizer, config=config)
+    collate = partial(collate_fn, config=config)
 
     return DataLoader(
         dataset,
@@ -218,7 +218,8 @@ class MultiTransactionDataset(Dataset):
         df = df.drop(columns=['patternId_str'])
         return df
 
-    def _batch_tokenize(self, texts, tokenizer, max_len, batch_size=10000):
+    @staticmethod
+    def _batch_tokenize(texts, tokenizer, max_len, batch_size=10000):
         """Tokenize in batches to check memory usage and show progress."""
         all_ids = []
         all_masks = []
@@ -259,7 +260,7 @@ class MultiTransactionDataset(Dataset):
         }
 
 
-def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
+def collate_fn(batch: list[dict], config: MultiExpConfig):
     # Determine max length in this batch for dynamic padding
     lengths = [len(x['text_ids']) for x in batch]
     max_len = max(lengths)
@@ -269,10 +270,10 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
     def collate_tensor(key, shape_suffix, dtype, padding_val=0):
         # Create full tensor filled with padding value
         out = torch.full((batch_size, max_len, *shape_suffix), padding_val, dtype=dtype)
-        for i, item in enumerate(batch):
-            row_len = lengths[i]
-            data = torch.from_numpy(item[key])
-            out[i, :row_len] = data
+        for _i, _item in enumerate(batch):
+            row_len = lengths[_i]
+            data = torch.from_numpy(_item[key])
+            out[_i, :row_len] = data
         return out
 
     input_ids = collate_tensor("text_ids", (config.max_text_length,), torch.long)
