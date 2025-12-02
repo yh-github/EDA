@@ -113,4 +113,5 @@ class MultiExpConfig:
 
     @property
     def text_encoder_model(self) -> str:
-        return self.emb_model.value()
+        return self.emb_model.value
+
