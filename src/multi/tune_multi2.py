@@ -1,4 +1,6 @@
 import os
+from typing import Optional
+
 from common.config import EmbModel
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
@@ -158,7 +160,10 @@ class TuningManager:
             raise optuna.TrialPruned()
 
         # --- Hyperparams ---
-        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
+        if self.args.unfreeze_last_n_layers is None:
+            unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
+        else:
+            unfreeze = self.args.unfreeze_last_n_layers
 
         lr_min = 1e-5 if unfreeze > 0 else 1e-4
         lr_max = 1e-3
@@ -273,6 +278,7 @@ def main():
     parser.add_argument("--n_trials", type=int, default=100)
     parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
+    parser.add_argument("--unfreeze_last_n_layers", type=int)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
     parser.add_argument("--force_recreate", action="store_true")
