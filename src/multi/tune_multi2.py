@@ -1,6 +1,4 @@
 import os
-from typing import Optional
-
 from common.config import EmbModel
 from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
@@ -71,8 +69,10 @@ class TuningManager:
         # 1. Load DataFrames
         self.train_df, self.val_df, self.test_df = self._load_or_create_data()
 
+        emb_model = EmbModel.MPNET
+
         # 2. Pre-Build Datasets (Optimization)
-        token_config = MultiExpConfig(emb_model=EmbModel(self.args.text_emb), use_counter_party=self.data_determined_use_cp)
+        token_config = MultiExpConfig(emb_model=emb_model, use_counter_party=self.data_determined_use_cp)
         self.emb_model = token_config.emb_model
         self.tokenizer = get_tokenizer_cached(token_config.text_encoder_model)
 
@@ -177,7 +177,7 @@ class TuningManager:
         contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.3, 0.6)
 
         defaults = MultiExpConfig()
-        emb_model:EmbModel = EmbModel(self.args.text_emb)
+        emb_model:EmbModel = EmbModel.MPNET #EmbModel(self.args.text_emb)
 
         # --- SMART LOGIC: Switch to Cached Mode if unfreeze == 0 ---
         # This gives us massive speedups for frozen trials without penalizing fine-tuning trials
