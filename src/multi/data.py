@@ -14,8 +14,6 @@ from multi.config import MultiExpConfig, MultiFieldConfig
 logger = logging.getLogger(__name__)
 
 
-# --- Modern Type Definitions (Python 3.12+) ---
-
 class TransactionSample(TypedDict):
     """Output of Dataset.__getitem__ (Numpy Arrays)"""
     text_ids: npt.NDArray[np.int64]
@@ -38,7 +36,7 @@ class TransactionBatch(TypedDict):
     cp_attention_mask: Optional[torch.Tensor]
     amounts: torch.Tensor  # [B, S, 1]
     days: torch.Tensor  # [B, S, 1]
-    calendar_features: torch.Tensor  # [B, S, 4]
+    calendar_features: torch.Tensor  # [B, S, 6]
     adjacency_target: torch.Tensor  # [B, S, S]
     cycle_target: torch.Tensor  # [B, S]
     pattern_ids: torch.Tensor  # [B, S]
@@ -148,13 +146,23 @@ class MultiTransactionDataset(Dataset):
 
         dow = normalized_dates.dt.dayofweek.values.astype(np.float32)
         dom = normalized_dates.dt.day.values.astype(np.float32)
+
+        # We use a fixed epoch to ensure 'Week A' vs 'Week B' is consistent globally
+        epoch_date = pd.Timestamp("2000-01-01")
+        # Days since epoch
+        # noinspection PyTypeChecker
+        global_days = (normalized_dates - epoch_date).dt.days.values
+        cycle_14 = (global_days % 14).astype(np.float32)
+
         two_pi = 2 * np.pi
 
         self.all_calendar: npt.NDArray[np.float32] = np.stack([
             np.sin(dow * (two_pi / 7)),
             np.cos(dow * (two_pi / 7)),
             np.sin(dom * (two_pi / 31)),
-            np.cos(dom * (two_pi / 31))
+            np.cos(dom * (two_pi / 31)),
+            np.sin(cycle_14 * (two_pi / 14)),
+            np.cos(cycle_14 * (two_pi / 14))
         ], axis=1).astype(np.float32)
 
         self.all_pattern_ids: npt.NDArray[np.int64] = df['patternId_encoded'].values.astype(np.int64)
@@ -301,7 +309,7 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
     attention_mask = collate_tensor("text_mask", (config.max_text_length,), torch.long)
     amounts = collate_tensor("amounts", (1,), torch.float32)
     days = collate_tensor("days", (1,), torch.float32)
-    calendar = collate_tensor("calendar_features", (4,), torch.float32)
+    calendar = collate_tensor("calendar_features", (6,), torch.float32)
     cycles = collate_tensor("cycles", (), torch.long)
     pattern_ids = collate_tensor("pattern_ids", (), torch.long, padding_val=-1)
     original_index = collate_tensor("original_index", (), torch.long, padding_val=-1)

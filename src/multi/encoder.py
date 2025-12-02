@@ -160,7 +160,7 @@ class TransactionEncoder(nn.Module):
 
         self.amount_proj = nn.Linear(1, config.hidden_dim)
         self.time_encoder = TimeEncoding(config.hidden_dim, max_len=config.time_encoding_max_len)
-        self.calendar_proj = nn.Linear(4, config.hidden_dim)
+        self.calendar_proj = nn.Linear(6, config.hidden_dim)
 
         # --- Normalization Strategy ---
         if config.normalization_type == 'rms_norm':
