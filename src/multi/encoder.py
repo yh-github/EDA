@@ -299,9 +299,11 @@ class TransactionTransformer(nn.Module):
             # ~valid_col_mask gives True for Invalid columns
             mask_to_fill = eye | (~valid_col_mask)
 
-            # Fill with -inf so they don't affect max
-            # Using -1e9 instead of -inf to avoid NaN gradients in some edge cases
-            adj_masked = adj_logits.masked_fill(mask_to_fill, -1e9)
+            # FIX for NaNs: Use a safe negative value instead of -1e9.
+            # Logits usually range between -10 and 10.
+            # -1e9 causes gradient explosion when passed to Linear layers.
+            # -100.0 is sufficiently small to be ignored by max() but safe for gradients.
+            adj_masked = adj_logits.masked_fill(mask_to_fill, -100.0)
 
             # 3. Max Pooling over columns (dim 2)
             # max_score: [B, N]
