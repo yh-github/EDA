@@ -351,4 +351,9 @@ class BinaryMultiTrainer(BaseTrainer):
 
     def log_metrics(self, metrics):
         logger.info(
-            f"  ADJ_PR_AUC: {metrics.get('pr_auc', 0):.3f} | BIN_F1: {metrics.get('cycle_f1', 0):.3f} | BIN_REC: {metrics.get('cycle_rec', 0):.3f}")
+            f"  ADJ_PR_AUC: {metrics.get('pr_auc', 0):.3f} |"
+            f" BIN_F1: {metrics.get('cycle_f1', 0):.3f}"
+            f" BIN_PR_AUC: {metrics.get('cycle_pr_auc', 0):.3f}"
+            f" BIN_P: {metrics.get('cycle_prec', 0):.3f}"
+            f" BIN_REC: {metrics.get('cycle_rec', 0):.3f}"
+        )
