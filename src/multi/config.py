@@ -34,7 +34,7 @@ class MultiExpConfig:
     task_type: str = "binary"
 
     # Model Hyperparameters
-    emb_model:EmbModel = EmbModel.MPNET.value
+    emb_model:EmbModel = EmbModel.MPNET
 
     # If 0, we can optionally use use_cached_embeddings=True for massive speedup
     unfreeze_last_n_layers: int = 0
