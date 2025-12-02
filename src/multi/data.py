@@ -91,6 +91,10 @@ class MultiTransactionDataset(Dataset):
         # Work on a copy to avoid SettingWithCopy warnings on the input df
         df = df.copy()
 
+        # OPTIMIZATION: Convert date to datetime ONCE here.
+        # This prevents running pd.to_datetime() repeatedly in __getitem__
+        df[self.fields.date] = pd.to_datetime(df[self.fields.date])
+
         # 0. Preserve True Original Index
         # We do this BEFORE any sorting or resetting so we can always map back to the source CSV rows.
         if '_true_index' not in df.columns:
@@ -123,7 +127,7 @@ class MultiTransactionDataset(Dataset):
             df.loc[zeros_mask, 'direction'] = -1
 
         # --- STRATEGY: Amount-Sorted Partitioning ---
-        # Instead of truncating by time, we group similar amounts together.
+        # We group similar amounts together.
         # Global Sort: Account -> Direction -> Amount -> Date
         logger.info("Sorting dataset by [Account, Direction, Amount, Date] for partitioning...")
         df = df.sort_values(
@@ -225,14 +229,20 @@ class MultiTransactionDataset(Dataset):
         amounts = window[f.amount].values.astype(np.float32)
         log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
 
-        dates = pd.to_datetime(window[f.date])
-        # Use window-relative time or global?
-        # Relative to first txn in window is standard for relative attention.
-        min_date = dates.iloc[0]
-        days_since_start = (dates - min_date).dt.days.values.astype(np.float32)
+        # --- DATE HANDLING (Normalized) ---
+        # 1. 'raw_dates' are already datetime objects (converted in __init__)
+        raw_dates = window[f.date]
 
-        dow = dates.dt.dayofweek.values.astype(np.float32)
-        dom = dates.dt.day.values.astype(np.float32)
+        # 2. Normalize to midnight to remove time-of-day jitter
+        #    This makes 'days_since_start' represent calendar days elapsed.
+        normalized_dates = raw_dates.dt.normalize()
+
+        min_date = normalized_dates.iloc[0]
+        days_since_start = (normalized_dates - min_date).dt.days.values.astype(np.float32)
+
+        # Day of Week / Month calculations work fine on normalized dates
+        dow = normalized_dates.dt.dayofweek.values.astype(np.float32)
+        dom = normalized_dates.dt.day.values.astype(np.float32)
 
         two_pi = 2 * np.pi
         calendar_feats = np.stack([
