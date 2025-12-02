@@ -62,10 +62,19 @@ def generate_report(model, df, loader, config, output_path):
 
     # Convert results to DataFrame
     pred_df = pd.DataFrame(results)
+
+    # Use the original_index to map back to the input DataFrame
+    # Note: 'original_index' maps to the `_true_index` column if it existed, or the default index.
+
+    # Prepare the base report dataframe
+    full_report = df.copy()
+    if '_true_index' in full_report.columns:
+        full_report = full_report.set_index('_true_index')
+
     pred_df.set_index('original_index', inplace=True)
 
     # Join with original Data
-    full_report = df.copy()
+    # We use join to align rows. Any rows not predicted (e.g. dropped?) will have NaNs.
     full_report = full_report.join(pred_df, how='left')
 
     # Fill NaNs for filtered rows (assume not recurring)
@@ -86,7 +95,7 @@ def generate_report(model, df, loader, config, output_path):
     full_report['result_type'] = np.select(conditions, choices, default='Error')
 
     cols = [
-        fc.accountId, fc.trId, fc.date, fc.amount, fc.text,  # Added trId here
+        fc.accountId, fc.trId, fc.date, fc.amount, fc.text,
         fc.label, 'patternId',  # Original Labels
         'pred_is_recurring', 'pred_prob', 'result_type'  # Model Predictions
     ]

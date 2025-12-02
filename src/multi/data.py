@@ -91,6 +91,11 @@ class MultiTransactionDataset(Dataset):
         # Work on a copy to avoid SettingWithCopy warnings on the input df
         df = df.copy()
 
+        # 0. Preserve True Original Index
+        # We do this BEFORE any sorting or resetting so we can always map back to the source CSV rows.
+        if '_true_index' not in df.columns:
+            df['_true_index'] = df.index
+
         # 1. Clean / Encode Labels
         if self.fields.patternCycle not in df.columns:
             df[self.fields.patternCycle] = 'None'
@@ -117,14 +122,21 @@ class MultiTransactionDataset(Dataset):
             )
             df.loc[zeros_mask, 'direction'] = -1
 
-        # We store it in a column so it survives the reset_index below.
-        # This allows us to map any sample back to the source row later.
-        df['_true_index'] = df.index
+        # --- STRATEGY: Amount-Sorted Partitioning ---
+        # Instead of truncating by time, we group similar amounts together.
+        # Global Sort: Account -> Direction -> Amount -> Date
+        logger.info("Sorting dataset by [Account, Direction, Amount, Date] for partitioning...")
+        df = df.sort_values(
+            by=[self.fields.accountId, 'direction', self.fields.amount, self.fields.date],
+            ascending=[True, True, True, True]
+        )
 
-        # 2. Reset Index to align with Tensor indexing
+        # 2. Reset Index to align with Tensor indexing (0 to N-1)
+        # This 'internal_index' matches the order of pre-tokenized tensors.
         df = df.reset_index(drop=True)
 
         # 3. Pre-tokenize
+        # Tokenization happens on the sorted dataframe, so index 0 here matches row 0 in df.
         logger.info("Pre-tokenizing Description...")
         all_texts = df[self.fields.text].fillna("").astype(str).tolist()
         self.text_enc = tokenizer(
@@ -151,8 +163,23 @@ class MultiTransactionDataset(Dataset):
                 logger.warning("CounterParty enabled but column missing. Creating empty placeholders.")
                 self.config.use_counter_party = False
 
-        # 4. Grouping
-        self.groups = [group for _, group in df.groupby([self.fields.accountId, 'direction'])]
+        # 4. Window Generation (Partitioning)
+        # We slice the sorted dataframe into NON-OVERLAPPING windows.
+        self.samples = []
+
+        # Group by Account/Direction (preserves the Amount sort order within groups)
+        grouped = df.groupby([self.fields.accountId, 'direction'], sort=False)
+
+        for _, group in grouped:
+            n_items = len(group)
+            # Slice into chunks of max_seq_len
+            for i in range(0, n_items, self.config.max_seq_len):
+                # We store the dataframe slice.
+                # .copy() ensures we can modify it (sort it) without affecting the original if needed
+                window = group.iloc[i: i + self.config.max_seq_len].copy()
+                self.samples.append(window)
+
+        logger.info(f"Partitioned dataset into {len(self.samples)} windows. (100% data coverage)")
 
     def _encode_pattern_ids(self, df: pd.DataFrame) -> pd.DataFrame:
         col = self.fields.patternId
@@ -166,25 +193,25 @@ class MultiTransactionDataset(Dataset):
         return df
 
     def __len__(self):
-        return len(self.groups)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        group = self.groups[idx]
+        # 1. Retrieve the window (Currently sorted by Amount)
+        window = self.samples[idx]
         f = self.fields
 
-        # Truncation logic
-        if len(group) > self.config.max_seq_len:
-            group = group.sort_values(f.date, ascending=True).iloc[-self.config.max_seq_len:]
-        else:
-            group = group.sort_values(f.date, ascending=True)
+        # 2. Local Re-Sort by Date (CRITICAL)
+        # The Transformer needs chronological order to learn periodicity.
+        # We re-sort the slice by Date before feeding it to the model.
+        window = window.sort_values(f.date, ascending=True)
 
-        # Indices in the internal dataset (0..N)
-        internal_indices = group.index.values
+        # Indices in the internal dataset (0..N) used for looking up pre-tokenized tensors
+        internal_indices = window.index.values
 
-        # --- KEY CHANGE: Retrieve the REAL original indices ---
-        true_indices = group['_true_index'].values
+        # --- KEY: Retrieve the REAL original indices for evaluation ---
+        true_indices = window['_true_index'].values
 
-        # Text Tensors
+        # Text Tensors (lookup using internal index)
         text_input_ids = self.text_enc['input_ids'][internal_indices]
         text_attn_mask = self.text_enc['attention_mask'][internal_indices]
 
@@ -195,10 +222,12 @@ class MultiTransactionDataset(Dataset):
             cp_attn_mask = self.cp_enc['attention_mask'][internal_indices]
 
         # Numeric Features
-        amounts = group[f.amount].values.astype(np.float32)
+        amounts = window[f.amount].values.astype(np.float32)
         log_amounts = np.log1p(np.abs(amounts)) * np.sign(amounts)
 
-        dates = pd.to_datetime(group[f.date])
+        dates = pd.to_datetime(window[f.date])
+        # Use window-relative time or global?
+        # Relative to first txn in window is standard for relative attention.
         min_date = dates.iloc[0]
         days_since_start = (dates - min_date).dt.days.values.astype(np.float32)
 
@@ -213,8 +242,8 @@ class MultiTransactionDataset(Dataset):
             np.cos(dom * (two_pi / 31))
         ], axis=1).astype(np.float32)
 
-        pattern_ids = group['patternId_encoded'].values.astype(np.int64)
-        cycles = group[f.patternCycle].map(self.config.cycle_map).fillna(0).values.astype(np.int64)
+        pattern_ids = window['patternId_encoded'].values.astype(np.int64)
+        cycles = window[f.patternCycle].map(self.config.cycle_map).fillna(0).values.astype(np.int64)
 
         return {
             "text_ids": text_input_ids,
@@ -226,7 +255,7 @@ class MultiTransactionDataset(Dataset):
             "calendar_features": calendar_feats,
             "pattern_ids": pattern_ids,
             "cycles": cycles,
-            # We return the TRUE dataframe indices now
+            # We return the TRUE dataframe indices now for robust evaluation
             "original_index": torch.tensor(true_indices, dtype=torch.long)
         }
 
@@ -265,7 +294,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
     b_pattern_ids = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)
     padding_mask = torch.zeros((batch_size, max_len_in_batch), dtype=torch.bool)
 
-    # Init with -1, though real indices should be >= 0
+    # Init with -1
     b_original_index = torch.full((batch_size, max_len_in_batch), -1, dtype=torch.long)
 
     if not is_pre_tokenized:
