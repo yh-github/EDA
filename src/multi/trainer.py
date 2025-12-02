@@ -177,6 +177,7 @@ class MultiTrainer:
 
         logger.info(
             f"Starting training for {epochs} epochs. Early Stopping on '{metric_to_track}' (Patience: {patience})")
+        logger.info(f"{self.config}")
 
         for epoch in range(1, epochs + 1):
             # 1. Check external stop signal
@@ -199,14 +200,16 @@ class MultiTrainer:
 
             # Subtask Metrics
             cycle_f1 = metrics.get('cycle_f1', 0.0)
+            cycle_p = metrics.get('cycle_p', 0.0)
+            cycle_r = metrics.get('cycle_r', 0.0)
             cycle_acc = metrics.get('cycle_acc', 0.0)
             cycle_pr_auc = metrics.get('cycle_pr_auc', 0.0)
 
             logger.info(
                 f"Epoch {epoch}/{epochs} | "
                 f"Loss: {train_loss:.3f}/{val_loss:.3f} | "
-                f"ADJ F1: {val_f1:.3f} | ADJ PR: {val_pr_auc:.3f} | "
-                f"CYC Acc: {cycle_acc:.3f} | CYC F1: {cycle_f1:.3f} | CYC PR: {cycle_pr_auc:.3f}"
+                f"ADJ_F1={val_f1:.3f} ADJ_PR_AUC: {val_pr_auc:.3f} | "
+                f"CYC(bin) F1={cycle_f1:.3f} PR_AUC={cycle_pr_auc:.3f} P={cycle_p:.3f} R={cycle_r:.3f} ACC={cycle_acc:.3f}"
             )
 
             # Log Detailed Class Breakdown occasionally or if requested
@@ -446,6 +449,8 @@ class MultiTrainer:
         bin_cycle_pred = (cycle_preds_np > 0).astype(int)
         bin_cycle_true = (cycle_targets_np > 0).astype(int)
         cycle_f1 = f1_score(bin_cycle_true, bin_cycle_pred, zero_division=0)
+        cycle_p = precision_score(bin_cycle_true, bin_cycle_pred, zero_division=0)
+        cycle_r = recall_score(bin_cycle_true, bin_cycle_pred, zero_division=0)
 
         # B. Macro PR-AUC (Average over all classes)
         # We need to binarize the targets for One-vs-Rest calculation
@@ -496,6 +501,8 @@ class MultiTrainer:
             # Subtask metrics
             "cycle_acc": cycle_acc,
             "cycle_f1": cycle_f1,
+            "cycle_p": cycle_p,
+            "cycle_r": cycle_r,
             "cycle_pr_auc": cycle_pr_auc,
             "cycle_report": cycle_report_dict
         }
