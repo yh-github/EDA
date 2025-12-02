@@ -63,14 +63,12 @@ class EmbeddingService:
         self.max_length = max_length
 
         cache_key = f"{model_name.replace('/', '__')}"
-        cache_dir = CACHE_DIR_BASE/cache_key
-
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
+        self.cache_dir = CACHE_DIR_BASE/cache_key
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.by_max_len:dict[int, EmbeddingService.EmbCache] = {}
 
-        logger.info(f"Model {model_name} loaded onto {self.device}. Cache at {cache_dir}")
+        logger.info(f"Model {model_name} loaded onto {self.device}. Cache at {self.cache_dir}")
 
     def embed(self, text_list: list[str], max_len:int|None=None) -> np.ndarray:
         """
@@ -81,8 +79,13 @@ class EmbeddingService:
             return np.array([])
 
         max_len = max_len or self.max_length
-        memory_cache = self.by_max_len.get(max_len).memory_cache
-        embedding_cache = self.by_max_len.get(max_len).embedding_cache
+        assert max_len
+        if max_len not in self.by_max_len:
+            self.by_max_len[max_len] = EmbeddingService.EmbCache.create(max_len, self.cache_dir)
+        emb_cache = self.by_max_len.get(max_len)
+
+        memory_cache = emb_cache.memory_cache
+        embedding_cache = emb_cache.embedding_cache
 
         unique_texts = set(text_list)
         texts_to_compute = []
@@ -104,7 +107,7 @@ class EmbeddingService:
 
         # 2. Embed *only* the new texts (if any)
         if texts_to_compute:
-            self._compute_and_cache(texts_to_compute, self.by_max_len.get(max_len))
+            self._compute_and_cache(texts_to_compute, emb_cache)
 
         # 3. Map all texts back to the original list order using ONLY memory
         # This is now fast because it's a pure dict lookup
