@@ -243,6 +243,9 @@ class MultiTransactionDataset(Dataset):
         # Retrieve pre-calculated indices for this window
         indices = self.window_indices[idx]
 
+        raw_days = self.all_days[indices]
+        days_relative = (raw_days - raw_days.min()).astype(np.float32)
+
         # Simple Numpy Slicing (Fast!)
         sample: TransactionSample = {
             "text_ids": self.text_input_ids[indices],
@@ -250,7 +253,7 @@ class MultiTransactionDataset(Dataset):
             "cp_ids": self.cp_input_ids[indices] if self.cp_input_ids is not None else None,
             "cp_mask": self.cp_attn_mask[indices] if self.cp_attn_mask is not None else None,
             "amounts": self.all_log_amounts[indices],
-            "days": self.all_days[indices],
+            "days": days_relative,
             "calendar_features": self.all_calendar[indices],
             "pattern_ids": self.all_pattern_ids[indices],
             "cycles": self.all_cycles[indices],
