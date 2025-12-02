@@ -299,7 +299,7 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         b_calendar[i, :length, :] = torch.tensor(item['calendar_features'])
         b_cycles[i, :length] = torch.tensor(item['cycles'])
 
-        # --- KEY CHANGE: Include original_index in batch ---
+        # --- Include original_index in batch ---
         b_original_index[i, :length] = item['original_index']
 
         p_ids = item['pattern_ids']
