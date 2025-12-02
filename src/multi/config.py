@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 import torch
-from common.config import EmbModel
+from send2trash.plat_other import get_dev
+
+from common.config import EmbModel, get_device
 
 
 @dataclass(frozen=True)
@@ -96,4 +98,4 @@ class MultiExpConfig:
 
     @property
     def device(self) -> torch.device:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return get_device()
