@@ -19,16 +19,41 @@ class BinaryMultiTrainer(BaseTrainer):
 
     def __init__(self, model, config: MultiExpConfig):
         super().__init__(model, config)
-        # For binary classification (Recurring vs Noise)
-        self.binary_criterion = nn.BCEWithLogitsLoss(reduction='none')
+
+        # --- FIX: Apply Class Balancing to Binary Head ---
+        if config.use_focal_loss:
+            # Re-use the Focal Loss from BaseTrainer (configured with alpha/gamma)
+            self.binary_criterion = self.adj_criterion
+        else:
+            # Re-use pos_weight from config
+            weight_tensor = torch.tensor([config.pos_weight]).to(config.device)
+            self.binary_criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=weight_tensor)
 
     def _compute_loss(self, batch, adj_logits, binary_logits, embeddings):
+        device = self.config.device
+
+        # --- SPEEDUP: Generate Adjacency Target on GPU ---
+        # Instead of relying on CPU collate, we generate it here from pattern_ids
+        # pattern_ids: [B, S]. -1 indicates noise/padding.
+        p_ids = batch['pattern_ids']
+
+        # Expand to [B, S, 1] and [B, 1, S] for broadcasting
+        p_v = p_ids.unsqueeze(2)
+        p_h = p_ids.unsqueeze(1)
+
+        # Match where IDs are equal and NOT -1
+        # [B, S, S] boolean mask
+        adj_target_gpu = (p_v == p_h) & (p_v != -1)
+        adj_target_float = adj_target_gpu.float()
+
         # 1. Adjacency Loss
         mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-        eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
+        eye = torch.eye(adj_logits.shape[1], device=device).unsqueeze(0)
+
+        # Mask out padding AND self-loops (diagonal) for loss calculation
         mask_2d = mask_2d & (eye == 0)
 
-        adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
+        adj_loss = self.adj_criterion(adj_logits, adj_target_float)
         adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
 
         # 2. Binary Classification Loss
@@ -37,6 +62,7 @@ class BinaryMultiTrainer(BaseTrainer):
         is_recurring_target = (batch['cycle_target'] > 0).float().unsqueeze(-1)  # [B, S, 1]
 
         bin_loss = self.binary_criterion(binary_logits, is_recurring_target)
+
         # Mask out padding
         mask_1d = batch['padding_mask'].unsqueeze(-1)  # [B, S, 1]
         bin_loss = (bin_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
@@ -102,13 +128,19 @@ class BinaryMultiTrainer(BaseTrainer):
             # --- Adjacency Metrics ---
             adj_probs = torch.sigmoid(adj_logits)
 
+            # Re-generate target on GPU for metrics
+            p_ids = batch['pattern_ids']
+            p_v = p_ids.unsqueeze(2)
+            p_h = p_ids.unsqueeze(1)
+            adj_target_gpu = (p_v == p_h) & (p_v != -1)
+
             # 1. Edge Level (Standard Clustering Metrics)
             mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
             eye = torch.eye(adj_probs.shape[1], device=self.config.device).unsqueeze(0)
             valid_edges = mask_2d & (eye == 0)
 
             all_prob_edges.extend(adj_probs[valid_edges].cpu().numpy())
-            all_true_edges.extend(batch['adjacency_target'][valid_edges].cpu().numpy())
+            all_true_edges.extend(adj_target_gpu[valid_edges].cpu().numpy())
 
             # 2. Node Level (Clustering as Detection)
             # Find the max probability of connection to ANY other node (excluding self)

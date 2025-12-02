@@ -37,37 +37,47 @@ class TransactionBatch(TypedDict):
     amounts: torch.Tensor  # [B, S, 1]
     days: torch.Tensor  # [B, S, 1]
     calendar_features: torch.Tensor  # [B, S, 6]
-    adjacency_target: torch.Tensor  # [B, S, S]
+    # adjacency_target: REMOVED (Computed on GPU)
+    adjacency_target: Optional[torch.Tensor]  # Kept as None for type safety if needed, but unused
     cycle_target: torch.Tensor  # [B, S]
     pattern_ids: torch.Tensor  # [B, S]
     padding_mask: torch.Tensor  # [B, S] (Bool)
     original_index: torch.Tensor  # [B, S]
 
 
-# ------------------------
+# --- TOKENIZER CACHE ---
+_TOKENIZER_CACHE = {}
+
+
+def get_tokenizer_cached(model_name: str):
+    if model_name not in _TOKENIZER_CACHE:
+        logger.info(f"Loading Tokenizer: {model_name} (First time)")
+        _TOKENIZER_CACHE[model_name] = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    return _TOKENIZER_CACHE[model_name]
+
 
 def get_dataloader(
         df: pd.DataFrame,
         config: MultiExpConfig,
         shuffle: bool = True,
         n_workers: int = 4,
-        oversample_positives: bool = True
+        oversample_positives: bool = True,
+        # Option to reuse an existing dataset to skip preprocessing
+        dataset: 'MultiTransactionDataset' = None
 ) -> DataLoader:
     """
     Factory function to create a DataLoader.
-
-    If 'oversample_positives' is True and shuffle is True (Training),
-    it uses a WeightedRandomSampler to ensure batches contain meaningful data.
+    If 'dataset' is provided, it skips dataframe preprocessing.
     """
-    tokenizer = AutoTokenizer.from_pretrained(config.text_encoder_model, use_fast=True)
-    dataset = MultiTransactionDataset(df.copy(), config, tokenizer)
+    if dataset is None:
+        tokenizer = get_tokenizer_cached(config.text_encoder_model)
+        dataset = MultiTransactionDataset(df.copy(), config, tokenizer)
+
     collate = partial(collate_fn, config=config)
 
     sampler = None
     if shuffle and oversample_positives:
         # Calculate weights for Stratified Sampling
-        # We want to boost windows that have at least one recurring transaction
-
         has_positives = dataset.window_has_positive_signal.astype(float)
         num_pos = np.sum(has_positives)
         num_neg = len(has_positives) - num_pos
@@ -77,19 +87,16 @@ def get_dataloader(
             weight_pos = 1.0 / num_pos
             weight_neg = 1.0 / num_neg
 
-            # Boost positives significantly (e.g., aim for 50/50 mix in batch)
+            # Boost positives significantly
             weights = np.where(has_positives > 0, weight_pos, weight_neg)
 
             logger.info(f"Applying WeightedRandomSampler: {num_pos} Positive Windows vs {num_neg} Negative Windows")
 
-            # Create Sampler
-            # replacement=True is required for WeightedRandomSampler
             sampler = WeightedRandomSampler(
                 weights=torch.DoubleTensor(weights),
                 num_samples=len(weights),
                 replacement=True
             )
-            # Shuffle must be False if sampler is used
             shuffle = False
 
     return DataLoader(
@@ -147,10 +154,7 @@ class MultiTransactionDataset(Dataset):
         dow = normalized_dates.dt.dayofweek.values.astype(np.float32)
         dom = normalized_dates.dt.day.values.astype(np.float32)
 
-        # We use a fixed epoch to ensure 'Week A' vs 'Week B' is consistent globally
         epoch_date = pd.Timestamp("2000-01-01")
-        # Days since epoch
-        # noinspection PyTypeChecker
         global_days = (normalized_dates - epoch_date).dt.days.values
         cycle_14 = (global_days % 14).astype(np.float32)
 
@@ -196,8 +200,6 @@ class MultiTransactionDataset(Dataset):
         df['__internal_idx__'] = np.arange(len(df))
 
         self.window_indices: list[npt.NDArray[np.int64]] = []
-
-        # We also need to track which windows have ANY signal for the Sampler
         self.window_has_positive_signal = []
 
         grouped = df.groupby([self.fields.accountId, '__direction__'], sort=False)
@@ -205,8 +207,6 @@ class MultiTransactionDataset(Dataset):
         for _, group in grouped:
             grp_indices = group['__internal_idx__'].values
             grp_days = self.all_days[grp_indices]
-
-            # Check cycles for this group to identify positive windows
             grp_cycles = self.all_cycles[grp_indices]
 
             n_items = len(grp_indices)
@@ -214,12 +214,10 @@ class MultiTransactionDataset(Dataset):
                 chunk_indices = grp_indices[i: i + config.max_seq_len]
                 chunk_days = grp_days[i: i + config.max_seq_len]
 
-                # Check signal BEFORE sorting (order doesn't matter for existence)
                 chunk_cycles = grp_cycles[i: i + config.max_seq_len]
                 has_signal = np.any(chunk_cycles > 0)
                 self.window_has_positive_signal.append(has_signal)
 
-                # Re-sort by Date
                 date_sort_order = np.argsort(chunk_days)
                 final_window_indices = chunk_indices[date_sort_order]
                 self.window_indices.append(final_window_indices)
@@ -263,10 +261,8 @@ class MultiTransactionDataset(Dataset):
 
     def __getitem__(self, idx: int) -> TransactionSample:
         indices = self.window_indices[idx]
-
-        # Calculate Window-Relative Days
         raw_days = self.all_days[indices]
-        # Robustly handle empty windows (though logic should prevent them)
+
         if len(raw_days) > 0:
             days_relative = (raw_days - raw_days.min()).astype(np.float32)
         else:
@@ -311,20 +307,18 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
     days = collate_tensor("days", (1,), torch.float32)
     calendar = collate_tensor("calendar_features", (6,), torch.float32)
     cycles = collate_tensor("cycles", (), torch.long)
+
+    # Pattern IDs get padded with -1
     pattern_ids = collate_tensor("pattern_ids", (), torch.long, padding_val=-1)
     original_index = collate_tensor("original_index", (), torch.long, padding_val=-1)
 
-    adjacency = torch.zeros((batch_size, max_len, max_len), dtype=torch.float32)
+    # Padding mask (True = Valid, False = Pad)
     padding_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
+    for i in range(batch_size):
+        padding_mask[i, :lengths[i]] = True
 
-    for i, item in enumerate(batch):
-        l = lengths[i]
-        p_ids = torch.from_numpy(item['pattern_ids'])
-        if torch.any(p_ids != -1):
-            p_ids_v = p_ids.unsqueeze(1)
-            matches = (p_ids_v == p_ids_v.T) & (p_ids_v != -1)
-            adjacency[i, :l, :l] = matches.float()
-        padding_mask[i, :l] = True
+    # --- REMOVED CPU ADJACENCY MATRIX GENERATION ---
+    # It is now computed on GPU in the trainer for speed
 
     result: TransactionBatch = {
         "input_ids": input_ids,
@@ -332,7 +326,7 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
         "amounts": amounts,
         "days": days,
         "calendar_features": calendar,
-        "adjacency_target": adjacency,
+        "adjacency_target": None,  # Unused
         "cycle_target": cycles,
         "pattern_ids": pattern_ids,
         "padding_mask": padding_mask,
@@ -346,31 +340,3 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
         result["cp_attention_mask"] = collate_tensor("cp_mask", (config.max_cp_length,), torch.long)
 
     return result
-
-
-def analyze_token_distribution(df: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, config: MultiExpConfig):
-    fields = MultiFieldConfig()
-    logger.info("=" * 60)
-    logger.info("📊 TOKEN DISTRIBUTION ANALYSIS")
-
-    def report_stats(name: str, texts: list[str], max_len: int):
-        if not texts:
-            logger.info(f"Feature '{name}' is empty or disabled.")
-            return
-        encodings = tokenizer(texts, truncation=False, padding=False)['input_ids']
-        lengths_np = np.array([len(x) for x in encodings])
-        logger.info(f"--- {name} (Max Limit: {max_len}) ---")
-        logger.info(f"  Avg: {np.mean(lengths_np):.2f} | P99: {np.percentile(lengths_np, 99)}")
-        not_truncated = np.sum(lengths_np <= max_len)
-        logger.info(f"  ✅ Kept: {(not_truncated / len(lengths_np)) * 100:.2f}%")
-
-    logger.info("Analyzing 'bankRawDescription'...")
-    all_texts = df[fields.text].fillna("").astype(str).tolist()
-    report_stats("Text", all_texts, config.max_text_length)
-    if config.use_counter_party and fields.counter_party in df.columns:
-        logger.info("Analyzing 'counter_party'...")
-        all_cps = df[fields.counter_party].fillna("").astype(str).tolist()
-        non_empty_cps = [x for x in all_cps if x.strip()]
-        if non_empty_cps:
-            report_stats("CounterParty (Non-Empty)", non_empty_cps, config.max_cp_length)
-    logger.info("=" * 60)

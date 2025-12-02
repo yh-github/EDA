@@ -172,11 +172,20 @@ class MultiTrainer(BaseTrainer):
         pass
 
     def _compute_loss(self, batch, adj_logits, cycle_logits, embeddings):
+        device = self.config.device
+
+        # --- GPU ADJACENCY CALC ---
+        p_ids = batch['pattern_ids']
+        p_v = p_ids.unsqueeze(2)
+        p_h = p_ids.unsqueeze(1)
+        adj_target_gpu = (p_v == p_h) & (p_v != -1)
+        adj_target_float = adj_target_gpu.float()
+
         mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-        eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
+        eye = torch.eye(adj_logits.shape[1], device=device).unsqueeze(0)
         mask_2d = mask_2d & (eye == 0)
 
-        adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
+        adj_loss = self.adj_criterion(adj_logits, adj_target_float)
         adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
 
         cycle_loss = self.cycle_criterion(
@@ -215,29 +224,6 @@ class MultiTrainer(BaseTrainer):
             count += 1
         return total_loss / max(1, count)
 
-    def _compute_loss_with_pattern_ids(self, batch, adj_logits, cycle_logits, embeddings):
-        mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
-        eye = torch.eye(adj_logits.shape[1], device=self.config.device).unsqueeze(0)
-        mask_2d = mask_2d & (eye == 0)
-
-        adj_loss = self.adj_criterion(adj_logits, batch['adjacency_target'])
-        adj_loss = (adj_loss * mask_2d.float()).sum() / mask_2d.sum().clamp(min=1)
-
-        cycle_loss = self.cycle_criterion(
-            cycle_logits.view(-1, self.config.num_classes),
-            batch['cycle_target'].view(-1)
-        )
-        mask_1d = batch['padding_mask'].view(-1)
-        cycle_loss = (cycle_loss * mask_1d.float()).sum() / mask_1d.sum().clamp(min=1)
-
-        con_loss = torch.tensor(0.0, device=adj_loss.device)
-        if self.config.use_contrastive_loss and 'pattern_ids' in batch:
-            con_loss = self.contrastive_criterion(embeddings, batch['pattern_ids'], batch['padding_mask'])
-
-        total_loss = adj_loss + cycle_loss + (self.config.contrastive_loss_weight * con_loss)
-        return total_loss, adj_loss, cycle_loss, con_loss
-
-
     @torch.no_grad()
     def evaluate(self, dataloader):
         self.model.eval()
@@ -262,7 +248,7 @@ class MultiTrainer(BaseTrainer):
             try:
                 with torch.amp.autocast('cuda'):
                     adj_logits, cycle_logits, embeddings = self.model(batch)
-                    loss, _, _, _ = self._compute_loss_with_pattern_ids(batch, adj_logits, cycle_logits, embeddings)
+                    loss = self._compute_loss(batch, adj_logits, cycle_logits, embeddings)
 
                 total_val_loss += loss.item()
 
@@ -270,13 +256,19 @@ class MultiTrainer(BaseTrainer):
                 probs = torch.sigmoid(adj_logits)
                 preds = (probs > 0.5).float()
 
+                # Re-gen target
+                p_ids = batch['pattern_ids']
+                p_v = p_ids.unsqueeze(2)
+                p_h = p_ids.unsqueeze(1)
+                adj_target_gpu = (p_v == p_h) & (p_v != -1)
+
                 mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
                 eye = torch.eye(preds.shape[1], device=self.config.device).unsqueeze(0)
                 mask_2d = mask_2d & (eye == 0)
 
                 all_pred_edges.extend(preds[mask_2d].cpu().numpy())
                 all_pred_probs.extend(probs[mask_2d].cpu().numpy())
-                all_true_edges.extend(batch['adjacency_target'][mask_2d].cpu().numpy())
+                all_true_edges.extend(adj_target_gpu[mask_2d].cpu().numpy())
 
                 # --- Cycle Metrics ---
                 # cycle_logits: [Batch, Seq, NumClasses]
@@ -383,4 +375,3 @@ class MultiTrainer(BaseTrainer):
             "cycle_pr_auc": cycle_pr_auc,
             "cycle_report": cycle_report_dict
         }
-
