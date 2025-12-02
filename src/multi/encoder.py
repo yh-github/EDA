@@ -2,7 +2,7 @@ import math
 import logging
 import torch
 import torch.nn as nn
-from transformers import AutoModel
+from transformers import AutoModel, AutoConfig
 from multi.config import MultiExpConfig
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,6 @@ class TransactionEncoder(nn.Module):
 
     @staticmethod
     def inspect_and_configure_model(model_name: str):
-        from transformers import AutoConfig
         try:
             config = AutoConfig.from_pretrained(model_name)
         except OSError:
@@ -69,6 +68,13 @@ class TransactionEncoder(nn.Module):
 
     @staticmethod
     def get_embedder(config: MultiExpConfig):
+        # Optimization: If using cached embeddings, we DO NOT need to load the model weights.
+        if config.use_cached_embeddings:
+            logger.info("Using CACHED embeddings. Skipping model weight loading.")
+            # We still need the hidden size to init the projection layer
+            hf_config = AutoConfig.from_pretrained(config.text_encoder_model)
+            return None, None, hf_config.hidden_size
+
         embedder = AutoModel.from_pretrained(config.text_encoder_model)
         model_type, pooling_strategy = TransactionEncoder.inspect_and_configure_model(config.text_encoder_model)
         logger.info(f"Model Architecture detected: {model_type}. Using pooling: {pooling_strategy}")
@@ -83,7 +89,7 @@ class TransactionEncoder(nn.Module):
                 if hasattr(base_model, attr):
                     potential_layers = getattr(base_model, attr)
                     if isinstance(potential_layers, (nn.ModuleList, nn.Sequential)) or (
-                    hasattr(potential_layers, 'layer')):
+                            hasattr(potential_layers, 'layer')):
                         layers = potential_layers.layer if hasattr(potential_layers, 'layer') else potential_layers
                         break
             if layers is not None:
@@ -93,14 +99,16 @@ class TransactionEncoder(nn.Module):
                         param.requires_grad = True
             else:
                 logger.warning(f"Could not automatically locate layers. Keeping fully frozen.")
-        return embedder, pooling_strategy
+
+        return embedder, pooling_strategy, embedder.config.hidden_size
 
     def __init__(self, config: MultiExpConfig):
         super().__init__()
         self.use_cp = config.use_counter_party
         self.chunk_size = config.chunk_size
-        self.embedder, self.pool_text_fn = self.get_embedder(config)
-        text_dim = self.embedder.config.hidden_size
+        self.use_cached = config.use_cached_embeddings
+
+        self.embedder, self.pool_text_fn, text_dim = self.get_embedder(config)
 
         self.text_proj = nn.Linear(text_dim, config.hidden_dim)
         if self.use_cp:
@@ -138,13 +146,38 @@ class TransactionEncoder(nn.Module):
         return full_embedding.view(b, n, -1)
 
     def forward(self, input_ids, attention_mask, amounts, days, calendar_features, cp_input_ids=None,
-                cp_attention_mask=None):
-        desc_emb = self._encode_text_stream(input_ids, attention_mask, self.text_proj)
+                cp_attention_mask=None,
+                # New Arguments for Cached Mode
+                precomputed_text_embs=None, precomputed_cp_embs=None
+                ):
+
+        # --- 1. Text Logic ---
+        if self.use_cached:
+            if precomputed_text_embs is None:
+                raise ValueError("Model configured for cached embeddings but none provided in forward()")
+            # Project the pre-computed embeddings
+            # shape [B, S, EmbDim] -> [B, S, HiddenDim]
+            desc_emb = self.text_proj(precomputed_text_embs)
+        else:
+            # Run the HuggingFace model
+            desc_emb = self._encode_text_stream(input_ids, attention_mask, self.text_proj)
+
+        # --- 2. Other Features ---
         amt_emb = self.amount_proj(amounts)
         freq_emb = self.time_encoder(days)
         phase_emb = self.calendar_proj(calendar_features)
+
         fused = desc_emb + amt_emb + freq_emb + phase_emb
-        if self.use_cp and cp_input_ids is not None:
-            cp_emb = self._encode_text_stream(cp_input_ids, cp_attention_mask, self.cp_proj)
-            fused = fused + cp_emb
+
+        # --- 3. Counter Party Logic ---
+        if self.use_cp:
+            if self.use_cached:
+                if precomputed_cp_embs is not None:
+                    cp_emb = self.cp_proj(precomputed_cp_embs)
+                    fused = fused + cp_emb
+            else:
+                if cp_input_ids is not None:
+                    cp_emb = self._encode_text_stream(cp_input_ids, cp_attention_mask, self.cp_proj)
+                    fused = fused + cp_emb
+
         return self.layer_norm(fused)

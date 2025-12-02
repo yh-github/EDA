@@ -1,5 +1,6 @@
 import os
 from common.config import EmbModel
+from common.embedder import EmbeddingService
 from common.log_utils import setup_logging
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -69,22 +70,50 @@ class TuningManager:
         self.train_df, self.val_df, self.test_df = self._load_or_create_data()
 
         # 2. Pre-Build Datasets (Optimization)
-        # We assume max_text_length and max_seq_len are constant for the tuning session.
-        # This prevents tokenizing the entire dataset for every trial.
-        logger.info("Initializing persistent datasets for tuning...")
+        token_config = MultiExpConfig(emb_model=EmbModel(self.args.text_emb), use_counter_party=self.data_determined_use_cp)
+        self.emb_model = token_config.emb_model
+        self.tokenizer = get_tokenizer_cached(token_config.text_encoder_model)
 
-        base_config = MultiExpConfig(
-            text_encoder_model=EmbModel[self.args.text_emb].value,
-            use_counter_party=self.data_determined_use_cp
-        )
+        # We pre-build BOTH the standard dataset and the embedding service if we suspect usage
+        # Ideally, we check args. However, during tuning, 'unfreeze' might vary.
+        # But `use_cached_embeddings` implies a specific architecture choice.
+        # We'll allow the TuningManager to hold onto the EmbeddingService if initialized.
+        self.embedding_service = None
 
-        tokenizer = get_tokenizer_cached(base_config.text_encoder_model)
+        # Standard Tokenized Datasets (Always created as fallback/default)
+        logger.info("Initializing Standard (Tokenized) Datasets...")
 
-        logger.info("Building Train Dataset (Cached)...")
-        self.train_ds = MultiTransactionDataset(self.train_df, base_config, tokenizer)
+        self.train_ds_tokenized = MultiTransactionDataset(self.train_df, token_config, tokenizer=self.tokenizer)
+        self.val_ds_tokenized = MultiTransactionDataset(self.val_df, token_config, tokenizer=self.tokenizer)
 
-        logger.info("Building Val Dataset (Cached)...")
-        self.val_ds = MultiTransactionDataset(self.val_df, base_config, tokenizer)
+        # Cached Embedding Datasets (Lazy load)
+        self.train_ds_cached = None
+        self.val_ds_cached = None
+
+    def _get_cached_datasets(self):
+        """Lazy initialization of cached-embedding datasets."""
+        if self.train_ds_cached is None:
+            logger.info("Initializing Cached Embedding Datasets (One-time compute)...")
+
+            # Init Service
+            if self.embedding_service is None:
+                # Use default max_length=64 for caching if not specified
+                params = EmbeddingService.Params(model_name=self.emb_model)
+                self.embedding_service = EmbeddingService.create(params)
+
+            # Create Config
+            cache_config = MultiExpConfig(
+                emb_model=self.emb_model,
+                use_counter_party=self.data_determined_use_cp,
+                use_cached_embeddings=True
+            )
+
+            self.train_ds_cached = MultiTransactionDataset(self.train_df, cache_config,
+                                                           embedding_service=self.embedding_service)
+            self.val_ds_cached = MultiTransactionDataset(self.val_df, cache_config,
+                                                         embedding_service=self.embedding_service)
+
+        return self.train_ds_cached, self.val_ds_cached
 
     def _load_or_create_data(self):
         if self.cache_path.exists() and not self.args.force_recreate:
@@ -129,7 +158,7 @@ class TuningManager:
             raise optuna.TrialPruned()
 
         # --- Hyperparams ---
-        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [1, 2])
+        unfreeze = trial.suggest_categorical("unfreeze_last_n_layers", [0, 1, 2])
 
         lr_min = 1e-5 if unfreeze > 0 else 1e-4
         lr_max = 1e-3
@@ -143,7 +172,11 @@ class TuningManager:
         contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.3, 0.6)
 
         defaults = MultiExpConfig()
-        emb_str: str = EmbModel[self.args.text_emb].value
+        emb_model:EmbModel = EmbModel(self.args.text_emb)
+
+        # --- SMART LOGIC: Switch to Cached Mode if unfreeze == 0 ---
+        # This gives us massive speedups for frozen trials without penalizing fine-tuning trials
+        use_cached = (unfreeze == 0)
 
         config = MultiExpConfig(
             learning_rate=lr,
@@ -155,25 +188,33 @@ class TuningManager:
             unfreeze_last_n_layers=unfreeze,
             normalization_type=norm_type,
 
+            # Enable cached mode if completely frozen
+            use_cached_embeddings=use_cached,
+
             # Passthroughs
             num_epochs=self.args.epochs,
             batch_size=self.args.batch_size,
             data_path=self.args.data_path,
             output_dir=self.args.output_dir,
-            text_encoder_model=emb_str,
+            emb_model=emb_model,
             metric_to_track=self.args.metric_to_track,
             early_stopping_patience=defaults.early_stopping_patience,
             use_counter_party=self.data_determined_use_cp,
-
-            # --- TASK SWITCHING ---
-            task_type=self.args.task_type  # 'binary' or 'multiclass'
+            task_type=self.args.task_type
         )
 
         set_global_seed(config.random_state)
 
-        # REUSE PRE-BUILT DATASETS
-        train_loader = get_dataloader(self.train_df, config, shuffle=True, dataset=self.train_ds)
-        val_loader = get_dataloader(self.val_df, config, shuffle=False, dataset=self.val_ds)
+        # --- DYNAMIC DATASET SELECTION ---
+        if use_cached:
+            # Load cached-embedding datasets
+            train_ds, val_ds = self._get_cached_datasets()
+        else:
+            # Use standard tokenized datasets
+            train_ds, val_ds = self.train_ds_tokenized, self.val_ds_tokenized
+
+        train_loader = get_dataloader(self.train_df, config, shuffle=True, dataset=train_ds)
+        val_loader = get_dataloader(self.val_df, config, shuffle=False, dataset=val_ds)
 
         # --- DYNAMIC MODEL SELECTION ---
         if config.task_type == "binary":
@@ -225,28 +266,19 @@ def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
 
 def main():
     defaults = MultiExpConfig()
-    parser = argparse.ArgumentParser(description="Multi-Model Hyperparameter Tuning")
+    parser = argparse.ArgumentParser(description="Multi-Model Tuning")
     parser.add_argument("--data_path", type=str, default=defaults.data_path)
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
-    parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
+    parser.add_argument("--study_name", type=str, default=None)
     parser.add_argument("--n_trials", type=int, default=100)
-    parser.add_argument("--unfreeze_last_n_layers", type=int, default=defaults.unfreeze_last_n_layers)
     parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
     parser.add_argument("--force_recreate", action="store_true")
-    parser.add_argument("--text_emb", type=str, default="MPNET") # TODO fix in config
-    parser.add_argument("--metric_to_track", type=str, default="cycle_f1",
-        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
+    parser.add_argument("--text_emb", type=str, default="MPNET")
+    parser.add_argument("--metric_to_track", type=str, default="cycle_f1", help="Default cycle_f1 for binary task")
     parser.add_argument("--task_type", type=str, default="binary", choices=["binary", "multiclass"])
-
-
-    parser.add_argument("--edge_informed_type", type=str, default=defaults.edge_informed_type,
-                        choices=["no", "edge_informed_max", "edge_informed_mean"],
-                        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
-
-
     args = parser.parse_args()
 
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"

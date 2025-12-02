@@ -34,8 +34,14 @@ class MultiExpConfig:
     task_type: str = "binary"
 
     # Model Hyperparameters
-    text_encoder_model: str = EmbModel.MPNET.value
+    emb_model:EmbModel = EmbModel.MPNET.value
+
+    # If 0, we can optionally use use_cached_embeddings=True for massive speedup
     unfreeze_last_n_layers: int = 0
+
+    # NEW: If True, uses EmbeddingService to pre-compute vectors.
+    # Must be False if unfreeze_last_n_layers > 0.
+    use_cached_embeddings: bool = False
 
     hidden_dim: int = 256
     num_heads: int = 4
@@ -104,3 +110,7 @@ class MultiExpConfig:
     @property
     def device(self) -> torch.device:
         return get_device()
+
+    @property
+    def text_encoder_model(self) -> str:
+        return self.emb_model.value()

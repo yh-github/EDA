@@ -38,14 +38,19 @@ class BinaryTransactionTransformer(nn.Module):
         self.binary_head = nn.Linear(config.hidden_dim, 1)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Unwrap the correct inputs based on caching strategy
+        # The collate_fn ensures the right keys exist (e.g., 'cached_text' vs 'input_ids')
+
         x = self.encoder(
-            batch['input_ids'],
-            batch['attention_mask'],
-            batch['amounts'],
-            batch['days'],
-            batch['calendar_features'],
+            input_ids=batch.get('input_ids'),
+            attention_mask=batch.get('attention_mask'),
+            amounts=batch['amounts'],
+            days=batch['days'],
+            calendar_features=batch['calendar_features'],
             cp_input_ids=batch.get('cp_input_ids'),
-            cp_attention_mask=batch.get('cp_attention_mask')
+            cp_attention_mask=batch.get('cp_attention_mask'),
+            precomputed_text_embs=batch.get('cached_text'),
+            precomputed_cp_embs=batch.get('cached_cp')
         )
 
         src_key_padding_mask = ~batch['padding_mask']

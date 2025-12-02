@@ -10,16 +10,24 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from multi.config import MultiExpConfig, MultiFieldConfig
+from common.embedder import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
 
 class TransactionSample(TypedDict):
     """Output of Dataset.__getitem__ (Numpy Arrays)"""
-    text_ids: npt.NDArray[np.int64]
-    text_mask: npt.NDArray[np.int64]
+    # Standard Tokenizer Path
+    text_ids: Optional[npt.NDArray[np.int64]]
+    text_mask: Optional[npt.NDArray[np.int64]]
     cp_ids: Optional[npt.NDArray[np.int64]]
     cp_mask: Optional[npt.NDArray[np.int64]]
+
+    # Cached Embedding Path
+    cached_text: Optional[npt.NDArray[np.float32]]
+    cached_cp: Optional[npt.NDArray[np.float32]]
+
+    # Shared
     amounts: npt.NDArray[np.float32]
     days: npt.NDArray[np.float32]
     calendar_features: npt.NDArray[np.float32]
@@ -30,22 +38,26 @@ class TransactionSample(TypedDict):
 
 class TransactionBatch(TypedDict):
     """Output of collate_fn (PyTorch Tensors)"""
-    input_ids: torch.Tensor  # [B, S, L_text]
-    attention_mask: torch.Tensor  # [B, S, L_text]
+    # Optional inputs based on mode
+    input_ids: Optional[torch.Tensor]
+    attention_mask: Optional[torch.Tensor]
     cp_input_ids: Optional[torch.Tensor]
     cp_attention_mask: Optional[torch.Tensor]
-    amounts: torch.Tensor  # [B, S, 1]
-    days: torch.Tensor  # [B, S, 1]
-    calendar_features: torch.Tensor  # [B, S, 6]
-    # adjacency_target: REMOVED (Computed on GPU)
-    adjacency_target: Optional[torch.Tensor]  # Kept as None for type safety if needed, but unused
-    cycle_target: torch.Tensor  # [B, S]
-    pattern_ids: torch.Tensor  # [B, S]
-    padding_mask: torch.Tensor  # [B, S] (Bool)
-    original_index: torch.Tensor  # [B, S]
+    cached_text: Optional[torch.Tensor]
+    cached_cp: Optional[torch.Tensor]
+
+    # Shared
+    amounts: torch.Tensor
+    days: torch.Tensor
+    calendar_features: torch.Tensor
+    adjacency_target: Optional[torch.Tensor]
+    cycle_target: torch.Tensor
+    pattern_ids: torch.Tensor
+    padding_mask: torch.Tensor
+    original_index: torch.Tensor
 
 
-# --- TOKENIZER CACHE ---
+# --- CACHES ---
 _TOKENIZER_CACHE = {}
 
 
@@ -62,16 +74,26 @@ def get_dataloader(
         shuffle: bool = True,
         n_workers: int = 4,
         oversample_positives: bool = True,
-        # Option to reuse an existing dataset to skip preprocessing
-        dataset: 'MultiTransactionDataset' = None
+        # Option to reuse an existing dataset
+        dataset: 'MultiTransactionDataset' = None,
+        # Option to pass embedding service for cached mode
+        embedding_service: Optional[EmbeddingService] = None
 ) -> DataLoader:
     """
     Factory function to create a DataLoader.
-    If 'dataset' is provided, it skips dataframe preprocessing.
+    Supports both Tokenizer (standard) and EmbeddingService (cached) paths.
     """
     if dataset is None:
-        tokenizer = get_tokenizer_cached(config.text_encoder_model)
-        dataset = MultiTransactionDataset(df.copy(), config, tokenizer)
+        if config.use_cached_embeddings:
+            if embedding_service is None:
+                # If not provided, create a temp one (warn: might re-load model)
+                logger.warning("use_cached_embeddings=True but no EmbeddingService provided. Initializing new one.")
+                params = EmbeddingService.Params(model_name=config.emb_model)
+                embedding_service = EmbeddingService.create(params)
+            dataset = MultiTransactionDataset(df.copy(), config, embedding_service=embedding_service)
+        else:
+            tokenizer = get_tokenizer_cached(config.text_encoder_model)
+            dataset = MultiTransactionDataset(df.copy(), config, tokenizer=tokenizer)
 
     collate = partial(collate_fn, config=config)
 
@@ -83,11 +105,8 @@ def get_dataloader(
         num_neg = len(has_positives) - num_pos
 
         if num_pos > 0:
-            # Standard Inverse Frequency Weighting
             weight_pos = 1.0 / num_pos
             weight_neg = 1.0 / num_neg
-
-            # Boost positives significantly
             weights = np.where(has_positives > 0, weight_pos, weight_neg)
 
             logger.info(f"Applying WeightedRandomSampler: {num_pos} Positive Windows vs {num_neg} Negative Windows")
@@ -102,7 +121,7 @@ def get_dataloader(
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=shuffle,  # False if sampler is active
+        shuffle=shuffle,
         sampler=sampler,
         collate_fn=collate,
         num_workers=n_workers,
@@ -112,9 +131,20 @@ def get_dataloader(
 
 
 class MultiTransactionDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, config: MultiExpConfig, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self,
+                 df: pd.DataFrame,
+                 config: MultiExpConfig,
+                 tokenizer: Optional[PreTrainedTokenizerBase] = None,
+                 embedding_service: Optional[EmbeddingService] = None):
+
         self.config = config
         self.fields = MultiFieldConfig()
+
+        # Validation
+        if config.use_cached_embeddings and embedding_service is None:
+            raise ValueError("Config expects cached embeddings but no EmbeddingService provided.")
+        if not config.use_cached_embeddings and tokenizer is None:
+            raise ValueError("Config expects standard tokenization but no Tokenizer provided.")
 
         logger.info(f"Preprocessing {len(df)} rows (Vectorized)...")
 
@@ -174,28 +204,42 @@ class MultiTransactionDataset(Dataset):
             0).values.astype(np.int64)
         self.all_true_indices: npt.NDArray[np.int64] = df['_true_index'].values.astype(np.int64)
 
-        # 3. Tokenize
-        logger.info("Tokenizing text data...")
-        self.text_input_ids, self.text_attn_mask = self._batch_tokenize(
-            df[self.fields.text].fillna("").astype(str).tolist(),
-            tokenizer,
-            config.max_text_length
-        )
+        # 3. Text Handling (Tokenize OR Cache)
+        text_list = df[self.fields.text].fillna("").astype(str).tolist()
 
-        self.cp_input_ids: Optional[npt.NDArray[np.int64]] = None
-        self.cp_attn_mask: Optional[npt.NDArray[np.int64]] = None
+        self.text_input_ids = None
+        self.text_attn_mask = None
+        self.cached_text = None
+
+        if config.use_cached_embeddings:
+            logger.info("Using EmbeddingService to pre-compute/fetch Text Embeddings...")
+            self.cached_text = embedding_service.embed(text_list)
+        else:
+            logger.info("Tokenizing text data...")
+            self.text_input_ids, self.text_attn_mask = self._batch_tokenize(
+                text_list, tokenizer, config.max_text_length
+            )
+
+        # 4. Counter Party Handling
+        self.cp_input_ids = None
+        self.cp_attn_mask = None
+        self.cached_cp = None
 
         if config.use_counter_party:
             if self.fields.counter_party in df.columns:
-                self.cp_input_ids, self.cp_attn_mask = self._batch_tokenize(
-                    df[self.fields.counter_party].fillna("").astype(str).tolist(),
-                    tokenizer,
-                    config.max_cp_length
-                )
+                cp_list = df[self.fields.counter_party].fillna("").astype(str).tolist()
+
+                if config.use_cached_embeddings:
+                    logger.info("Using EmbeddingService to pre-compute/fetch CounterParty Embeddings...")
+                    self.cached_cp = embedding_service.embed(cp_list)
+                else:
+                    self.cp_input_ids, self.cp_attn_mask = self._batch_tokenize(
+                        cp_list, tokenizer, config.max_cp_length
+                    )
             else:
                 self.config.use_counter_party = False
 
-        # 4. Partitioning
+        # 5. Partitioning
         logger.info("Computing Window partitions...")
         df['__internal_idx__'] = np.arange(len(df))
 
@@ -269,22 +313,34 @@ class MultiTransactionDataset(Dataset):
             days_relative = np.array([], dtype=np.float32)
 
         sample: TransactionSample = {
-            "text_ids": self.text_input_ids[indices],
-            "text_mask": self.text_attn_mask[indices],
-            "cp_ids": self.cp_input_ids[indices] if self.cp_input_ids is not None else None,
-            "cp_mask": self.cp_attn_mask[indices] if self.cp_attn_mask is not None else None,
+            # Shared
             "amounts": self.all_log_amounts[indices],
             "days": days_relative,
             "calendar_features": self.all_calendar[indices],
             "pattern_ids": self.all_pattern_ids[indices],
             "cycles": self.all_cycles[indices],
-            "original_index": self.all_true_indices[indices]
+            "original_index": self.all_true_indices[indices],
+
+            # Text Options (One set will be None)
+            "text_ids": self.text_input_ids[indices] if self.text_input_ids is not None else None,
+            "text_mask": self.text_attn_mask[indices] if self.text_attn_mask is not None else None,
+            "cached_text": self.cached_text[indices] if self.cached_text is not None else None,
+
+            # CP Options
+            "cp_ids": self.cp_input_ids[indices] if self.cp_input_ids is not None else None,
+            "cp_mask": self.cp_attn_mask[indices] if self.cp_attn_mask is not None else None,
+            "cached_cp": self.cached_cp[indices] if self.cached_cp is not None else None,
         }
         return sample
 
 
 def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> TransactionBatch:
-    lengths = [len(x['text_ids']) for x in batch]
+    # Length determination depends on what data we have
+    if config.use_cached_embeddings:
+        lengths = [len(x['cached_text']) for x in batch]
+    else:
+        lengths = [len(x['text_ids']) for x in batch]
+
     max_len = max(lengths)
     batch_size = len(batch)
 
@@ -301,42 +357,47 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
             out[_i, :row_len] = data
         return out
 
-    input_ids = collate_tensor("text_ids", (config.max_text_length,), torch.long)
-    attention_mask = collate_tensor("text_mask", (config.max_text_length,), torch.long)
+    # Shared Tensors
     amounts = collate_tensor("amounts", (1,), torch.float32)
     days = collate_tensor("days", (1,), torch.float32)
     calendar = collate_tensor("calendar_features", (6,), torch.float32)
     cycles = collate_tensor("cycles", (), torch.long)
-
-    # Pattern IDs get padded with -1
     pattern_ids = collate_tensor("pattern_ids", (), torch.long, padding_val=-1)
     original_index = collate_tensor("original_index", (), torch.long, padding_val=-1)
 
-    # Padding mask (True = Valid, False = Pad)
     padding_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
     for i in range(batch_size):
         padding_mask[i, :lengths[i]] = True
 
-    # --- REMOVED CPU ADJACENCY MATRIX GENERATION ---
-    # It is now computed on GPU in the trainer for speed
-
     result: TransactionBatch = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
         "amounts": amounts,
         "days": days,
         "calendar_features": calendar,
-        "adjacency_target": None,  # Unused
+        "adjacency_target": None,
         "cycle_target": cycles,
         "pattern_ids": pattern_ids,
         "padding_mask": padding_mask,
         "original_index": original_index,
-        "cp_input_ids": None,
-        "cp_attention_mask": None
+        # Defaults
+        "input_ids": None, "attention_mask": None,
+        "cp_input_ids": None, "cp_attention_mask": None,
+        "cached_text": None, "cached_cp": None
     }
 
-    if config.use_counter_party:
-        result["cp_input_ids"] = collate_tensor("cp_ids", (config.max_cp_length,), torch.long)
-        result["cp_attention_mask"] = collate_tensor("cp_mask", (config.max_cp_length,), torch.long)
+    # Conditional Collation
+    if config.use_cached_embeddings:
+        # Determine embedding dimension from the first sample (safe assumption)
+        emb_dim = batch[0]['cached_text'].shape[1]
+        result["cached_text"] = collate_tensor("cached_text", (emb_dim,), torch.float32)
+
+        if config.use_counter_party:
+            result["cached_cp"] = collate_tensor("cached_cp", (emb_dim,), torch.float32)
+    else:
+        result["input_ids"] = collate_tensor("text_ids", (config.max_text_length,), torch.long)
+        result["attention_mask"] = collate_tensor("text_mask", (config.max_text_length,), torch.long)
+
+        if config.use_counter_party:
+            result["cp_input_ids"] = collate_tensor("cp_ids", (config.max_cp_length,), torch.long)
+            result["cp_attention_mask"] = collate_tensor("cp_mask", (config.max_cp_length,), torch.long)
 
     return result
