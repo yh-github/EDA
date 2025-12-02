@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def _align_df_for_dataset(df: pd.DataFrame, fields: MultiFieldConfig) -> pd.DataFrame:
-    df = df.copy()
-    df = df.reset_index(drop=True)
+    # df = df.copy()
+    # df = df.reset_index(drop=True)
     return df
 
 
