@@ -273,6 +273,13 @@ def collate_fn(batch: list[dict], config: MultiExpConfig):
         for _i, _item in enumerate(batch):
             row_len = lengths[_i]
             data = torch.from_numpy(_item[key])
+
+            # --- Ensure Dimensions Match ---
+            # If shape_suffix implies a trailing dimension (e.g. (1,)) but data is 1D (seq_len,),
+            # we need to view/reshape it to (seq_len, 1) to match out's slice (seq_len, 1).
+            if shape_suffix and data.ndim == 1:
+                data = data.view(-1, *shape_suffix)
+
             out[_i, :row_len] = data
         return out
 
