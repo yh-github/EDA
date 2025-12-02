@@ -13,12 +13,14 @@ import shutil
 from pathlib import Path
 import optuna
 from multi.config import MultiExpConfig, MultiFieldConfig
-from multi.encoder import TransactionTransformer, BinaryTransactionTransformer
-from multi.trainer import MultiTrainer, BinaryMultiTrainer
+from multi.model import TransactionTransformer
+from multi.binary.binary_model import BinaryTransactionTransformer
+from multi.trainer import MultiTrainer
+from multi.binary.binary_trainer import BinaryMultiTrainer
 from multi.data import get_dataloader
 from multi.data_utils import load_and_prepare_data
 from common.data import create_train_val_test_split
-from common.exp_utils import set_global_seed, get_git_info
+from common.exp_utils import set_global_seed
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -90,6 +92,7 @@ class TuningManager:
 
         logger.info(f"Saving splits to {self.cache_path}...")
         with open(self.cache_path, 'wb') as f:
+            # noinspection PyTypeChecker
             pickle.dump({
                 'train': train_df,
                 'val': val_df,
@@ -215,10 +218,7 @@ def main():
     parser.add_argument("--force_recreate", action="store_true")
     parser.add_argument("--text_emb", type=str, default="MPNET")
     parser.add_argument("--metric_to_track", type=str, default="cycle_f1", help="Default cycle_f1 for binary task")
-
-    # NEW FLAG
     parser.add_argument("--task_type", type=str, default="binary", choices=["binary", "multiclass"])
-
     args = parser.parse_args()
 
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
