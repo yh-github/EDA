@@ -15,6 +15,7 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
     Factory function to create a DataLoader from a DataFrame.
     """
     # Use fast tokenizer if available
+    # use_fast=True is default, but explicit is good.
     tokenizer = AutoTokenizer.from_pretrained(config.text_encoder_model, use_fast=True)
 
     # Pass a copy to ensure we don't mutate the external DF
@@ -33,6 +34,57 @@ def get_dataloader(df: pd.DataFrame, config: MultiExpConfig, shuffle: bool = Tru
     )
 
 
+def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConfig):
+    """
+    Analyzes and logs statistics about token lengths for text and counter_party.
+    """
+    fields = MultiFieldConfig()
+
+    logger.info("=" * 60)
+    logger.info("📊 TOKEN DISTRIBUTION ANALYSIS")
+    logger.info("=" * 60)
+
+    def report_stats(name, texts, max_len):
+        if not texts:
+            logger.info(f"Feature '{name}' is empty or disabled.")
+            return
+
+        # Batch encode for speed
+        encodings = tokenizer(texts, truncation=False, padding=False)['input_ids']
+        lengths_np = np.array([len(x) for x in encodings])
+
+        logger.info(f"--- {name} (Max Limit: {max_len}) ---")
+        logger.info(f"  Min: {np.min(lengths_np)}")
+        logger.info(f"  Max: {np.max(lengths_np)}")
+        logger.info(f"  Avg: {np.mean(lengths_np):.2f}")
+        logger.info(f"  Std: {np.std(lengths_np):.2f}")
+        logger.info(f"  Median: {np.median(lengths_np)}")
+
+        not_truncated = np.sum(lengths_np <= max_len)
+        pct_kept = (not_truncated / len(lengths_np)) * 100
+        logger.info(f"  ✅ Not Truncated (<={max_len}): {pct_kept:.2f}%")
+
+        p95 = np.percentile(lengths_np, 95)
+        p99 = np.percentile(lengths_np, 99)
+        logger.info(f"  95th Percentile: {p95}")
+        logger.info(f"  99th Percentile: {p99}")
+        print("")
+
+    logger.info("Analyzing 'bankRawDescription'...")
+    all_texts = df[fields.text].fillna("").astype(str).tolist()
+    report_stats("Text", all_texts, config.max_text_length)
+
+    if config.use_counter_party and fields.counter_party in df.columns:
+        logger.info("Analyzing 'counter_party'...")
+        all_cps = df[fields.counter_party].fillna("").astype(str).tolist()
+        non_empty_cps = [x for x in all_cps if x.strip()]
+        if non_empty_cps:
+            report_stats("CounterParty (Non-Empty)", non_empty_cps, config.max_cp_length)
+        else:
+            logger.info("CounterParty column exists but contains no data.")
+    logger.info("=" * 60)
+
+
 class MultiTransactionDataset(Dataset):
     def __init__(self, df: pd.DataFrame, config: MultiExpConfig, tokenizer: PreTrainedTokenizerBase):
         self.config = config
@@ -41,16 +93,20 @@ class MultiTransactionDataset(Dataset):
         # 1. Global Preprocessing (Vectorized)
         logger.info(f"Preprocessing {len(df)} rows (Vectorized)...")
 
-        # Ensure Date
-        if not pd.api.types.is_datetime64_any_dtype(df[self.fields.date]):
-            df[self.fields.date] = pd.to_datetime(df[self.fields.date])
+        # Ensure Date is datetime
+        df[self.fields.date] = pd.to_datetime(df[self.fields.date], errors='coerce')
+
+        # Drop invalid dates if any
+        if df[self.fields.date].isnull().any():
+            logger.warning("Found NaT dates. Dropping invalid rows.")
+            df = df.dropna(subset=[self.fields.date])
 
         # Preserve Index
         if '_true_index' not in df.columns:
             df['_true_index'] = df.index
 
         # Clean/Encode Labels
-        self._encode_metadata(df)
+        df = self._encode_metadata(df)
 
         # 2. Pre-calculate Continuous Features (Numpy speed)
         # Amounts
@@ -62,6 +118,7 @@ class MultiTransactionDataset(Dataset):
         self.all_log_amounts = np.log1p(np.abs(amounts)) * direction
 
         # Dates (Normalized)
+        # Normalize to midnight to remove time-of-day noise (CRITICAL for recurring patterns)
         dates = df[self.fields.date]
         normalized_dates = dates.dt.normalize()
         min_date = normalized_dates.min()
@@ -158,7 +215,8 @@ class MultiTransactionDataset(Dataset):
         # Mask noise
         noise_mask = df['patternId_str'].isin(['-1', '-1.0', 'None', 'nan', '<NA>'])
         df.loc[noise_mask, 'patternId_encoded'] = -1
-        df.drop(columns=['patternId_str'], inplace=True)
+        df = df.drop(columns=['patternId_str'])
+        return df
 
     def _batch_tokenize(self, texts, tokenizer, max_len, batch_size=10000):
         """Tokenize in batches to check memory usage and show progress."""
@@ -263,25 +321,3 @@ def collate_fn(batch: list[dict], tokenizer, config: MultiExpConfig):
         result["cp_attention_mask"] = collate_tensor("cp_mask", (config.max_cp_length,), torch.long)
 
     return result
-
-
-# Utility to check tokens (Unchanged logic, just minor type hint fixes)
-def analyze_token_distribution(df: pd.DataFrame, tokenizer, config: MultiExpConfig):
-    fields = MultiFieldConfig()
-    logger.info("=" * 60)
-    logger.info("📊 TOKEN DISTRIBUTION ANALYSIS")
-
-    def report_stats(name, texts, max_len):
-        if not texts: return
-        # Use batch encode for speed
-        encodings = tokenizer(texts, truncation=False, padding=False)['input_ids']
-        lengths_np = np.array([len(x) for x in encodings])
-
-        logger.info(f"--- {name} (Max: {max_len}) ---")
-        logger.info(f"  Avg: {np.mean(lengths_np):.2f} | P99: {np.percentile(lengths_np, 99)}")
-        not_truncated = np.sum(lengths_np <= max_len)
-        logger.info(f"  ✅ Kept: {(not_truncated / len(lengths_np)) * 100:.2f}%")
-
-    logger.info("Analyzing 'bankRawDescription'...")
-    report_stats("Text", df[fields.text].fillna("").astype(str).tolist(), config.max_text_length)
-    logger.info("=" * 60)
