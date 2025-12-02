@@ -118,6 +118,7 @@ class BaseTrainer:
         patience_counter = 0
 
         logger.info(f"Starting training for {epochs} epochs. Track: {metric_to_track}")
+        logger.info(str(self.config))
 
         for epoch in range(1, epochs + 1):
             if stop_callback and stop_callback(): self.stop_requested = True
@@ -160,7 +161,7 @@ class BaseTrainer:
 
 
 class MultiTrainer(BaseTrainer):
-    """Legacy Multiclass Trainer"""
+    """Multiclass Trainer"""
 
     def __init__(self, model, config: MultiExpConfig):
         super().__init__(model, config)
@@ -217,12 +218,148 @@ class MultiTrainer(BaseTrainer):
     @torch.no_grad()
     def evaluate(self, dataloader):
         self.model.eval()
-        # ... (Legacy evaluation code omitted for brevity, logic remains in original file)
-        # NOTE: For brevity, I am not re-pasting the massive evaluation logic here.
-        # Ideally, we import or keep the original MultiTrainer class fully intact.
-        # Since I'm creating a new class, I'll focus on BinaryMultiTrainer.
-        pass
 
+        # Adjacency Collections
+        all_pred_edges = []
+        all_pred_probs = []
+        all_true_edges = []
+
+        # Cycle Collections
+        all_cycle_preds = []
+        all_cycle_probs = []  # Store full probability distribution for PR-AUC
+        all_cycle_targets = []
+
+        total_val_loss = 0.0
+
+        for batch in dataloader:
+            if self.stop_requested: break
+
+            batch = {k: v.to(self.config.device) for k, v in batch.items()}
+
+            try:
+                with torch.amp.autocast('cuda'):
+                    adj_logits, cycle_logits, embeddings = self.model(batch)
+                    loss, _, _, _ = self._compute_loss_with_pattern_ids(batch, adj_logits, cycle_logits, embeddings)
+
+                total_val_loss += loss.item()
+
+                # --- Adjacency Metrics ---
+                probs = torch.sigmoid(adj_logits)
+                preds = (probs > 0.5).float()
+
+                mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
+                eye = torch.eye(preds.shape[1], device=self.config.device).unsqueeze(0)
+                mask_2d = mask_2d & (eye == 0)
+
+                all_pred_edges.extend(preds[mask_2d].cpu().numpy())
+                all_pred_probs.extend(probs[mask_2d].cpu().numpy())
+                all_true_edges.extend(batch['adjacency_target'][mask_2d].cpu().numpy())
+
+                # --- Cycle Metrics ---
+                # cycle_logits: [Batch, Seq, NumClasses]
+                # cycle_target: [Batch, Seq]
+                cycle_preds = torch.argmax(cycle_logits, dim=-1)
+                cycle_probs = torch.softmax(cycle_logits, dim=-1)  # Full probs [B, S, C]
+                mask_1d = batch['padding_mask'].view(-1)
+
+                flat_preds = cycle_preds.view(-1)[mask_1d]
+                flat_targets = batch['cycle_target'].view(-1)[mask_1d]
+
+                # Flat Probs: [TotalTokens, NumClasses]
+                flat_probs = cycle_probs.view(-1, cycle_probs.shape[-1])[mask_1d]
+
+                all_cycle_preds.extend(flat_preds.cpu().numpy())
+                all_cycle_targets.extend(flat_targets.cpu().numpy())
+                all_cycle_probs.extend(flat_probs.cpu().numpy())
+
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                logger.warning("⚠️ OOM during Evaluation. Skipping batch.")
+                continue
+
+        if len(dataloader) > 0:
+            avg_val_loss = total_val_loss / len(dataloader)
+        else:
+            avg_val_loss = 999.0
+
+        # --- Compute Metrics ---
+        # 1. Adjacency
+        p = precision_score(all_true_edges, all_pred_edges, zero_division=0)
+        r = recall_score(all_true_edges, all_pred_edges, zero_division=0)
+        f1 = f1_score(all_true_edges, all_pred_edges, zero_division=0)
+
+        try:
+            pr_auc = average_precision_score(all_true_edges, all_pred_probs)
+            roc_auc = roc_auc_score(all_true_edges, all_pred_probs)
+        except Exception as e:
+            logger.warning(f"{str(e)}, setting pr_auc=0.0")
+            pr_auc = 0.0
+            roc_auc = 0.5
+
+        # 2. Cycle (Detailed Metrics)
+        cycle_targets_np = np.array(all_cycle_targets)
+        cycle_preds_np = np.array(all_cycle_preds)
+        cycle_probs_np = np.array(all_cycle_probs)
+
+        # A. Basic Accuracy & Binary Detection F1 (Recurring vs Noise)
+        cycle_acc = accuracy_score(cycle_targets_np, cycle_preds_np)
+
+        bin_cycle_pred = (cycle_preds_np > 0).astype(int)
+        bin_cycle_true = (cycle_targets_np > 0).astype(int)
+        cycle_f1 = f1_score(bin_cycle_true, bin_cycle_pred, zero_division=0)
+
+        # B. Macro PR-AUC (Average over all classes)
+        # We need to binarize the targets for One-vs-Rest calculation
+        # This handles the multi-class nature of the problem
+        try:
+            # Check if we have enough classes present to compute AUC
+            unique_classes = np.unique(cycle_targets_np)
+            if len(unique_classes) > 1:
+                # We use 'macro' to weight all classes equally (detecting rare weekly patterns is as important as monthly)
+                # Or 'weighted' to account for imbalance. 'macro' is usually better for diagnostics.
+                # However, sklearn requires one-hot targets for roc_auc_score/average_precision_score if multi-class
+                # The easy way: Convert targets to one-hot manually or rely on 'ovr' logic if simple
+
+                # Manual One-Hot for robustness
+                n_classes = cycle_probs_np.shape[1]
+                targets_one_hot = np.zeros((len(cycle_targets_np), n_classes))
+                targets_one_hot[np.arange(len(cycle_targets_np)), cycle_targets_np] = 1
+
+                cycle_pr_auc = average_precision_score(targets_one_hot, cycle_probs_np, average='macro')
+            else:
+                cycle_pr_auc = 0.0
+        except Exception as e:
+            logger.warning(f"Failed to compute Cycle PR-AUC: {str(e)}")
+            cycle_pr_auc = 0.0
+
+        # C. Detailed Breakdown (Precision/Recall/F1/Support per Class)
+        # We output this as a dict to be logged nicely
+
+        cycle_report_dict = classification_report(
+            cycle_targets_np,
+            cycle_preds_np,
+            zero_division=0,
+            output_dict=True
+        )
+
+        if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            self.scheduler.step(avg_val_loss)
+        else:
+            self.scheduler.step()
+
+        return {
+            "val_loss": avg_val_loss,
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "pr_auc": pr_auc,
+            "roc_auc": roc_auc,
+            # Subtask metrics
+            "cycle_acc": cycle_acc,
+            "cycle_f1": cycle_f1,
+            "cycle_pr_auc": cycle_pr_auc,
+            "cycle_report": cycle_report_dict
+        }
 
 class BinaryMultiTrainer(BaseTrainer):
     """
