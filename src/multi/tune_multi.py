@@ -176,7 +176,8 @@ class TuningManager:
             text_encoder_model=emb_str,
             metric_to_track=self.args.metric_to_track,
             early_stopping_patience=defaults.early_stopping_patience,
-            use_counter_party=self.data_determined_use_cp
+            use_counter_party=self.data_determined_use_cp,
+            edge_informed_type=self.args.edge_informed_type
         )
 
         set_global_seed(config.random_state)
