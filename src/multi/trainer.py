@@ -437,6 +437,10 @@ class BinaryMultiTrainer(BaseTrainer):
         all_true_edges, all_pred_edges, all_prob_edges = [], [], []
         all_true_bin, all_pred_bin, all_prob_bin = [], [], []
 
+        # New Collection: Clustering-as-Classifier
+        # We need to collect MAX clustering probability per node
+        all_clust_prob_max = []
+
         for batch in dataloader:
             batch = {k: v.to(self.config.device) for k, v in batch.items()}
 
@@ -447,6 +451,8 @@ class BinaryMultiTrainer(BaseTrainer):
 
             # --- Adjacency Metrics ---
             adj_probs = torch.sigmoid(adj_logits)
+
+            # 1. Edge Level (Standard Clustering Metrics)
             mask_2d = batch['padding_mask'].unsqueeze(1) & batch['padding_mask'].unsqueeze(2)
             eye = torch.eye(adj_probs.shape[1], device=self.config.device).unsqueeze(0)
             valid_edges = mask_2d & (eye == 0)
@@ -454,10 +460,23 @@ class BinaryMultiTrainer(BaseTrainer):
             all_prob_edges.extend(adj_probs[valid_edges].cpu().numpy())
             all_true_edges.extend(batch['adjacency_target'][valid_edges].cpu().numpy())
 
+            # 2. Node Level (Clustering as Detection)
+            # Find the max probability of connection to ANY other node (excluding self)
+            # Mask diagonal first
+            # adj_probs shape: [B, S, S]
+            adj_probs_masked = adj_probs.clone()
+            adj_probs_masked.masked_fill_(eye.bool(), 0.0)
+
+            # Max over columns (dim 2) gives [B, S] - best neighbor score for each node
+            max_neighbor_probs, _ = adj_probs_masked.max(dim=2)
+
+            # Mask out padding nodes
+            mask_1d = batch['padding_mask']
+            all_clust_prob_max.extend(max_neighbor_probs[mask_1d].cpu().numpy())
+
             # --- Binary Metrics ---
             bin_probs = torch.sigmoid(binary_logits).squeeze(-1)  # [B, S]
             bin_targets = (batch['cycle_target'] > 0).float()
-            mask_1d = batch['padding_mask']
 
             all_prob_bin.extend(bin_probs[mask_1d].cpu().numpy())
             all_true_bin.extend(bin_targets[mask_1d].cpu().numpy())
@@ -465,19 +484,27 @@ class BinaryMultiTrainer(BaseTrainer):
         # Metrics Calc
         metrics = {"val_loss": total_loss / max(1, len(dataloader))}
 
-        # Adjacency
+        # A. Adjacency (Graph Quality)
         if all_true_edges:
             p_edges = (np.array(all_prob_edges) > 0.5).astype(int)
             metrics['pr_auc'] = average_precision_score(all_true_edges, all_prob_edges)
             metrics['adj_f1'] = f1_score(all_true_edges, p_edges)
 
-        # Binary Classification
+        # B. Binary (Explicit Detection Head)
         if all_true_bin:
             p_bin = (np.array(all_prob_bin) > 0.5).astype(int)
             metrics['cycle_f1'] = f1_score(all_true_bin, p_bin)
             metrics['cycle_pr_auc'] = average_precision_score(all_true_bin, all_prob_bin)
             metrics['cycle_rec'] = recall_score(all_true_bin, p_bin)
             metrics['cycle_prec'] = precision_score(all_true_bin, p_bin)
+
+            # C. Clustering-as-Detection (Implicit Detection)
+            # How well does "having a neighbor" predict recurrence?
+            p_clust = (np.array(all_clust_prob_max) > 0.5).astype(int)
+            metrics['clust_f1'] = f1_score(all_true_bin, p_clust)
+            metrics['clust_p'] = precision_score(all_true_bin, p_clust)
+            metrics['clust_r'] = recall_score(all_true_bin, p_clust)
+            metrics['clust_pr_auc'] = average_precision_score(all_true_bin, all_clust_prob_max)
 
         if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
             self.scheduler.step(metrics['val_loss'])
@@ -488,9 +515,20 @@ class BinaryMultiTrainer(BaseTrainer):
 
     def log_metrics(self, metrics):
         logger.info(
-            f"  ADJ_PR_AUC: {metrics.get('pr_auc', 0):.3f} |"
+            f" ADJ_PR_AUC: {metrics.get('pr_auc', 0):.3f}"
+            f" ADJ_F1: {metrics.get('adj_f1', 0):.3f}"
+            f" ADJ_P: {metrics.get('adj_p', 0):.3f}"
+            f" ADJ_R: {metrics.get('adj_r', 0):.3f}"
+            f" |"
             f" BIN_F1: {metrics.get('cycle_f1', 0):.3f}"
             f" BIN_PR_AUC: {metrics.get('cycle_pr_auc', 0):.3f}"
             f" BIN_P: {metrics.get('cycle_prec', 0):.3f}"
-            f" BIN_REC: {metrics.get('cycle_rec', 0):.3f}"
+            f" BIN_R: {metrics.get('cycle_rec', 0):.3f}"
+        )
+        logger.info(
+            f"CLUST:"
+            f" PR_AUC={metrics.get('clust_pr_auc', 0):.3f}"
+            f" F1={metrics.get('clust_f1', 0):.3f}"
+            f" P={metrics.get('clust_p', 0):.3f}"
+            f" R={metrics.get('clust_r', 0):.3f}"
         )
