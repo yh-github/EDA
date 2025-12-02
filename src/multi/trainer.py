@@ -222,7 +222,7 @@ class MultiTrainer:
 
             # 3. Optuna Reporting (Report the metric we are optimizing for)
             if trial:
-                trial.report(current_score, epoch - 1)
+                trial.report(current_score, epoch)
                 if trial.should_prune():
                     logger.info(f"Trial pruned by Optuna based on {metric_to_track}.")
                     raise optuna.TrialPruned()
@@ -310,6 +310,7 @@ class MultiTrainer:
                     logger.warning(f"⚠️ NaN loss detected at Epoch {epoch_idx}, Batch {batch_idx}. Skipping step.")
                     self.optimizer.zero_grad()
                     batches_since_step = 0  # Reset accumulation
+                    num_batches_skipped += 1  # Track NaN batches separately
                     continue
 
             except torch.cuda.OutOfMemoryError:
@@ -322,6 +323,7 @@ class MultiTrainer:
                 if "out of memory" in str(e):
                     self.optimizer.zero_grad()
                     torch.cuda.empty_cache()
+                    batches_since_step = 0  # Reset accumulation counter
                     num_batches_skipped += 1
                     continue
                 raise e
