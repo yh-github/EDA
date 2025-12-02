@@ -88,8 +88,7 @@ def get_dataloader(
             if embedding_service is None:
                 # If not provided, create a temp one (warn: might re-load model)
                 logger.warning("use_cached_embeddings=True but no EmbeddingService provided. Initializing new one.")
-                params = EmbeddingService.Params(model_name=config.emb_model)
-                embedding_service = EmbeddingService.create(params)
+                embedding_service = EmbeddingService.create(EmbeddingService.Params(model_name=config.emb_model, max_length=config.max_text_length))
             dataset = MultiTransactionDataset(df.copy(), config, embedding_service=embedding_service)
         else:
             tokenizer = get_tokenizer_cached(config.text_encoder_model)
@@ -213,7 +212,7 @@ class MultiTransactionDataset(Dataset):
 
         if config.use_cached_embeddings:
             logger.info("Using EmbeddingService to pre-compute/fetch Text Embeddings...")
-            self.cached_text = embedding_service.embed(text_list)
+            self.cached_text = embedding_service.embed(text_list, config.max_text_length)
         else:
             logger.info("Tokenizing text data...")
             self.text_input_ids, self.text_attn_mask = self._batch_tokenize(
@@ -231,7 +230,7 @@ class MultiTransactionDataset(Dataset):
 
                 if config.use_cached_embeddings:
                     logger.info("Using EmbeddingService to pre-compute/fetch CounterParty Embeddings...")
-                    self.cached_cp = embedding_service.embed(cp_list)
+                    self.cached_cp = embedding_service.embed(cp_list, config.max_cp_length)
                 else:
                     self.cp_input_ids, self.cp_attn_mask = self._batch_tokenize(
                         cp_list, tokenizer, config.max_cp_length

@@ -99,7 +99,6 @@ class TuningManager:
 
             # Init Service
             if self.embedding_service is None:
-                # Use default max_length=64 for caching if not specified
                 params = EmbeddingService.Params(model_name=self.emb_model)
                 self.embedding_service = EmbeddingService.create(params)
 
