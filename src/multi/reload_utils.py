@@ -3,7 +3,7 @@ import pickle
 import torch
 from pathlib import Path
 from multi.config import MultiExpConfig
-from multi.encoder import TransactionTransformer
+from multi.model import TransactionTransformer
 from multi.tune_multi import get_data_cache_path
 
 logger = logging.getLogger(__name__)

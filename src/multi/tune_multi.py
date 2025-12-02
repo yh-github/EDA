@@ -20,12 +20,15 @@ from multi.binary.binary_trainer import BinaryMultiTrainer
 from multi.data import get_dataloader
 from multi.data_utils import load_and_prepare_data
 from common.data import create_train_val_test_split
-from common.exp_utils import set_global_seed
+from common.exp_utils import set_global_seed, get_git_info
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("hyper_tune")
 
+
+# TODO create experiment files with only the 'suggested' parameters
+# TODO  n_startup_trials
 
 class GracefulKiller:
     def __init__(self):
@@ -206,19 +209,28 @@ def get_next_study_name(storage_url: str, base_name: str = "multi_tune") -> str:
 
 def main():
     defaults = MultiExpConfig()
-    parser = argparse.ArgumentParser(description="Multi-Model Tuning")
+    parser = argparse.ArgumentParser(description="Multi-Model Hyperparameter Tuning")
     parser.add_argument("--data_path", type=str, default=defaults.data_path)
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
-    parser.add_argument("--study_name", type=str, default=None)
+    parser.add_argument("--study_name", type=str, default=None, help="If None, auto-increments multi_tune_{i}")
     parser.add_argument("--n_trials", type=int, default=100)
+    parser.add_argument("--unfreeze_last_n_layers", type=int, default=defaults.unfreeze_last_n_layers)
     parser.add_argument("--epochs", type=int, default=defaults.num_epochs)
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--random_state", type=int, default=defaults.random_state)
     parser.add_argument("--downsample", type=float, default=defaults.downsample)
     parser.add_argument("--force_recreate", action="store_true")
-    parser.add_argument("--text_emb", type=str, default="MPNET")
-    parser.add_argument("--metric_to_track", type=str, default="cycle_f1", help="Default cycle_f1 for binary task")
+    parser.add_argument("--text_emb", type=str, default="MPNET") # TODO fix in config
+    parser.add_argument("--metric_to_track", type=str, default="cycle_f1",
+        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
     parser.add_argument("--task_type", type=str, default="binary", choices=["binary", "multiclass"])
+
+
+    parser.add_argument("--edge_informed_type", type=str, default=defaults.edge_informed_type,
+                        choices=["no", "edge_informed_max", "edge_informed_mean"],
+                        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
+
+
     args = parser.parse_args()
 
     storage_url = f"sqlite:///{args.output_dir}/tuning.db"
@@ -230,7 +242,7 @@ def main():
         study_name = args.study_name
 
     setup_logging(log_dir=Path('logs/multi/'), file_prefix=study_name)
-    logger.info(f"Study: {study_name} | Task: {args.task_type} | PID: {os.getpid()}")
+    logger.info(f"Study: {study_name} | Task: {args.task_type} | PID: {os.getpid()} {get_git_info()}")
 
     manager = TuningManager(args, study_name)
 
@@ -241,6 +253,23 @@ def main():
         direction="maximize",
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
     )
+
+    # Save Process Info to Study User Attributes (Overwrite to update last run info)
+    current_pid = os.getpid()
+
+    # Maintain history of PIDs
+    all_pids = study.user_attrs.get("all_pids", [])
+    if not isinstance(all_pids, list):
+        all_pids = []
+
+    if current_pid not in all_pids:
+        all_pids.append(current_pid)
+        study.set_user_attr("all_pids", all_pids)
+
+    logger.info(f"Starting tuning study '{study_name}' with {args.n_trials} trials.")
+
+    study.set_user_attr("git_info", get_git_info())
+    study.set_user_attr("target_metric", args.metric_to_track)
 
     try:
         study.optimize(manager.objective, n_trials=args.n_trials)
