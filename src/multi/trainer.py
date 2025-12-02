@@ -8,6 +8,8 @@ import torch.nn.functional as fnn
 import os
 import numpy as np
 from torch.optim.lr_scheduler import LRScheduler
+
+from common.config import get_device
 from multi.config import MultiExpConfig
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
@@ -172,7 +174,7 @@ class MultiTrainer(BaseTrainer):
         pass
 
     def _compute_loss(self, batch, adj_logits, cycle_logits, embeddings):
-        device = self.config.device
+        device = get_device()
 
         # --- GPU ADJACENCY CALC ---
         p_ids = batch['pattern_ids']
