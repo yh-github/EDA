@@ -100,17 +100,37 @@ class MultiTransactionDataset(Dataset):
         # Clean/Encode Labels
         df = self._encode_metadata(df)
 
+        # -------------------------------------------------------------------------
+        # CRITICAL FIX: Sort DF *BEFORE* creating numpy arrays
+        # The partitioning logic relies on this specific sort order.
+        # If we build arrays from 'df' but slice based on 'df_sorted', we get mismatches.
+        # -------------------------------------------------------------------------
+
+        # 0 amounts are treated as Negative (Outgoing) -1
+        # Calculate this temp column for sorting
+        temp_amounts = df[self.fields.amount].values.astype(np.float32)
+        direction = np.sign(temp_amounts)
+        direction[direction == 0] = -1
+        df['__direction__'] = direction
+
+        logger.info("Sorting dataset by [Account, Direction, Amount, Date]...")
+        # Mergesort is stable
+        sort_cols = [self.fields.accountId, '__direction__', self.fields.amount, self.fields.date]
+        df = df.sort_values(by=sort_cols, kind='mergesort').reset_index(drop=True)
+
+        # Now 'df' is the Source of Truth. All arrays must come from this sorted DF.
+        # -------------------------------------------------------------------------
+
         # 2. Pre-calculate Continuous Features (Numpy speed)
         # Amounts
         amounts = df[self.fields.amount].values.astype(np.float32)
-        # 0 amounts are treated as Negative (Outgoing) -1
+        # Recalculate direction on sorted array to be safe
         direction = np.sign(amounts)
         direction[direction == 0] = -1
 
         self.all_log_amounts: npt.NDArray[np.float32] = np.log1p(np.abs(amounts)) * direction
 
         # Dates (Normalized)
-        # Normalize to midnight to remove time-of-day noise (CRITICAL for recurring patterns)
         dates = df[self.fields.date]
         normalized_dates = dates.dt.normalize()
         min_date = normalized_dates.min()
@@ -160,37 +180,34 @@ class MultiTransactionDataset(Dataset):
         # We calculate the INDICES for every window upfront.
         logger.info("Computing Window partitions...")
 
-        # We need a temporary dataframe that aligns with our numpy arrays (0..N)
-        # to perform the grouping logic.
+        # We need indices relative to the SORTED dataframe (0..N)
         df['__internal_idx__'] = np.arange(len(df))
-        df['__direction__'] = direction
-
-        # Sort by Account -> Direction -> Amount (Primary Partitioning Logic)
-        # Mergesort is stable, usually preferred for data pipelines
-        sort_cols = [self.fields.accountId, '__direction__', self.fields.amount, self.fields.date]
-        df_sorted = df.sort_values(by=sort_cols, kind='mergesort')
 
         self.window_indices: list[npt.NDArray[np.int64]] = []
 
-        # Group by Account/Direction using the sorted DF
-        # sort=False ensures we keep the Amount-sorted order
-        grouped = df_sorted.groupby([self.fields.accountId, '__direction__'], sort=False)
+        # Group by Account/Direction using the SORTED DF
+        # sort=False ensures we keep the Amount-sorted order from step 1
+        grouped = df.groupby([self.fields.accountId, '__direction__'], sort=False)
 
         for _, group in grouped:
-            # The indices in 'group' are essentially sorted by Amount
+            # The indices in 'group' are sorted by Amount (because df was sorted)
             grp_indices = group['__internal_idx__'].values
-            grp_dates = group[self.fields.date].values
+
+            # We need the dates corresponding to these indices to re-sort the window later
+            # Optimization: slice from the pre-calculated numpy array
+            grp_days = self.all_days[grp_indices]
 
             n_items = len(grp_indices)
             for i in range(0, n_items, config.max_seq_len):
                 # 1. Get the chunk (Amount sorted)
                 chunk_indices = grp_indices[i: i + config.max_seq_len]
+                chunk_days = grp_days[i: i + config.max_seq_len]
 
                 # 2. Re-sort this specific chunk by Date (Requirement for Transformer)
-                chunk_dates = grp_dates[i: i + config.max_seq_len]
-                date_sort_order = np.argsort(chunk_dates)  # Returns indices into the chunk
+                # We use argsort on the days array
+                date_sort_order = np.argsort(chunk_days)
 
-                # Apply sort
+                # Apply sort to get the final indices for this window
                 final_window_indices = chunk_indices[date_sort_order]
                 self.window_indices.append(final_window_indices)
 
@@ -214,7 +231,7 @@ class MultiTransactionDataset(Dataset):
 
     @staticmethod
     def _batch_tokenize(texts: list[str], tokenizer: PreTrainedTokenizerBase, max_len: int, batch_size: int = 10000) -> \
-    tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+            tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
         """Tokenize in batches to check memory usage and show progress."""
         all_ids = []
         all_masks = []
@@ -243,7 +260,10 @@ class MultiTransactionDataset(Dataset):
         # Retrieve pre-calculated indices for this window
         indices = self.window_indices[idx]
 
+        # Calculate Relative Days (Window-Relative)
         raw_days = self.all_days[indices]
+        # Use .astype(np.float32) to satisfy strict type checkers
+        # and ensure consistency regardless of what the subtraction returns.
         days_relative = (raw_days - raw_days.min()).astype(np.float32)
 
         # Simple Numpy Slicing (Fast!)
@@ -253,7 +273,7 @@ class MultiTransactionDataset(Dataset):
             "cp_ids": self.cp_input_ids[indices] if self.cp_input_ids is not None else None,
             "cp_mask": self.cp_attn_mask[indices] if self.cp_attn_mask is not None else None,
             "amounts": self.all_log_amounts[indices],
-            "days": days_relative,
+            "days": days_relative,  # Use relative version
             "calendar_features": self.all_calendar[indices],
             "pattern_ids": self.all_pattern_ids[indices],
             "cycles": self.all_cycles[indices],
