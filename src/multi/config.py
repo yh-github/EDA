@@ -45,7 +45,7 @@ class MultiExpConfig:
 
     # Encoder internals
     chunk_size: int = 2048  # For memory efficient encoding
-    time_encoding_max_len: int = 10000
+    time_encoding_max_len: int = 1000 # using relative date
 
     # Training Hyperparameters
     batch_size: int = 64
