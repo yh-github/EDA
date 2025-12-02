@@ -1,6 +1,8 @@
 import logging
 import torch
 import pandas as pd
+
+from common.config import get_device
 from multi.config import MultiFieldConfig
 
 logger = logging.getLogger(__name__)
@@ -21,10 +23,12 @@ def analyze_classification_mistakes(model, val_df, loader, config, num_examples=
     fc = MultiFieldConfig()
     aligned_df = _align_df_for_dataset(val_df, fc)
 
+    device = get_device()
+    model.to(device)
+
     model.eval()
 
-    # FIX: Use the model's actual device, not the config property (which might mismatch)
-    device = next(model.parameters()).device
+
 
     fps = []
     fns = []
@@ -122,10 +126,9 @@ def analyze_adjacency_mistakes(model, val_df, loader, config, num_examples=5):
     groups = [group for _, group in aligned_df.groupby([fc.accountId, 'direction'])]
     current_group_idx = 0
 
+    device = get_device()
+    model.to(device)
     model.eval()
-
-    # FIX: Use the model's actual device
-    device = next(model.parameters()).device
 
     fps = []
     fns = []

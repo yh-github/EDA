@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from dataclasses import dataclass
 from sklearn.metrics import precision_recall_fscore_support
-from sklearn.metrics.pairwise import euclidean_distances
+
 
 # GPU/CPU Imports
 try:

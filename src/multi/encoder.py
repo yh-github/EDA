@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6): # TODO Hyperparameter
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
