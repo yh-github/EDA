@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6): # TODO Hyperparameter
+    def __init__(self, dim: int, eps: float = 1e-6):  # TODO Hyperparameter
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
@@ -231,10 +231,6 @@ class TransactionTransformer(nn.Module):
         super().__init__()
         self.encoder = TransactionEncoder(config)
 
-        # Configure Norm for Transformer Layer too?
-        # Standard nn.TransformerEncoderLayer uses LayerNorm internally.
-        # We can stick to standard there, but our custom fused embedding uses the config.
-
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=config.hidden_dim,
             nhead=config.num_heads,
@@ -249,7 +245,17 @@ class TransactionTransformer(nn.Module):
         self.adj_weight = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
         self.adj_bias = nn.Parameter(torch.zeros(1))
 
-        self.cycle_head = nn.Linear(config.hidden_dim, config.num_classes)
+        # --- Architecture Change: Edge-Informed Classifier ---
+        # If enabled, we append the "Max Connectivity Score" (1 dim) to the input of the cycle head.
+        # This tells the cycle head "Hey, this node is strongly connected to at least one other node".
+        self.edge_informed_type = getattr(config, 'edge_informed_type', None)
+
+        cycle_input_dim = config.hidden_dim
+        if self.edge_informed_type == "edge_informed_max":
+            logger.info("Using Edge-Informed Classifier (Max Pooling)")
+            cycle_input_dim += 1
+
+        self.cycle_head = nn.Linear(cycle_input_dim, config.num_classes)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.encoder(
@@ -275,8 +281,39 @@ class TransactionTransformer(nn.Module):
         # FIX: Enforce Symmetry (A matches B implies B matches A)
         adj_logits = (adj_logits + adj_logits.transpose(1, 2)) / 2
 
-        # Compute Cycles
-        cycle_logits = self.cycle_head(h)
+        # --- Edge-Informed Injection ---
+        if self.edge_informed_type == "edge_informed_max":
+            # We want to extract the MAX connection score for each node i to any OTHER node j != i.
+            # 1. Mask diagonal (Self-loops should not trigger "Recurrence")
+            B, N, _ = adj_logits.shape
+            eye = torch.eye(N, device=adj_logits.device, dtype=torch.bool).unsqueeze(0).expand(B, -1, -1)
+
+            # 2. Mask invalid columns (Padding should not be max)
+            # padding_mask is [B, N] (True=Valid, False=Pad)
+            padding_mask = batch['padding_mask']
+            # We want to mask out columns j where padding_mask[:, j] is False
+            # unsqueeze to [B, 1, N] to broadcast over rows
+            valid_col_mask = padding_mask.unsqueeze(1)
+
+            # Combined mask: Fill if Diagonal OR Invalid Column
+            # ~valid_col_mask gives True for Invalid columns
+            mask_to_fill = eye | (~valid_col_mask)
+
+            # Fill with -inf so they don't affect max
+            # Using -1e9 instead of -inf to avoid NaN gradients in some edge cases
+            adj_masked = adj_logits.masked_fill(mask_to_fill, -1e9)
+
+            # 3. Max Pooling over columns (dim 2)
+            # max_score: [B, N]
+            max_score, _ = adj_masked.max(dim=2)
+
+            # 4. Concatenate to embeddings
+            # h: [B, N, D] -> [B, N, D+1]
+            h_augmented = torch.cat([h, max_score.unsqueeze(-1)], dim=-1)
+
+            cycle_logits = self.cycle_head(h_augmented)
+        else:
+            cycle_logits = self.cycle_head(h)
 
         # Return h for Contrastive Loss
         return adj_logits, cycle_logits, h

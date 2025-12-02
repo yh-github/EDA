@@ -269,6 +269,9 @@ def main():
     parser.add_argument("--force_recreate", action="store_true", help="Force recreate data splits")
     parser.add_argument("--text_emb", type=str, default="MPNET", # TODO fix in config
                         help=f"Model name. Accepts EmbModel keys (e.g., 'MPNET', 'ALBERT').")
+    parser.add_argument("--edge_informed_type", type=str, default=defaults.edge_informed_type, choices=["no", "edge_informed_max", "edge_informed_mean"],
+                        help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")
+
 
     parser.add_argument("--metric_to_track", type=str, default="pr_auc", choices=["pr_auc", "cycle_f1"],
                         help="Metric to optimize: 'pr_auc' (Adjacency/Clustering) or 'cycle_f1' (Detection)")

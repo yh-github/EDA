@@ -38,6 +38,7 @@ class MultiExpConfig:
     num_layers: int = 2
     dropout: float = 0.1
     use_counter_party: bool = True
+    edge_informed_type: str = "no" # TODO ENum, Options: "no", "edge_informed_max"
 
     # Normalization
     normalization_type: str = "layer_norm"  # 'layer_norm', 'rms_norm', 'none'
