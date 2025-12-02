@@ -1,6 +1,6 @@
 import argparse
 import logging
-from multi.analysis import analyze_classification_mistakes, analyze_adjacency_mistakes
+from multi.analysis_utils import analyze_classification_mistakes, analyze_adjacency_mistakes
 from multi.data import get_dataloader
 from multi.reload_utils import load_model_for_eval, load_data_for_config
 
