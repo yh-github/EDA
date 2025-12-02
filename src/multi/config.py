@@ -29,6 +29,10 @@ class MultiExpConfig:
     output_dir: str = "checkpoints/multi"
     downsample: float = 0.3  # 1.0 means no downsampling
 
+    # --- Task Configuration ---
+    # Options: 'multiclass' (Original), 'binary' (New: Adjacency + isRecurring)
+    task_type: str = "binary"
+
     # Model Hyperparameters
     text_encoder_model: str = EmbModel.MPNET.value
     unfreeze_last_n_layers: int = 0
@@ -38,14 +42,16 @@ class MultiExpConfig:
     num_layers: int = 2
     dropout: float = 0.1
     use_counter_party: bool = True
-    edge_informed_type: str = "no" # TODO ENum, Options: "no", "edge_informed_max"
+
+    # Options: "no", "edge_informed_max" (Legacy/Multiclass only)
+    edge_informed_type: str = "no"
 
     # Normalization
     normalization_type: str = "layer_norm"  # 'layer_norm', 'rms_norm', 'none'
 
     # Encoder internals
     chunk_size: int = 2048  # For memory efficient encoding
-    time_encoding_max_len: int = 1000 # using relative date
+    time_encoding_max_len: int = 1000  # using relative date
 
     # Training Hyperparameters
     batch_size: int = 64
@@ -79,7 +85,7 @@ class MultiExpConfig:
     max_text_length: int = 44
     max_cp_length: int = 20
 
-    # Cycle Labels
+    # Cycle Labels (Only used if task_type='multiclass')
     cycle_map: dict = field(default_factory=lambda: {
         'None': 0,
         'monthly': 1,
