@@ -12,7 +12,6 @@ import re
 import shutil
 from pathlib import Path
 import optuna
-import torch
 from multi.config import MultiExpConfig, MultiFieldConfig
 from multi.encoder import TransactionTransformer
 from multi.trainer import MultiTrainer
@@ -110,7 +109,10 @@ class TuningManager:
 
         # 5. Save with metadata
         logger.info(f"Saving splits to {self.cache_path}...")
+
         with open(self.cache_path, 'wb') as f:
+            # noinspection PyTypeChecker
+            # f: Expected type 'SupportsWrite[bytes]', got 'BufferedWriter' instead
             pickle.dump({
                 'train': train_df,
                 'val': val_df,

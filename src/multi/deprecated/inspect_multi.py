@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("inspector")
 
 
-def inspect_clusters(data_path, model_path, n_samples=2000):
+def inspect_clusters(data_path, model_path):
     """
     Runs inference on a subset of data and prints the discovered patterns.
     """

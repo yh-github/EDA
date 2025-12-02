@@ -51,7 +51,7 @@ def inspect_study(db_path, study_name=None, h=2):
         valid_summaries = [s for s in summaries if s.study_name not in skip]
         if valid_summaries:
             # Sort by start time just in case, though usually returned in order
-            valid_summaries.sort(key=lambda x: x.datetime_start if x.datetime_start else datetime.min)
+            valid_summaries.sort(key=lambda z: z.datetime_start if z.datetime_start else datetime.min)
             study_name = valid_summaries[-1].study_name
             print(f"\nDefaulting to most recent valid study: {study_name}")
         else:

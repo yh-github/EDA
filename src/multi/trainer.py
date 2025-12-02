@@ -431,6 +431,7 @@ class MultiTrainer:
             pr_auc = average_precision_score(all_true_edges, all_pred_probs)
             roc_auc = roc_auc_score(all_true_edges, all_pred_probs)
         except Exception as e:
+            logger.warning(f"{str(e)}, setting pr_auc=0.0")
             pr_auc = 0.0
             roc_auc = 0.5
 
@@ -467,7 +468,7 @@ class MultiTrainer:
             else:
                 cycle_pr_auc = 0.0
         except Exception as e:
-            # logger.warning(f"Failed to compute Cycle PR-AUC: {e}")
+            logger.warning(f"Failed to compute Cycle PR-AUC: {str(e)}")
             cycle_pr_auc = 0.0
 
         # C. Detailed Breakdown (Precision/Recall/F1/Support per Class)

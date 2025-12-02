@@ -65,7 +65,7 @@ def main():
     logger.info(f"Initializing model on {config.device} (use_cp={config.use_counter_party})...")
     model = TransactionTransformer(config)
 
-    trainer = MultiTrainer(model, config, pos_weight=2.5)
+    trainer = MultiTrainer(model, config)
 
     # 7. Training Loop using simplified `fit`
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

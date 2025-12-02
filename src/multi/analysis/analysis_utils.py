@@ -97,14 +97,14 @@ def analyze_classification_mistakes(model, val_df, loader, config, num_examples=
     logger.info("-" * 60)
     logger.info(f"CLASSIFICATION MISTAKES (isRecurring): FP={len(fps)}, FN={len(fns)}")
 
-    fps_sorted = sorted(fps, key=lambda x: x['prob'], reverse=True)[:num_examples]
+    fps_sorted = sorted(fps, key=lambda z: z['prob'], reverse=True)[:num_examples]
     if fps_sorted:
         logger.info("\n>>> Top False Positives (Predicted Recurring, Actually Noise):")
         for x in fps_sorted:
             txt = (str(x['txt'])[:40] + '..') if len(str(x['txt'])) > 40 else str(x['txt'])
             logger.info(f"  [{x['prob']:.2f}] ${x['amt']:<6.2f} {x['date']} | {txt}")
 
-    fns_sorted = sorted(fns, key=lambda x: x['prob'], reverse=True)[:num_examples]
+    fns_sorted = sorted(fns, key=lambda z: z['prob'], reverse=True)[:num_examples]
     if fns_sorted:
         logger.info("\n>>> Top False Negatives (Predicted Noise, Actually Recurring):")
         for x in fns_sorted:
