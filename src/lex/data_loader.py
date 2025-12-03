@@ -1,4 +1,10 @@
 import numpy as np
+import pandas as pd
+from multi.reload_utils import load_cached_data
+from common.config import FieldConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 DATA_PATH = 'data/all_data.csv'
 
@@ -76,13 +82,23 @@ def split_data(df, val_ratio=0.1, test_ratio=0.1, random_state=42):
     return train_df, val_df, test_df
 
 
-import logging
-import pandas as pd
-from multi.reload_utils import load_cached_data
-from multi.config import MultiExpConfig
-from common.config import FieldConfig
 
-logger = logging.getLogger(__name__)
+
+
+
+def preprocess_lex_features(df: pd.DataFrame, field_config: FieldConfig=FieldConfig()) -> pd.DataFrame:
+    """
+    Applies Lex-specific preprocessing (e.g., specific truncation logic)
+    AFTER loading the canonical splits.
+    """
+    df = df.copy()
+
+    # Ensure date format
+    if not np.issubdtype(df[field_config.date].dtype, np.datetime64):
+        df[field_config.date] = pd.to_datetime(df[field_config.date])
+
+
+    return df
 
 
 def load_lex_splits(random_state=0x5EED2, downsample=0.15):
@@ -99,7 +115,7 @@ def load_lex_splits(random_state=0x5EED2, downsample=0.15):
     )
 
     logger.info(f"Loaded - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
-    return train_df, val_df, test_df
+    return preprocess_lex_features(train_df), preprocess_lex_features(val_df), preprocess_lex_features(test_df)
 
 
 
