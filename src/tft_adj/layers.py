@@ -23,31 +23,41 @@ class GatedResidualNetwork(nn.Module):
 
         self.fc1 = nn.Linear(self.input_size + (context_size or 0), self.hidden_size)
         self.elu1 = nn.ELU()
-        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size)
-        self.dropout = nn.Dropout(dropout)
+
+        # FIX: Removed duplicate fc2 definition.
+        # This layer projects from hidden -> output
         self.fc2 = nn.Linear(self.hidden_size, self.output_size)
+
+        # Gate also projects from hidden -> output
         self.gate = nn.Linear(self.hidden_size, self.output_size)
 
+        self.dropout = nn.Dropout(dropout)
         self.layernorm = nn.LayerNorm(self.output_size)
 
     def forward(self, x, context=None):
+        # 1. Prepare Residual
         residual = self.skip_layer(x) if self.skip_layer else x
 
+        # 2. Context
         if context is not None:
             x_c = torch.cat((x, context), dim=-1)
         else:
             x_c = x
 
-        x = self.fc1(x_c)
-        x = self.elu1(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
+        # 3. Dense -> ELU (Hidden State)
+        hidden = self.fc1(x_c)
+        hidden = self.elu1(hidden)
 
-        # Gating mechanism (GLU-like)
-        gate = torch.sigmoid(self.gate(x))
-        x = x * gate
+        # 4. Dense -> Output
+        out = self.fc2(hidden)
+        out = self.dropout(out)
 
-        return self.layernorm(x + residual)
+        # 5. Gating (Uses Hidden State, not Output)
+        gate = torch.sigmoid(self.gate(hidden))
+        out = out * gate
+
+        # 6. Add Residual & Norm
+        return self.layernorm(out + residual)
 
 
 class VariableSelectionNetwork(nn.Module):
@@ -73,14 +83,7 @@ class VariableSelectionNetwork(nn.Module):
         })
 
         # Weighting GRN to decide importance of each feature
-        # Input is flattened concatenation of all features (or a summary state)
-        # Simplified: We use a learnable vector or simple projection for weights
-        # TFT uses a GRN on the flattened state vector to produce weights.
-
-        # We assume pre-projected inputs for the weight calculator for simplicity
-        # or just use a GRN on the context if available.
-        # Here we implement a simplified VSN that transforms inputs first.
-
+        # Input is flattened concatenation of all features
         self.weight_grn = GatedResidualNetwork(
             hidden_size * len(input_sizes),
             hidden_size,
@@ -102,8 +105,11 @@ class VariableSelectionNetwork(nn.Module):
 
         # 2. Calculate Weights
         # We flatten the features to determine weights
+        # Shape: [Batch, Seq, NumFeatures * Hidden]
         flattened = stacked_features.view(stacked_features.size(0), stacked_features.size(1), -1)
-        weights = self.weight_grn(flattened, context)  # [Batch, Seq, NumFeatures]
+
+        # Weight GRN outputs [Batch, Seq, NumFeatures]
+        weights = self.weight_grn(flattened, context)
         weights = torch.softmax(weights, dim=-1).unsqueeze(-1)  # [Batch, Seq, NumFeatures, 1]
 
         # 3. Weighted Sum
