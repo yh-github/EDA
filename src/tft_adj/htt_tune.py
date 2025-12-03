@@ -5,12 +5,13 @@ from pathlib import Path
 
 import optuna
 
+from common.config import EmbModel
 from common.exp_utils import set_global_seed
 from common.log_utils import setup_logging
 from htt import HybridTransactionTransformer
 from multi.binary.binary_trainer import BinaryMultiTrainer
 from multi.config import MultiExpConfig
-from multi.tune_multi import TuningManager, get_next_study_name
+from multi.tune_multi2 import TuningManager, get_next_study_name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hybrid_tune")
@@ -38,7 +39,7 @@ class HybridTuningManager(TuningManager):
             contrastive_loss_weight=contrastive_weight,
 
             # Defaults
-            emb_model=self.emb_model,
+            emb_model=EmbModel.MPNET,
             use_cached_embeddings=True,  # Always use cache for speed
             hidden_dim=256,
             num_heads=4,
