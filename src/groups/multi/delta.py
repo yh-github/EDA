@@ -13,33 +13,32 @@ from joblib import Parallel, delayed, cpu_count
 from multi.config import MultiExpConfig
 from multi.reload_utils import load_data_for_config
 
-# Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger("pairwise")
+logger = logging.getLogger("pairwise_grouping")
 
 
 @dataclass
-class PairwiseConfig:
+class GroupingConfig:
     window_size: int = 200
     string_threshold: float = 60.0
-    match_threshold: float = 0.50  # Slightly relaxed to catch "noisy" dates
+    match_threshold: float = 0.50
     n_jobs: int = -1
 
 
-class PairwiseRecurrenceModel:
-    def __init__(self, config: PairwiseConfig = PairwiseConfig()):
+class PairwiseGroupingModel:
+    def __init__(self, config: GroupingConfig = GroupingConfig()):
         self.config = config
 
-        # REMOVED monotonic constraint on day_alignment (Index 5).
-        # This allows the model to learn that "Bad Alignment" is fine for
-        # bi-monthly (1st/15th) or weekly (Mon/Mon) patterns differently.
-        # Features: [str_score, diff_amt, rel_diff_amt, is_exact, diff_days, day_alignment]
+        # Monotonic Constraints to enforce physical logic:
+        # [str_score(+), diff_amt(-), rel_diff_amt(-), is_exact(+), diff_days(0), day_alignment(0)]
+        # We leave diff_days and day_alignment unconstrained so the model can learn
+        # specific sweet spots (e.g. 7 days, 14 days, 30 days).
         monotonic_cst = [1, -1, -1, 1, 0, 0]
 
         self.model = HistGradientBoostingClassifier(
-            max_iter=200,  # More trees to learn complex cycle rules
-            learning_rate=0.05,  # Slower learning for better generalization
-            max_depth=8,  # Deeper trees to capture interaction (DayDiff vs Alignment)
+            max_iter=200,
+            learning_rate=0.05,
+            max_depth=8,
             scoring='average_precision',
             monotonic_cst=monotonic_cst,
             random_state=42
@@ -51,11 +50,12 @@ class PairwiseRecurrenceModel:
         df['bankRawDescription'] = df['bankRawDescription'].fillna("").astype(str)
         df['dom'] = df['date'].dt.day
 
-        # Global Sort
+        # CRITICAL: Sort by Account -> Amount -> Date
+        # This linearizes the search space for recurring amounts.
         df = df.sort_values(['accountId', 'amount', 'date']).reset_index(drop=True)
 
         if training:
-            # Handle NaN patternIds as unique noise
+            # Assign unique IDs to noise so they NEVER match each other
             noise_mask = df['patternId'].isna() | (df['patternId'] == '') | (df['patternId'].astype(str) == '-1')
             df.loc[noise_mask, 'patternId'] = "NOISE_" + df.loc[noise_mask, 'trId'].astype(str)
 
@@ -63,6 +63,7 @@ class PairwiseRecurrenceModel:
 
     @staticmethod
     def _process_chunk(chunk_df, window_size, string_threshold, training):
+        # Extract columns to numpy for raw speed
         ids = chunk_df['trId'].values
         acc_ids = chunk_df['accountId'].values
         amounts = chunk_df['amount'].values.astype(float)
@@ -83,20 +84,25 @@ class PairwiseRecurrenceModel:
             for offset in range(1, window_size + 1):
                 j = i + offset
                 if j >= n: break
+
+                # Account boundary check
                 if acc_ids[i] != acc_ids[j]: break
 
-                # Amount Filter (Heuristic)
+                # 1. Amount Filter (Fastest Check)
                 a1, a2 = amounts[i], amounts[j]
                 diff_amt = abs(a1 - a2)
+
+                # Heuristic: If amounts diverge by >$10, stop scanning this window.
+                # (Since data is sorted by amount, all subsequent j will be even worse)
                 if diff_amt > 10.0 and abs(a1) < 100: break
                 if diff_amt > 100.0: break
 
-                # Text Filter
+                # 2. Text Filter
                 s1, s2 = texts[i], texts[j]
                 str_score = fuzz.token_sort_ratio(s1, s2)
                 if str_score < string_threshold: continue
 
-                # Features
+                # 3. Feature Calculation
                 max_amt = max(abs(a1), abs(a2)) + 1e-9
                 rel_diff_amt = diff_amt / max_amt
                 is_exact_amt = 1 if diff_amt < 0.01 else 0
@@ -104,9 +110,8 @@ class PairwiseRecurrenceModel:
                 d1, d2 = dates[i], dates[j]
                 diff_days = abs((d1 - d2).astype('timedelta64[D]').astype(int))
 
-                # Circular Day Alignment (0..1)
-                # 1.0 = Same day (e.g. 5th and 5th)
-                # 0.0 = Opposite side of month (e.g. 1st and 15th)
+                # Circular Day Alignment (0.0 to 1.0)
+                # Helps the model distinguish "Regular Monthly" from "Random Habit"
                 day_diff = abs(doms[i] - doms[j])
                 circular_dist = min(day_diff, 30 - day_diff)
                 day_alignment = 1.0 - (circular_dist / 15.0)
@@ -123,7 +128,7 @@ class PairwiseRecurrenceModel:
                 edges.append((ids[i], ids[j]))
 
                 if training:
-                    # Match if PatternIDs are identical (and not Noise)
+                    # Ground Truth: 1 if same patternId, 0 otherwise
                     is_match = 1 if (pids[i] == pids[j]) else 0
                     labels.append(is_match)
 
@@ -140,6 +145,7 @@ class PairwiseRecurrenceModel:
             subset = df[df['accountId'].isin(acc_chunk)].copy()
             tasks.append(subset)
 
+        logger.info(f"Processing in parallel on {self.config.n_jobs} cores...")
         results = Parallel(n_jobs=self.config.n_jobs)(
             delayed(self._process_chunk)(
                 chunk,
@@ -160,11 +166,12 @@ class PairwiseRecurrenceModel:
                 if training:
                     all_labels.extend(lab)
 
-        logger.info(f"Generated {len(all_features)} pairs.")
+        logger.info(f"Generated {len(all_features)} candidate pairs.")
 
         X = np.array(all_features, dtype=np.float32)
         y = np.array(all_labels, dtype=np.int32) if training else None
 
+        # Map Transaction IDs back to DataFrame indices for graph construction
         if len(all_edges) > 0:
             id_to_idx = {tr_id: idx for idx, tr_id in enumerate(df['trId'])}
             pair_indices = []
@@ -182,15 +189,14 @@ class PairwiseRecurrenceModel:
 
         if len(X) == 0: return
 
-        print(f"Training on {len(X)} pairs...")
+        logger.info(f"Training on {len(X)} pairs...")
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
         self.model.fit(X_train, y_train)
 
         y_prob = self.model.predict_proba(X_val)[:, 1]
         ap = average_precision_score(y_val, y_prob)
-        print(f"--- Validation Results ---")
-        print(f"Average Precision (PR-AUC): {ap:.4f}")
+        logger.info(f"Model Validation PR-AUC: {ap:.4f}")
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         df_clean = self._preprocess(df, training=False)
@@ -198,18 +204,19 @@ class PairwiseRecurrenceModel:
 
         if len(X) == 0: return df_sorted
 
+        # 1. Score Pairs
         probs = self.model.predict_proba(X)[:, 1]
+
+        # 2. Filter Weak Links
         mask = probs > self.config.match_threshold
         valid_pairs = np.array(pair_indices)[mask]
 
         n_nodes = len(df_sorted)
-        # Handle empty case
         if len(valid_pairs) == 0:
             df_sorted['pred_group_id'] = -1
-            df_sorted['cycle_type'] = 'None'
             return df_sorted
 
-        # Graph Clustering
+        # 3. Build Graph & Cluster
         row = valid_pairs[:, 0]
         col = valid_pairs[:, 1]
         data = np.ones(len(valid_pairs))
@@ -218,75 +225,64 @@ class PairwiseRecurrenceModel:
         n_components, labels = connected_components(csgraph=adj_matrix, directed=False, return_labels=True)
         df_sorted['pred_group_id'] = labels
 
-        # --- Post-Process: Cycle Classification ---
-        cycle_map = {}
-
+        # 4. Stability Check (The "Anti-Wawa" Filter)
+        valid_groups = []
         for gid, grp in df_sorted.groupby('pred_group_id'):
-            if len(grp) < 2:
-                cycle_map[gid] = 'None'
-                continue
+            if len(grp) < 2: continue  # Size 1 is noise
 
             dates = grp['date'].sort_values()
             diffs = dates.diff().dt.days.dropna()
+
+            if len(diffs) == 0: continue
+
             median_gap = diffs.median()
 
-            # Simple Burst Filter
-            if median_gap < 4:
-                cycle_map[gid] = 'None'
-                continue
+            # A. Burst Filter: If everything happened in <4 days average, it's a burst/duplicate
+            if median_gap < 4: continue
 
-            cycle_map[gid] = self.classify_cycle(median_gap)
+            # B. Variance Filter:
+            # If the gap fluctuates wildly (High Std Dev), it's likely a habit, not a subscription.
+            if len(diffs) >= 2:
+                gap_std = diffs.std()
+                # Tighter tolerance for weekly (short) cycles, looser for monthly
+                tolerance = 3.0 if median_gap < 20 else 5.0
 
-        df_sorted['cycle_type'] = df_sorted['pred_group_id'].map(cycle_map).fillna('None')
+                if gap_std > tolerance:
+                    continue
 
-        # Set non-recurring to -1
-        df_sorted.loc[df_sorted['cycle_type'] == 'None', 'pred_group_id'] = -1
+            valid_groups.append(gid)
+
+        # Final Cleanup
+        df_sorted.loc[~df_sorted['pred_group_id'].isin(valid_groups), 'pred_group_id'] = -1
 
         return df_sorted
 
-    @staticmethod
-    def classify_cycle(gap: float) -> str:
-        """Maps a median day gap to your business labels."""
-        if 5.5 <= gap <= 8.5:
-            return 'onceAWeek'
-        elif 12.0 <= gap <= 16.5:
-            # Covers 14 days (bi-weekly) and 15 days (twice a month)
-            # Hard to distinguish purely on median without variance check,
-            # but usually grouped together or distinguished by day-of-week alignment.
-            # For now, we can call it 'twiceAMonth' or 'onceEvery2Weeks' based on preference.
-            if 14.5 <= gap <= 16.0:
-                return 'twiceAMonth'
-            return 'onceEvery2Weeks'
-        elif 26.0 <= gap <= 33.0:
-            # 28 days (4 weeks) vs 30/31 days (Monthly)
-            if gap < 29.0:
-                return 'onceEvery4Weeks'
-            return 'monthly'
-        elif 33.0 < gap <= 45.0:
-            return 'every4_5Weeks'
-        else:
-            return 'weekBasedOther'
+
+# --- Helper for your environment ---
+def load_data(random_state: int | None = None, downsample: float | None = None):
+    conf = MultiExpConfig()
+    if random_state is not None: conf.random_state = random_state
+    if downsample is not None: conf.downsample = downsample
+    return load_data_for_config(conf)
 
 
 if __name__ == "__main__":
     print("Loading data...")
-    train_df, val_df, test_df = load_data_for_config(MultiExpConfig())
+    train_df, val_df, test_df = load_data(random_state=0x5EED, downsample=0.1)
 
-    model = PairwiseRecurrenceModel()
+    model = PairwiseGroupingModel()
     model.fit(val_df)
 
     print("\nRunning Inference...")
     results = model.predict(test_df)
 
-    # Show Results with Cycle Labels
+    # Simple Reporting
     recurring = results[results['pred_group_id'] != -1]
     print(f"\nFound {len(recurring)} recurring transactions.")
 
-    # Check for specific complex cycles
-    for c_type in ['twiceAMonth', 'onceEvery4Weeks', 'every4_5Weeks', 'monthly']:
-        subset = recurring[recurring['cycle_type'] == c_type]
-        if not subset.empty:
-            gid = subset.iloc[0]['pred_group_id']
-            print(f"\n--- Example {c_type} (Group {gid}) ---")
-            print(
-                subset[subset['pred_group_id'] == gid][['date', 'amount', 'bankRawDescription']].to_string(index=False))
+    if len(recurring) > 0:
+        # Show a few examples
+        ex_gid = recurring['pred_group_id'].value_counts().index[0]
+        print(f"\nExample Group {ex_gid}:")
+        print(recurring[recurring['pred_group_id'] == ex_gid][['date', 'amount', 'bankRawDescription']].sort_values(
+            'date'))
