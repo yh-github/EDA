@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
-import math
 from multi.config import MultiExpConfig
 from multi.encoder import TransactionEncoder
-from common.tft_layers import VariableSelectionNetwork, GatedResidualNetwork
+from tft_adj.layers import VariableSelectionNetwork, GatedResidualNetwork
 
 
 class TimeAwareSelfAttention(nn.Module):
