@@ -102,7 +102,7 @@ To detect recurring transactions in a new dataframe `df`:
 
 ```python
 import joblib
-from recurring_detector import RecurringDetector
+from lex.recurring_detector import RecurringDetector
 
 # 1. Load Model
 clf = joblib.load('recurring_xgb_model.joblib')
