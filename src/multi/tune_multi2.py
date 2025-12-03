@@ -80,10 +80,12 @@ class TuningManager:
         # Ideally, we check args. However, during tuning, 'unfreeze' might vary.
         # But `use_cached_embeddings` implies a specific architecture choice.
         # We'll allow the TuningManager to hold onto the EmbeddingService if initialized.
-        if self.args.unfreeze_last_n_layers > 0:
+        if self.args.unfreeze_last_n_layers is None or self.args.unfreeze_last_n_layers > 0:
             self.embedding_service = None
+            token_config.use_cached_embeddings = False
         else:
             self.embedding_service = EmbeddingService.create(EmbeddingService.Params(model_name=EmbModel.MPNET))
+            token_config.use_cached_embeddings = True
 
         # Standard Tokenized Datasets (Always created as fallback/default)
         logger.info("Initializing Standard (Tokenized) Datasets...")
