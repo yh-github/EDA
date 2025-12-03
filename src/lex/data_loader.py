@@ -101,7 +101,7 @@ def preprocess_lex_features(df: pd.DataFrame, field_config: FieldConfig=FieldCon
     return df
 
 
-def load_lex_splits(random_state=0x5EED2, downsample=0.15):
+def load_lex_splits(random_state=0x5EED, downsample=0.3):
     """
     Loads the exact Train/Val/Test splits used by the Multi model
     from the disk cache.
