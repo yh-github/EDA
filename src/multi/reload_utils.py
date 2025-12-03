@@ -56,19 +56,22 @@ def load_model_for_eval(model_path: str | Path, device_str: str = "auto") -> tup
 
 
 def load_data_for_config(config: MultiExpConfig) -> tuple:
+    return load_cached_data(config.random_state, config.downsample)
+
+def load_cached_data(random_state:int, downsample:float) -> tuple:
     """
     Loads the cached train/val/test splits that correspond to the
     random_state and downsample settings in the config.
     """
     cache_path = get_data_cache_path(
-        random_state=config.random_state,
-        downsample=config.downsample
+        random_state=random_state,
+        downsample=downsample
     )
 
     if not cache_path.exists():
         raise FileNotFoundError(
             f"Cached data not found at {cache_path}. "
-            f"Expected cache for seed={config.random_state}, downsample={config.downsample}. "
+            f"Expected cache for seed={random_state}, downsample={downsample}. "
             "Please ensure training/data prep was run."
         )
 
