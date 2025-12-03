@@ -268,7 +268,7 @@ def objective(trial):
 if __name__ == "__main__":
     logger.info("Starting Optuna Tuning...")
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=5)
+    study.optimize(objective, n_trials=10)
 
     print("\nBest Params:", study.best_params)
 
