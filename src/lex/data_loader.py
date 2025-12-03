@@ -1,4 +1,3 @@
-import pandas as pd
 import numpy as np
 
 DATA_PATH = 'data/all_data.csv'
@@ -75,6 +74,34 @@ def split_data(df, val_ratio=0.1, test_ratio=0.1, random_state=42):
     test_df = df[df['accountId'].isin(test_ids)]
 
     return train_df, val_df, test_df
+
+
+import logging
+import pandas as pd
+from multi.reload_utils import load_cached_data
+from multi.config import MultiExpConfig
+from common.config import FieldConfig
+
+logger = logging.getLogger(__name__)
+
+
+def load_lex_splits(random_state=0x5EED2, downsample=0.15):
+    """
+    Loads the exact Train/Val/Test splits used by the Multi model
+    from the disk cache.
+    """
+
+    logger.info(f"Loading cached splits (Seed={random_state}, Downsample={downsample})...")
+
+    train_df, val_df, test_df = load_cached_data(
+        random_state=random_state,
+        downsample=downsample
+    )
+
+    logger.info(f"Loaded - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+    return train_df, val_df, test_df
+
+
 
 
 if __name__ == "__main__":

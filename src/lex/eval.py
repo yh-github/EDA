@@ -1,45 +1,32 @@
-import numpy as np
 import joblib
-from sklearn.metrics import classification_report
-from lex.data_loader import load_data, preprocess_data
-from recurring_detector import RecurringDetector
-from analyzer import calculate_f1
+from sklearn.metrics import classification_report, average_precision_score
+from lex.data_loader import load_lex_splits
+from lex.recurring_detector import RecurringDetector
+from lex.analyzer import calculate_f1
+from common.config import FieldConfig
 
 
 def evaluate_test_set():
-    print("Loading data...")
-    df = load_data()
-    df = preprocess_data(df)
+    print("Loading Test split...")
+    field_config = FieldConfig()
+    # We ignore train/val here
+    _, _, test_df = load_lex_splits()
 
-    # Replicate Split Logic exactly
-    account_ids = df['accountId'].unique()
-    np.random.seed(42)
-    np.random.shuffle(account_ids)
-
-    train_size = int(0.7 * len(account_ids))
-    val_size = int(0.15 * len(account_ids))
-
-    # Isolate Test Set
-    test_accounts = account_ids[train_size + val_size:]
-    test_df = df[df['accountId'].isin(test_accounts)].copy()
-
-    print(f"Test accounts: {len(test_accounts)}")
     print(f"Test transactions: {len(test_df)}")
 
-    # Load Model & Threshold
-    print("Loading model...")
+    # Load Model
     try:
         clf = joblib.load('recurring_xgb_model.joblib')
         prob_threshold = joblib.load('xgb_threshold.joblib')
         print(f"Loaded threshold: {prob_threshold}")
-    except:
-        print("Model not found! Please run train_xgb.py first.")
+    except FileNotFoundError:
+        print("Model artifacts not found.")
         return
 
-    # Generate Candidates on Test
-    print("Generating candidates from Test set...")
-    # Note: We must use the same detector params as training
+    # Generate Candidates
+    print("Generating candidates...")
     detector = RecurringDetector(
+        field_config=field_config,
         interval_tolerance=40,
         min_transactions=2,
         amount_cv_threshold=1.0,
@@ -53,66 +40,58 @@ def evaluate_test_set():
         print("No candidates found in test set.")
         return
 
-    # Features
     feature_cols = [
-        'interval_std', 'interval_median',
-        'amount_cv', 'amount_std',
-        'dom_std', 'dow_std',
-        'count', 'days_span',
+        'interval_std', 'interval_median', 'amount_cv', 'amount_std',
+        'dom_std', 'dow_std', 'count', 'days_span',
         'description_length', 'unique_descriptions'
     ]
 
     X_test = test_candidates[feature_cols].fillna(0)
-
-    # Predict
-    print("Predicting...")
     probs = clf.predict_proba(X_test)[:, 1]
     test_candidates['probability'] = probs
 
-    # Filter by threshold
+    # Map Results
     selected = test_candidates[test_candidates['probability'] >= prob_threshold]
 
-    # Map back to transactions
-    print("Mapping results...")
     test_df['recurring_group_id'] = -1
-
     group_id_counter = 0
+
+    # Map group predictions back to transactions
+    group_probs = dict(zip(range(len(selected)), selected['probability']))
+
     for _, row in selected.iterrows():
-        indices = row['indices']
-        test_df.loc[indices, 'recurring_group_id'] = group_id_counter
+        test_df.loc[row['indices'], 'recurring_group_id'] = group_id_counter
         group_id_counter += 1
 
-    # Calculate Metrics
-    print("\n--- Test Set Results ---")
+    # Evaluation
+    print("\n--- Test Set Results (Transactional) ---")
     f1 = calculate_f1(test_df)
     print(f"Test F1 Score: {f1:.4f}")
 
-    # Detailed Report
-    if 'isRecurring' in test_df.columns:
-        y_true = test_df['isRecurring'].fillna(False).astype(bool)
+    if field_config.label in test_df.columns:
+        y_true = test_df[field_config.label].fillna(0).astype(bool)
         y_pred = test_df['recurring_group_id'] != -1
 
-        # Calculate PR AUC
-        # We need per-transaction probabilities for PR AUC.
-        # For transactions in a candidate group, use the group's probability.
-        # For others, probability is 0.
+        # PR-AUC requires continuous scores.
+        # Map group probability to transactions. Default 0 for non-grouped.
+        # Logic: If txn is in group G, score = prob(G). Else score = 0.
 
-        # Create a map of group_id -> probability
-        group_probs = dict(zip(range(group_id_counter), selected['probability']))
+        # 1. Create a series mapping index -> probability
+        # Flatten the indices from the candidates
+        idx_to_prob = {}
+        for _, row in test_candidates.iterrows():
+            p = row['probability']
+            for idx in row['indices']:
+                # If a transaction belongs to multiple candidates (unlikely with DBSCAN but possible),
+                # take the max probability
+                idx_to_prob[idx] = max(idx_to_prob.get(idx, 0), p)
 
-        # Map to transactions (default 0.0)
-        y_scores = test_df['recurring_group_id'].map(group_probs).fillna(0.0)
+        y_scores = test_df.index.map(lambda x: idx_to_prob.get(x, 0.0))
 
-        from sklearn.metrics import average_precision_score
         pr_auc = average_precision_score(y_true, y_scores)
         print(f"Test PR AUC: {pr_auc:.4f}")
-
-        print("\nClassification Report (Per Transaction):")
+        print("\nClassification Report:")
         print(classification_report(y_true, y_pred))
-
-        # Save results
-        test_df.to_csv('test_results.csv', index=False)
-        print("Saved test_results.csv")
 
 
 if __name__ == "__main__":

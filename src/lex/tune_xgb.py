@@ -1,15 +1,20 @@
 import optuna
-import pandas as pd
-import numpy as np
+import joblib
+import json
 from xgboost import XGBClassifier
-from data_loader import load_data, preprocess_data
-from recurring_detector import RecurringDetector
-from analyzer import calculate_f1
+from lex.data_loader import load_lex_splits, preprocess_lex_features
+from lex.recurring_detector import RecurringDetector
+from lex.analyzer import calculate_f1
+from common.config import FieldConfig, MultiExpConfig
+
+# Globals for Objective
+global_val_df = None
+global_train_candidates = None
+global_val_candidates = None
+global_feature_cols = None
 
 
 def objective(trial):
-    global val_df, train_candidates, feature_cols
-
     # Suggest params
     max_depth = trial.suggest_int('max_depth', 3, 10)
     learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3)
@@ -18,7 +23,6 @@ def objective(trial):
     colsample_bytree = trial.suggest_float('colsample_bytree', 0.5, 1.0)
     prob_threshold = trial.suggest_float('prob_threshold', 0.1, 0.9)
 
-    # Train Model
     clf = XGBClassifier(
         max_depth=max_depth,
         learning_rate=learning_rate,
@@ -29,61 +33,46 @@ def objective(trial):
         n_jobs=-1
     )
 
-    X_train = train_candidates[feature_cols].fillna(0)
-    y_train = train_candidates['label'].astype(int)
-
+    # Train
+    X_train = global_train_candidates[global_feature_cols].fillna(0)
+    y_train = global_train_candidates['label'].astype(int)
     clf.fit(X_train, y_train)
 
-    # Evaluate on Val
-    # We need to run detection on val_df using the classifier
-    # To save time, we can pre-generate val candidates once globally if we assume fixed detector params
-    # But detector params (eps) were tuned for RF. Let's assume they are good for XGB too for now.
-
-    global val_candidates
-    X_val = val_candidates[feature_cols].fillna(0)
+    # Evaluate on pre-generated validation candidates
+    X_val = global_val_candidates[global_feature_cols].fillna(0)
     probs = clf.predict_proba(X_val)[:, 1]
 
-    val_candidates_copy = val_candidates.copy()
+    # Map back to Transactions to calculate transactional F1
+    val_candidates_copy = global_val_candidates.copy()
     val_candidates_copy['probability'] = probs
-
     selected = val_candidates_copy[val_candidates_copy['probability'] >= prob_threshold]
 
-    # Map back
-    val_df_copy = val_df.copy()
-    val_df_copy['recurring_group_id'] = -1
+    # Use a clean copy of the dataframe
+    val_map_df = global_val_df.copy()
+    val_map_df['recurring_group_id'] = -1
 
     group_id_counter = 0
     for _, row in selected.iterrows():
         indices = row['indices']
-        val_df_copy.loc[indices, 'recurring_group_id'] = group_id_counter
+        val_map_df.loc[indices, 'recurring_group_id'] = group_id_counter
         group_id_counter += 1
 
-    f1 = calculate_f1(val_df_copy)
+    f1 = calculate_f1(val_map_df)
     return f1
 
 
 if __name__ == "__main__":
-    print("Loading data for tuning...")
-    df = load_data()
-    df = preprocess_data(df)
+    print("Loading unified splits...")
+    field_config = FieldConfig()
+    train_df, val_df, _ = load_lex_splits(MultiExpConfig())
 
-    # Split
-    account_ids = df['accountId'].unique()
-    np.random.seed(42)
-    np.random.shuffle(account_ids)
+    # Preprocess
+    train_df = preprocess_lex_features(train_df, field_config)
+    global_val_df = preprocess_lex_features(val_df, field_config)
 
-    train_size = int(0.7 * len(account_ids))
-    val_size = int(0.15 * len(account_ids))
-
-    train_accounts = account_ids[:train_size]
-    val_accounts = account_ids[train_size:train_size + val_size]
-
-    train_df = df[df['accountId'].isin(train_accounts)].copy()
-    val_df = df[df['accountId'].isin(val_accounts)].copy()
-
-    # Pre-generate candidates to speed up tuning loop
     print("Generating candidates...")
     detector = RecurringDetector(
+        field_config=field_config,
         interval_tolerance=40,
         min_transactions=2,
         amount_cv_threshold=1.0,
@@ -91,14 +80,16 @@ if __name__ == "__main__":
         eps=0.29
     )
 
-    train_candidates = detector.detect(train_df, return_candidates=True)
-    val_candidates = detector.detect(val_df, return_candidates=True)
+    global_train_candidates = detector.detect(train_df, return_candidates=True)
+    global_val_candidates = detector.detect(global_val_df, return_candidates=True)
 
-    feature_cols = [
-        'interval_std', 'interval_median',
-        'amount_cv', 'amount_std',
-        'dom_std', 'dow_std',
-        'count', 'days_span',
+    if global_train_candidates.empty or global_val_candidates.empty:
+        print("Not enough candidates for tuning.")
+        exit()
+
+    global_feature_cols = [
+        'interval_std', 'interval_median', 'amount_cv', 'amount_std',
+        'dom_std', 'dow_std', 'count', 'days_span',
         'description_length', 'unique_descriptions'
     ]
 
@@ -106,11 +97,8 @@ if __name__ == "__main__":
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=30)
 
-    print("Best params:")
-    print(study.best_params)
     print(f"Best F1: {study.best_value}")
-
-    import json
+    print(f"Best params: {study.best_params}")
 
     with open('best_params_xgb.json', 'w') as f:
         json.dump(study.best_params, f)
