@@ -63,11 +63,7 @@ def objective(trial):
 if __name__ == "__main__":
     print("Loading unified splits...")
     field_config = FieldConfig()
-    train_df, val_df, _ = load_lex_splits(MultiExpConfig())
-
-    # Preprocess
-    train_df = preprocess_lex_features(train_df, field_config)
-    global_val_df = preprocess_lex_features(val_df, field_config)
+    train_df, global_val_df, _ = load_lex_splits()
 
     print("Generating candidates...")
     detector = RecurringDetector(
