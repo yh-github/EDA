@@ -82,7 +82,8 @@ class BinaryMultiTrainer(BaseTrainer):
         count = 0
 
         for batch in dataloader:
-            batch = {k: v.to(self.config.device) for k, v in batch.items()}
+            # FIX: Filter None values before moving to device
+            batch = {k: v.to(self.config.device) for k, v in batch.items() if v is not None}
 
             with torch.amp.autocast('cuda'):
                 # Forward returns: adj_logits, binary_logits, embeddings
@@ -118,7 +119,8 @@ class BinaryMultiTrainer(BaseTrainer):
         all_clust_prob_max = []
 
         for batch in dataloader:
-            batch = {k: v.to(self.config.device) for k, v in batch.items()}
+            # FIX: Filter None values before moving to device
+            batch = {k: v.to(self.config.device) for k, v in batch.items() if v is not None}
 
             with torch.amp.autocast('cuda'):
                 adj_logits, binary_logits, embeddings = self.model(batch)

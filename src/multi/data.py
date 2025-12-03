@@ -399,4 +399,5 @@ def collate_fn(batch: list[TransactionSample], config: MultiExpConfig) -> Transa
             result["cp_input_ids"] = collate_tensor("cp_ids", (config.max_cp_length,), torch.long)
             result["cp_attention_mask"] = collate_tensor("cp_mask", (config.max_cp_length,), torch.long)
 
-    return result
+    # FIX: Filter out keys with None values to prevent .to(device) errors in Trainer
+    return {k: v for k, v in result.items() if v is not None} # type: ignore
