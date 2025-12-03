@@ -33,8 +33,14 @@ class TimeAwareSelfAttention(nn.Module):
 
     def forward(self, x, days, padding_mask):
         # x: [Batch, Seq, Hidden]
-        # days: [Batch, Seq]
+        # days: [Batch, Seq] or [Batch, Seq, 1]
         # padding_mask: [Batch, Seq] (True = padding)
+
+        # --- FIX: Ensure days is [Batch, Seq] ---
+        # The data loader usually returns [Batch, Seq, 1] for continuous variables.
+        # We need strict [Batch, Seq] for the broadcasting logic below.
+        if days.dim() == 3:
+            days = days.squeeze(-1)
 
         B, S, H = x.shape
 
@@ -49,11 +55,14 @@ class TimeAwareSelfAttention(nn.Module):
         # Calculate pairwise differences: days[i] - days[j]
         days_exp = days.unsqueeze(2)  # [B, S, 1]
         days_T = days.unsqueeze(1)  # [B, 1, S]
+
         # Use Absolute difference (recurrence is symmetric)
+        # Result is [B, S, S]. We unsqueeze last dim to get [B, S, S, 1] for the Linear layer.
         diff_matrix = torch.abs(days_exp - days_T).unsqueeze(-1)  # [B, S, S, 1]
 
         # Compute Bias
-        # [B, S, S, Heads] -> permute to [B, Heads, S, S]
+        # Net output: [B, S, S, num_heads]
+        # Permute to: [B, num_heads, S, S]
         time_bias = self.time_bias_net(diff_matrix).permute(0, 3, 1, 2)
 
         # Inject Bias
