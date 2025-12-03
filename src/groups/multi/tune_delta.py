@@ -259,7 +259,7 @@ def objective(trial):
         max_depth=trial.suggest_int("depth", 4, 8)
     )
 
-    train_df, _, _ = load_data_for_config(MultiExpConfig())
+    train_df, _, _ = load_data_for_config(MultiExpConfig(downsample=0.1))
     # Subsample for faster tuning if needed
     sys = PairwiseRecurrenceSystem(params)
     return sys.train_and_evaluate(train_df, trial=trial)
