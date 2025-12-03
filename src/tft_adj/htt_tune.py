@@ -118,12 +118,12 @@ def main():
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     if args.study_name is None:
-        study_name = get_next_study_name(storage_url, base_name="hybrid_tune")
+        study_name = get_next_study_name(storage_url, base_name="HTT")
     else:
         study_name = args.study_name
 
-    setup_logging(log_dir=Path('logs/hybrid/'), file_prefix=study_name)
-    logger.info(f"Starting Hybrid Tuning: {study_name}")
+    setup_logging(log_dir=Path('logs/htt/'), file_prefix=study_name)
+    logger.info(f"Starting HTT Tuning: {study_name}")
 
     manager = HybridTuningManager(args, study_name)
 
