@@ -90,8 +90,14 @@ class TuningManager:
         # Standard Tokenized Datasets (Always created as fallback/default)
         logger.info("Initializing Standard (Tokenized) Datasets...")
 
-        self.train_ds_tokenized = MultiTransactionDataset(self.train_df, token_config, tokenizer=self.tokenizer)
-        self.val_ds_tokenized = MultiTransactionDataset(self.val_df, token_config, tokenizer=self.tokenizer)
+        self.train_ds_tokenized = MultiTransactionDataset(
+            self.train_df, token_config,
+            tokenizer=self.tokenizer, embedding_service=self.embedding_service
+        )
+        self.val_ds_tokenized = MultiTransactionDataset(
+            self.val_df, token_config,
+            tokenizer=self.tokenizer, embedding_service=self.embedding_service
+        )
 
         # Cached Embedding Datasets (Lazy load)
         self.train_ds_cached = None
