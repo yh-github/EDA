@@ -88,7 +88,7 @@ def get_dataloader(
             if embedding_service is None:
                 # If not provided, create a temp one (warn: might re-load model)
                 logger.warning("use_cached_embeddings=True but no EmbeddingService provided. Initializing new one.")
-                embedding_service = EmbeddingService.create(EmbeddingService.Params(model_name=config.emb_model, max_length=config.max_text_length))
+                embedding_service = EmbeddingService.create(EmbeddingService.Params(model_name=config.emb_model))
             dataset = MultiTransactionDataset(df.copy(), config, embedding_service=embedding_service)
         else:
             tokenizer = get_tokenizer_cached(config.text_encoder_model)

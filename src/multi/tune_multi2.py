@@ -80,7 +80,10 @@ class TuningManager:
         # Ideally, we check args. However, during tuning, 'unfreeze' might vary.
         # But `use_cached_embeddings` implies a specific architecture choice.
         # We'll allow the TuningManager to hold onto the EmbeddingService if initialized.
-        self.embedding_service = None
+        if self.args.unfreeze_last_n_layers > 0:
+            self.embedding_service = None
+        else:
+            self.embedding_service = EmbeddingService.create(EmbeddingService.Params(model_name=EmbModel.MPNET))
 
         # Standard Tokenized Datasets (Always created as fallback/default)
         logger.info("Initializing Standard (Tokenized) Datasets...")
@@ -178,7 +181,7 @@ class TuningManager:
         defaults = MultiExpConfig()
         emb_model:EmbModel = EmbModel.MPNET #EmbModel(self.args.text_emb)
 
-        # --- SMART LOGIC: Switch to Cached Mode if unfreeze == 0 ---
+        # --- Switch to Cached Mode if unfreeze == 0 ---
         # This gives us massive speedups for frozen trials without penalizing fine-tuning trials
         use_cached = (unfreeze == 0)
 
