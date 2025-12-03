@@ -183,12 +183,12 @@ class TuningManager:
             lr_max = self.args.lr*5
         lr = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
 
-        norm_type = trial.suggest_categorical("normalization_type", ["layer_norm", "rms_norm"])
+        norm_type = "layer_norm" # trial.suggest_categorical("normalization_type", ["layer_norm", "rms_norm"])
         dropout = trial.suggest_float("dropout", 0.3, 0.45)
-        num_layers = trial.suggest_int("num_layers", 4, 8)
-        num_heads = trial.suggest_categorical("num_heads", [4, 8])
-        hidden_dim = trial.suggest_categorical("hidden_dim", [256,512])
-        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.2, 0.4)
+        num_layers = trial.suggest_int("num_layers", 6, 7)
+        num_heads = 8 #trial.suggest_categorical("num_heads", [4, 8])
+        hidden_dim = trial.suggest_categorical("hidden_dim", [512])
+        contrastive_loss_weight = trial.suggest_float("contrastive_loss_weight", 0.2, 0.25)
 
         defaults = MultiExpConfig()
         emb_model:EmbModel = EmbModel.MPNET #EmbModel(self.args.text_emb)
